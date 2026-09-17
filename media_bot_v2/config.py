@@ -8,7 +8,7 @@ this rewrite are documented in spec/SPEC.md.
 
 from __future__ import annotations
 
-from pydantic import Field, field_validator
+from pydantic import AliasChoices, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The old bot's Telethon session file name. Starting this bot with the same
@@ -54,6 +54,18 @@ class Settings(BaseSettings):
     force_ipv4: bool = Field(default=False, validation_alias="FORCE_IPV4")
     potoken: str | None = Field(default=None, validation_alias="POTOKEN")
     youtube_cookies_file: str | None = Field(default=None, validation_alias="YOUTUBE_COOKIES_FILE")
+    youtube_player_client: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_PLAYER_CLIENT", "PLAYER_CLIENT"),
+    )
+    youtube_js_runtimes: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_JS_RUNTIMES", "JS_RUNTIMES"),
+    )
+    youtube_remote_components: str | None = Field(
+        default=None,
+        validation_alias=AliasChoices("YOUTUBE_REMOTE_COMPONENTS", "REMOTE_COMPONENTS"),
+    )
 
     # --- Concurrency limits ---
     workers: int = Field(default=100, validation_alias="WORKERS")

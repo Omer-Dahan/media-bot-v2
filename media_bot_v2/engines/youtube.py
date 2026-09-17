@@ -28,6 +28,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import shutil
 import time
@@ -136,6 +137,81 @@ def check_js_runtime() -> bool:
         ", ".join(_JS_RUNTIME_BINARIES),
     )
     return False
+
+
+DEFAULT_PLAYER_CLIENT_NO_COOKIES = "mweb"
+DEFAULT_PLAYER_CLIENT_WITH_COOKIES = "web,default"
+DEFAULT_JS_RUNTIMES: dict[str, dict] = {"deno": {}, "node": {}}
+
+
+def parse_js_runtimes(
+    runtimes: dict[str, dict] | list[str] | str | None,
+) -> dict[str, dict]:
+    """Parse JS runtimes into the dictionary format yt-dlp expects.
+
+    Defaults to enabling both Deno and Node.js so whichever is present in PATH
+    can solve YouTube signatures. Can be overridden via explicit argument or
+    the YOUTUBE_JS_RUNTIMES / JS_RUNTIMES environment variable.
+    """
+    if runtimes is None:
+        return dict(DEFAULT_JS_RUNTIMES)
+    if isinstance(runtimes, dict):
+        return runtimes
+    if isinstance(runtimes, str):
+        items = [item.strip() for item in runtimes.split(",") if item.strip()]
+    else:
+        items = list(runtimes)
+
+    result: dict[str, dict] = {}
+    for item in items:
+        if ":" in item:
+            name, path = item.split(":", 1)
+            result[name.strip().lower()] = {"path": path.strip()}
+        else:
+            result[item.strip().lower()] = {}
+    return result or dict(DEFAULT_JS_RUNTIMES)
+
+
+def parse_remote_components(
+    components: list[str] | set[str] | dict | str | None,
+) -> list[str] | None:
+    """Parse remote components list for yt-dlp.
+
+    Defaults to empty (None) because yt-dlp-ejs is installed and bundles solver
+    scripts locally, avoiding unneeded network calls to GitHub or npm.
+    """
+    if not components:
+        return None
+    if isinstance(components, (list, set, tuple)):
+        parsed = [str(c).strip() for c in components if str(c).strip()]
+        return parsed or None
+    if isinstance(components, dict):
+        return list(components.keys()) or None
+    if isinstance(components, str):
+        parsed = [c.strip() for c in components.split(",") if c.strip()]
+        return parsed or None
+    return None
+
+
+def resolve_player_client(
+    player_client: str | None = None,
+    *,
+    has_cookies: bool = False,
+) -> str:
+    """Select the Innertube player client sequence according to PO Token guidelines.
+
+    - Without cookies: 'mweb' is recommended when running with a PO token provider.
+    - With cookies: 'web,default' is preferred so cookies/authenticated formats take effect.
+    - Can be overridden via player_client argument or YOUTUBE_PLAYER_CLIENT / PLAYER_CLIENT env var.
+    """
+    if player_client and player_client.strip():
+        return player_client.strip()
+    env_override = os.getenv("YOUTUBE_PLAYER_CLIENT") or os.getenv("PLAYER_CLIENT")
+    if env_override and env_override.strip():
+        return env_override.strip()
+    if has_cookies:
+        return DEFAULT_PLAYER_CLIENT_WITH_COOKIES
+    return DEFAULT_PLAYER_CLIENT_NO_COOKIES
 
 
 _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
@@ -336,6 +412,9 @@ class YouTubeEngine(BaseEngine):
         is_playlist: bool = False,
         playlist_item_limit: int | None = None,
         max_retries: int = 2,
+        player_client: str | None = None,
+        js_runtimes: dict[str, dict] | list[str] | str | None = None,
+        remote_components: list[str] | set[str] | dict | str | None = None,
     ) -> None:
         if playlist_item_limit is not None:
             if playlist_item_limit <= 0:
@@ -350,6 +429,16 @@ class YouTubeEngine(BaseEngine):
         self._is_playlist = is_playlist
         self._playlist_item_limit = playlist_item_limit
         self._max_retries = max_retries
+        self._player_client = resolve_player_client(
+            player_client,
+            has_cookies=bool(cookies_file),
+        )
+        env_js = os.getenv("YOUTUBE_JS_RUNTIMES") or os.getenv("JS_RUNTIMES")
+        self._js_runtimes = parse_js_runtimes(js_runtimes if js_runtimes is not None else env_js)
+        env_remote = os.getenv("YOUTUBE_REMOTE_COMPONENTS") or os.getenv("REMOTE_COMPONENTS")
+        self._remote_components = parse_remote_components(
+            remote_components if remote_components is not None else env_remote
+        )
 
     def matches(self, url: str) -> bool:
         return matches_youtube_url(url)
@@ -373,17 +462,26 @@ class YouTubeEngine(BaseEngine):
             "retries": 3,
             "fragment_retries": 3,
             "ignoreerrors": "only_download" if is_playlist_request else False,
+            "js_runtimes": self._js_runtimes,
         }
+        if self._remote_components:
+            opts["remote_components"] = self._remote_components
         if is_playlist_request and self._playlist_item_limit is not None:
             opts["playlistend"] = self._playlist_item_limit
         if self._force_ipv4:
             opts["source_address"] = "0.0.0.0"
         if self._cookies_file:
             opts["cookiefile"] = self._cookies_file
+
+        client = self._player_client
+        youtube_args = [f"player_client={client}"]
         if self._po_token:
-            opts["extractor_args"] = {
-                "youtube": ["player-client=web,default", f"po_token=web+{self._po_token}"]
-            }
+            if "+" in self._po_token:
+                youtube_args.append(f"po_token={self._po_token}")
+            else:
+                primary_client = client.split(",")[0].strip()
+                youtube_args.append(f"po_token={primary_client}+{self._po_token}")
+        opts["extractor_args"] = {"youtube": youtube_args}
         return opts
 
     def _make_progress_hook(self, loop: asyncio.AbstractEventLoop):

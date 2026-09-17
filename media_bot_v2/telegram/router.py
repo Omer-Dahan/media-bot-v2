@@ -70,6 +70,9 @@ def register_handlers(
     youtube_cookies_file: str | None = None,
     potoken: str | None = None,
     video_cache_store: VideoCacheStore | None = None,
+    youtube_player_client: str | None = None,
+    youtube_js_runtimes: str | None = None,
+    youtube_remote_components: str | None = None,
 ) -> None:
     quality_store = QualitySelectionStore()
     direct_engine = DirectEngine(max_download_size=max_download_size)
@@ -185,6 +188,9 @@ def register_handlers(
                 po_token=potoken,
                 is_playlist=is_playlist,
                 playlist_item_limit=playlist_limit,
+                player_client=youtube_player_client,
+                js_runtimes=youtube_js_runtimes,
+                remote_components=youtube_remote_components,
             )
 
             media_ref = extract_video_id(url) or url

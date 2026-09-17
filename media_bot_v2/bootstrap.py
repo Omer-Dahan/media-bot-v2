@@ -60,6 +60,9 @@ def main() -> None:
         youtube_cookies_file=settings.youtube_cookies_file,
         potoken=settings.potoken,
         video_cache_store=video_cache_store,
+        youtube_player_client=settings.youtube_player_client,
+        youtube_js_runtimes=settings.youtube_js_runtimes,
+        youtube_remote_components=settings.youtube_remote_components,
     )
 
     logger.info("Starting media-bot-v2")

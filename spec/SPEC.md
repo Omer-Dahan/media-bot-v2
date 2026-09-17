@@ -103,14 +103,11 @@ is not something the rewrite can work around in code.
    they expire. The new bot inherits the same requirement; there is no
    code-only substitute for logged-in cookies on IG/TikTok content that
    requires auth.
-5. **YouTube PO token, if required.** `BROWSERS` and `POTOKEN`
-   (`generic.py:832,837` in the old bot) exist because YouTube's bot
-   detection increasingly requires a PO token or a real browser cookie jar
-   to unlock certain formats/qualities. Whether this is currently required
-   depends on YouTube's enforcement at deploy time — this needs to be
-   re-verified against current yt-dlp guidance when M2 starts, not assumed
-   from the old bot's setup, since PO token requirements have shifted over
-   time.
+5. **YouTube PO token and yt-dlp arguments.**
+   - `player_client`: defaults to `mweb` without cookies (the officially recommended client when using PO token providers), and includes `web,default` when cookies are configured so authenticated formats take effect. Overridable via `YOUTUBE_PLAYER_CLIENT` / `PLAYER_CLIENT`.
+   - `POTOKEN`: passed as `po_token` extractor argument to yt-dlp. If client is `mweb` and no prefix is provided, it is formatted for `mweb` (`mweb+<token>`); with cookies it uses `web+<token>`.
+   - `js_runtimes`: configured to enable both Deno and Node.js (`{"deno": {}, "node": {}}`), so whichever runtime is installed in PATH can solve signature n-challenges. Overridable via `YOUTUBE_JS_RUNTIMES` / `JS_RUNTIMES`.
+   - `remote_components`: defaults to empty (no runtime fetching from GitHub/npm) because `yt-dlp-ejs` is installed as a local package and bundles the solver scripts locally. Configurable via `YOUTUBE_REMOTE_COMPONENTS` / `REMOTE_COMPONENTS`.
 6. **ffmpeg binary in `PATH`.** Required for probing, thumbnailing, and the
    >2GB video-split logic. Same requirement as the old bot
    (`README.md:151`).

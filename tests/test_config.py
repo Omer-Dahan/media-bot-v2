@@ -72,6 +72,9 @@ def test_youtube_and_concurrency_defaults(monkeypatch):
     assert settings.force_ipv4 is False
     assert settings.potoken is None
     assert settings.youtube_cookies_file is None
+    assert settings.youtube_player_client is None
+    assert settings.youtube_js_runtimes is None
+    assert settings.youtube_remote_components is None
     assert settings.workers == 100
     assert settings.user_workers == 2
 
@@ -83,11 +86,30 @@ def test_youtube_and_concurrency_custom_values(monkeypatch):
     monkeypatch.setenv("FORCE_IPV4", "true")
     monkeypatch.setenv("POTOKEN", "po_token_value")
     monkeypatch.setenv("YOUTUBE_COOKIES_FILE", "/path/to/cookies.txt")
+    monkeypatch.setenv("YOUTUBE_PLAYER_CLIENT", "android,web")
+    monkeypatch.setenv("YOUTUBE_JS_RUNTIMES", "node")
+    monkeypatch.setenv("YOUTUBE_REMOTE_COMPONENTS", "ejs:github")
     monkeypatch.setenv("WORKERS", "50")
     monkeypatch.setenv("USER_WORKERS", "4")
     settings = Settings(_env_file=None)
     assert settings.force_ipv4 is True
     assert settings.potoken == "po_token_value"
     assert settings.youtube_cookies_file == "/path/to/cookies.txt"
+    assert settings.youtube_player_client == "android,web"
+    assert settings.youtube_js_runtimes == "node"
+    assert settings.youtube_remote_components == "ejs:github"
     assert settings.workers == 50
     assert settings.user_workers == 4
+
+
+def test_youtube_settings_alias_choices(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.setenv("PLAYER_CLIENT", "mweb")
+    monkeypatch.setenv("JS_RUNTIMES", "deno,node")
+    monkeypatch.setenv("REMOTE_COMPONENTS", "ejs:npm")
+    settings = Settings(_env_file=None)
+    assert settings.youtube_player_client == "mweb"
+    assert settings.youtube_js_runtimes == "deno,node"
+    assert settings.youtube_remote_components == "ejs:npm"

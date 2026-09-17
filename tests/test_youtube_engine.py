@@ -15,6 +15,9 @@ import yt_dlp
 
 from media_bot_v2.engines.base import DownloadTooLargeError
 from media_bot_v2.engines.youtube import (
+    DEFAULT_JS_RUNTIMES,
+    DEFAULT_PLAYER_CLIENT_NO_COOKIES,
+    DEFAULT_PLAYER_CLIENT_WITH_COOKIES,
     YouTubeDownloadError,
     YouTubeEngine,
     build_format_selector,
@@ -23,6 +26,9 @@ from media_bot_v2.engines.youtube import (
     format_progress_text,
     is_playlist_url,
     is_retryable_error,
+    parse_js_runtimes,
+    parse_remote_components,
+    resolve_player_client,
 )
 
 # --- pure helpers -----------------------------------------------------
@@ -275,7 +281,11 @@ async def test_download_omits_cookies_and_po_token_by_default(tmp_path):
     await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
 
     assert "cookiefile" not in _FakeYoutubeDL.calls[0]
-    assert "extractor_args" not in _FakeYoutubeDL.calls[0]
+    assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
+        "youtube": ["player_client=mweb"]
+    }
+    assert _FakeYoutubeDL.calls[0]["js_runtimes"] == {"deno": {}, "node": {}}
+    assert "remote_components" not in _FakeYoutubeDL.calls[0]
 
 
 async def test_download_passes_cookies_file_when_provided(tmp_path):
@@ -288,6 +298,9 @@ async def test_download_passes_cookies_file_when_provided(tmp_path):
     await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
 
     assert _FakeYoutubeDL.calls[0]["cookiefile"] == cookies_path
+    assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
+        "youtube": ["player_client=web,default"]
+    }
 
 
 async def test_download_passes_po_token_when_provided(tmp_path):
@@ -299,8 +312,123 @@ async def test_download_passes_po_token_when_provided(tmp_path):
     await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
 
     assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
-        "youtube": ["player-client=web,default", "po_token=web+my_po_token_123"]
+        "youtube": ["player_client=mweb", "po_token=mweb+my_po_token_123"]
     }
+
+
+async def test_download_passes_po_token_with_cookies(tmp_path):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    cookies_path = str(tmp_path / "cookies.txt")
+    engine = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+        cookies_file=cookies_path,
+        po_token="my_po_token_123",
+    )
+
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+
+    assert _FakeYoutubeDL.calls[0]["cookiefile"] == cookies_path
+    assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
+        "youtube": ["player_client=web,default", "po_token=web+my_po_token_123"]
+    }
+
+
+async def test_download_preserves_prefixed_po_token(tmp_path):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+        po_token="web.gvs+custom_token_val",
+    )
+
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+
+    assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
+        "youtube": ["player_client=mweb", "po_token=web.gvs+custom_token_val"]
+    }
+
+
+async def test_download_player_client_override(tmp_path, monkeypatch):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+        player_client="ios",
+    )
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
+        "youtube": ["player_client=ios"]
+    }
+
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    monkeypatch.setenv("YOUTUBE_PLAYER_CLIENT", "android,web")
+    engine_env = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+    )
+    await engine_env.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    assert _FakeYoutubeDL.calls[1]["extractor_args"] == {
+        "youtube": ["player_client=android,web"]
+    }
+
+
+async def test_download_js_runtimes_override(tmp_path, monkeypatch):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+        js_runtimes="node:/usr/local/bin/node",
+    )
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    assert _FakeYoutubeDL.calls[0]["js_runtimes"] == {"node": {"path": "/usr/local/bin/node"}}
+
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    monkeypatch.setenv("YOUTUBE_JS_RUNTIMES", "node")
+    engine_env = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+    )
+    await engine_env.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    assert _FakeYoutubeDL.calls[1]["js_runtimes"] == {"node": {}}
+
+
+async def test_download_remote_components_override(tmp_path, monkeypatch):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+        remote_components="ejs:github",
+    )
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    assert _FakeYoutubeDL.calls[0]["remote_components"] == ["ejs:github"]
+
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    monkeypatch.setenv("YOUTUBE_REMOTE_COMPONENTS", "ejs:npm,ejs:github")
+    engine_env = YouTubeEngine(
+        quality="720",
+        max_download_size=1_000_000_000,
+    )
+    await engine_env.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    assert _FakeYoutubeDL.calls[1]["remote_components"] == ["ejs:npm", "ejs:github"]
+
+
+def test_pure_helpers_player_client_and_js_runtimes():
+    assert resolve_player_client(has_cookies=False) == DEFAULT_PLAYER_CLIENT_NO_COOKIES
+    assert resolve_player_client(has_cookies=True) == DEFAULT_PLAYER_CLIENT_WITH_COOKIES
+    assert resolve_player_client("custom") == "custom"
+
+    assert parse_js_runtimes(None) == DEFAULT_JS_RUNTIMES
+    assert parse_js_runtimes("node") == {"node": {}}
+    assert parse_js_runtimes(["deno", "node:my_path"]) == {
+        "deno": {},
+        "node": {"path": "my_path"},
+    }
+
+    assert parse_remote_components(None) is None
+    assert parse_remote_components("") is None
+    assert parse_remote_components("ejs:github, ejs:npm") == ["ejs:github", "ejs:npm"]
+
 
 
 async def test_download_retries_network_error_and_then_succeeds(tmp_path):
