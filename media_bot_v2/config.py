@@ -50,6 +50,15 @@ class Settings(BaseSettings):
     log_max_bytes: int = Field(default=10 * 1024 * 1024, validation_alias="LOG_MAX_BYTES")
     log_backup_count: int = Field(default=5, validation_alias="LOG_BACKUP_COUNT")
 
+    # --- YouTube / Network options ---
+    force_ipv4: bool = Field(default=False, validation_alias="FORCE_IPV4")
+    potoken: str | None = Field(default=None, validation_alias="POTOKEN")
+    youtube_cookies_file: str | None = Field(default=None, validation_alias="YOUTUBE_COOKIES_FILE")
+
+    # --- Concurrency limits ---
+    workers: int = Field(default=100, validation_alias="WORKERS")
+    user_workers: int = Field(default=2, validation_alias="USER_WORKERS")
+
     # --- Download limits (not user-configurable, kept as constants for clarity) ---
     tg_normal_max_size: int = 2000 * 1024 * 1024
     max_download_size: int = 4 * 1024 * 1024 * 1024

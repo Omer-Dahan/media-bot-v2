@@ -62,3 +62,32 @@ def test_db_dsn_defaults_to_local_sqlite(monkeypatch):
     monkeypatch.delenv("DB_DSN", raising=False)
     settings = Settings(_env_file=None)
     assert settings.db_dsn == "sqlite:///database.sqlite3"
+
+
+def test_youtube_and_concurrency_defaults(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    settings = Settings(_env_file=None)
+    assert settings.force_ipv4 is False
+    assert settings.potoken is None
+    assert settings.youtube_cookies_file is None
+    assert settings.workers == 100
+    assert settings.user_workers == 2
+
+
+def test_youtube_and_concurrency_custom_values(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.setenv("FORCE_IPV4", "true")
+    monkeypatch.setenv("POTOKEN", "po_token_value")
+    monkeypatch.setenv("YOUTUBE_COOKIES_FILE", "/path/to/cookies.txt")
+    monkeypatch.setenv("WORKERS", "50")
+    monkeypatch.setenv("USER_WORKERS", "4")
+    settings = Settings(_env_file=None)
+    assert settings.force_ipv4 is True
+    assert settings.potoken == "po_token_value"
+    assert settings.youtube_cookies_file == "/path/to/cookies.txt"
+    assert settings.workers == 50
+    assert settings.user_workers == 4

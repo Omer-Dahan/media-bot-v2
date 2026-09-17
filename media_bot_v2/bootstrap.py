@@ -10,11 +10,14 @@ from __future__ import annotations
 import logging
 from pathlib import Path
 
+from media_bot_v2.cache.video_cache import VideoCacheStore
 from media_bot_v2.config import load_settings
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.session import build_session_factory
+from media_bot_v2.engines.youtube import check_js_runtime
 from media_bot_v2.logging_setup import configure_logging
 from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram.client import build_client
 from media_bot_v2.telegram.router import register_handlers
 
@@ -24,6 +27,7 @@ logger = logging.getLogger(__name__)
 def main() -> None:
     settings = load_settings()
     configure_logging(settings.log_file, settings.log_max_bytes, settings.log_backup_count)
+    check_js_runtime()
 
     session_factory = build_session_factory(settings.db_dsn)
     credits_service = CreditsService(
@@ -36,6 +40,11 @@ def main() -> None:
         credits_service=credits_service,
         download_dir=Path(settings.download_dir),
     )
+    limiter = ConcurrencyLimiter(
+        global_limit=settings.workers,
+        per_user_limit=settings.user_workers,
+    )
+    video_cache_store = VideoCacheStore(session_factory)
 
     client = build_client(settings, session_name=settings.session_name)
     register_handlers(
@@ -46,6 +55,11 @@ def main() -> None:
         pipeline=pipeline,
         archive_channel=settings.archive_channel,
         max_download_size=settings.max_download_size,
+        limiter=limiter,
+        force_ipv4=settings.force_ipv4,
+        youtube_cookies_file=settings.youtube_cookies_file,
+        potoken=settings.potoken,
+        video_cache_store=video_cache_store,
     )
 
     logger.info("Starting media-bot-v2")

@@ -92,8 +92,16 @@ DOWNLOAD_STARTED = "בקשת ההורדה התקבלה..."
 DOWNLOADING = "מוריד..."
 PROCESSING = "מעבד..."
 UPLOADING = "מעלה לטלגרם..."
+DOWNLOAD_FROM_CACHE = "נמצא במטמון, שולח..."
 DOWNLOAD_DONE = "הושלם ✅"
 DOWNLOAD_FAILED = "❌ ההורדה נכשלה. נסה שוב או שלח קישור אחר."
+
+YOUTUBE_LINK_EXPIRED = "⏰ תפוגת קישור: יש לשלוח את קישור היוטיוב שוב ולבחור איכות מחדש."
+YOUTUBE_QUEUE_WAIT = "⏳ יש עומס הורדות כרגע, הבקשה שלך בתור..."
+YOUTUBE_JS_RUNTIME_MISSING = (
+    "⚠️ הורדות יוטיוב עלולות להיכשל: לא נמצא JavaScript runtime בשרת (Node.js או Deno). "
+    "יש להתקין Node.js (גרסה 22+) או Deno (גרסה 2.3+) ולוודא שהם נגישים ב-PATH."
+)
 
 PING_MESSAGE = "בודק פינג..."
 PING_RESULT = "פינג: {ms} מילישניות"

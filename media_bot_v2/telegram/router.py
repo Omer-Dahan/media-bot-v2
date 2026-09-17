@@ -7,13 +7,15 @@ engine implemented end-to-end in M1 (spec/SPEC.md M1 item 7).
 from __future__ import annotations
 
 import logging
+import math
 import re
 import time
 
 from sqlalchemy.orm import sessionmaker
 from telethon import Button, TelegramClient, events
-from telethon.errors import MessageNotModifiedError
+from telethon.errors import MessageNotModifiedError, RPCError
 
+from media_bot_v2.cache.video_cache import VideoCacheStore, compute_cache_key
 from media_bot_v2.credits.exceptions import (
     BandwidthExhaustedException,
     CreditsExhaustedException,
@@ -21,8 +23,16 @@ from media_bot_v2.credits.exceptions import (
 )
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.session import session_scope
+from media_bot_v2.engines.base import DownloadTooLargeError
 from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.engines.youtube import (
+    YouTubeDownloadError,
+    YouTubeEngine,
+    extract_video_id,
+    is_playlist_url,
+)
 from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import settings_menu, texts
 from media_bot_v2.telegram.callback_data import decode
 from media_bot_v2.telegram.progress import MessageProgressReporter
@@ -55,9 +65,18 @@ def register_handlers(
     pipeline: DownloadPipeline,
     archive_channel: str | None,
     max_download_size: int,
+    limiter: ConcurrencyLimiter | None = None,
+    force_ipv4: bool = False,
+    youtube_cookies_file: str | None = None,
+    potoken: str | None = None,
+    video_cache_store: VideoCacheStore | None = None,
 ) -> None:
     quality_store = QualitySelectionStore()
     direct_engine = DirectEngine(max_download_size=max_download_size)
+    if limiter is None:
+        limiter = ConcurrencyLimiter(global_limit=100, per_user_limit=2)
+    if video_cache_store is None:
+        video_cache_store = VideoCacheStore(session_factory)
 
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
@@ -118,11 +137,74 @@ def register_handlers(
 
     @client.on(events.CallbackQuery(pattern=rb"^ytq:"))
     async def quality_pick_handler(event: events.CallbackQuery.Event) -> None:
+        parts = decode(event.data)
+        if len(parts) != 3 or parts[0] != "ytq":
+            await event.answer()
+            return
+
+        quality = parts[1]
+        url_hash = parts[2]
+        url = quality_store.get(url_hash)
+        if not url:
+            await event.answer(texts.YOUTUBE_LINK_EXPIRED, alert=True)
+            return
+
         with session_scope(session_factory) as session:
             settings_menu.get_or_create_user(
                 session, event.sender_id, first_name=None, username=None, free_download=free_download
             )
-        await event.answer(texts.YOUTUBE_NOT_YET_IMPLEMENTED, alert=True)
+
+        await event.answer()
+        try:
+            await event.edit(buttons=None)
+        except MessageNotModifiedError:
+            pass
+        except (RPCError, ConnectionError, TimeoutError, OSError):
+            logger.debug("Failed to clear quality buttons", exc_info=True)
+
+        message = await event.respond(texts.DOWNLOAD_STARTED)
+        progress = MessageProgressReporter(message)
+        uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+
+        total_credits = credits_service.get_total_credits(event.sender_id)
+        playlist_limit = (
+            int(total_credits) if math.isfinite(total_credits) and is_playlist_url(url) else None
+        )
+
+        engine = YouTubeEngine(
+            quality=quality,
+            max_download_size=max_download_size,
+            progress=progress,
+            force_ipv4=force_ipv4,
+            cookies_file=youtube_cookies_file,
+            po_token=potoken,
+            playlist_item_limit=playlist_limit,
+        )
+
+        media_ref = extract_video_id(url) or url
+        cache_key = compute_cache_key(media_ref, quality)
+
+        async def on_wait() -> None:
+            await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+
+        try:
+            async with limiter.slot(event.sender_id, on_wait=on_wait):
+                await pipeline.run(
+                    user_id=event.sender_id,
+                    url=url,
+                    engine=engine,
+                    uploader=uploader,
+                    progress=progress,
+                    cache=video_cache_store,
+                    cache_key=cache_key,
+                    archive_channel=archive_channel,
+                )
+        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+            await progress.update(str(exc))
+        except (YouTubeDownloadError, DownloadTooLargeError) as exc:
+            await progress.update(str(exc))
+        except Exception:
+            logger.exception("YouTube download failed for url=%s", url)
 
     @client.on(events.NewMessage())
     async def url_handler(event: events.NewMessage.Event) -> None:
@@ -157,15 +239,25 @@ def register_handlers(
         message = await event.respond(texts.DOWNLOAD_STARTED)
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+
+        async def on_wait() -> None:
+            await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+
         try:
-            await pipeline.run(
-                user_id=event.sender_id,
-                url=url,
-                engine=direct_engine,
-                uploader=uploader,
-                progress=progress,
-            )
+            async with limiter.slot(event.sender_id, on_wait=on_wait):
+                await pipeline.run(
+                    user_id=event.sender_id,
+                    url=url,
+                    engine=direct_engine,
+                    uploader=uploader,
+                    progress=progress,
+                    cache=video_cache_store,
+                    cache_key=compute_cache_key(url, "direct"),
+                    archive_channel=archive_channel,
+                )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+            await progress.update(str(exc))
+        except DownloadTooLargeError as exc:
             await progress.update(str(exc))
         except Exception:
             logger.exception("Direct download failed for url=%s", url)
