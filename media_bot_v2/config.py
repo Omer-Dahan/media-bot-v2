@@ -67,6 +67,29 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("YOUTUBE_REMOTE_COMPONENTS", "REMOTE_COMPONENTS"),
     )
 
+    # --- Providers & Extraction Layer (M3) ---
+    tiktok_cookies_file: str | None = Field(default=None, validation_alias="TIKTOK_COOKIES_FILE")
+    tiktok_providers: str = Field(
+        default="tikwm,tikdownloader,musicaldown,cobalt",
+        validation_alias="TIKTOK_PROVIDERS",
+    )
+    youtube_providers: str = Field(
+        default="ytmp3,cobalt",
+        validation_alias="YOUTUBE_PROVIDERS",
+    )
+    disabled_providers: str = Field(
+        default="",
+        validation_alias="DISABLED_PROVIDERS",
+    )
+    cobalt_url: str | None = Field(default=None, validation_alias="COBALT_URL")
+    ytmp3_api_key: str = Field(
+        default="9b0ed5dab31616027ad7154140b0272d",
+        validation_alias="YTMP3_API_KEY",
+    )
+    provider_timeout: float = Field(default=15.0, validation_alias="PROVIDER_TIMEOUT")
+    provider_failure_threshold: int = Field(default=3, validation_alias="PROVIDER_FAILURE_THRESHOLD")
+    provider_cooldown_seconds: int = Field(default=300, validation_alias="PROVIDER_COOLDOWN_SECONDS")
+
     # --- Concurrency limits ---
     workers: int = Field(default=100, validation_alias="WORKERS")
     user_workers: int = Field(default=2, validation_alias="USER_WORKERS")
@@ -89,6 +112,19 @@ class Settings(BaseSettings):
     @property
     def owner_ids(self) -> list[int]:
         return [int(i.strip()) for i in self.owner.split(",") if i.strip().isdigit()]
+
+    @property
+    def parsed_tiktok_providers(self) -> list[str]:
+        return [p.strip().lower() for p in self.tiktok_providers.split(",") if p.strip()]
+
+    @property
+    def parsed_youtube_providers(self) -> list[str]:
+        return [p.strip().lower() for p in self.youtube_providers.split(",") if p.strip()]
+
+    @property
+    def parsed_disabled_providers(self) -> set[str]:
+        return {p.strip().lower() for p in self.disabled_providers.split(",") if p.strip()}
+
 
 
 def load_settings() -> Settings:
