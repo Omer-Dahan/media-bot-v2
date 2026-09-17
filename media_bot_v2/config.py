@@ -21,6 +21,11 @@ class Settings(BaseSettings):
     bot_token: str = Field(validation_alias="BOT_TOKEN")
     owner: str = Field(default="", validation_alias="OWNER")
 
+    # Telethon session file name. MUST differ from the old bot's ("main"), or
+    # starting this bot would corrupt/steal the old bot's live MTProto
+    # session while it's running in production against the same bot token.
+    session_name: str = Field(default="v2", validation_alias="SESSION_NAME")
+
     # --- Database (same DSN/schema as the old bot) ---
     db_dsn: str = Field(default="sqlite:///database.sqlite3", validation_alias="DB_DSN")
 
@@ -31,6 +36,9 @@ class Settings(BaseSettings):
 
     # --- Archive channel ---
     archive_channel: str | None = Field(default=None, validation_alias="ARCHIVE_CHANNEL")
+
+    # --- Local storage for in-flight downloads (deleted after each upload) ---
+    download_dir: str = Field(default="downloads", validation_alias="DOWNLOAD_DIR")
 
     # --- Logging ---
     log_file: str = Field(default="logs/bot.log", validation_alias="LOG_FILE")

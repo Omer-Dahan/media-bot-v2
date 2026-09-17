@@ -31,6 +31,16 @@ def test_owner_ids_empty_when_unset(monkeypatch):
     assert settings.owner_ids == []
 
 
+def test_session_name_defaults_to_v2_not_the_old_bots_main(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.delenv("SESSION_NAME", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.session_name == "v2"
+    assert settings.session_name != "main"
+
+
 def test_db_dsn_defaults_to_local_sqlite(monkeypatch):
     monkeypatch.setenv("APP_ID", "1")
     monkeypatch.setenv("APP_HASH", "h")
