@@ -9,10 +9,9 @@ audit this rewrite is ported from.
 
 ## Status
 
-M1: skeleton, DB schema parity, credits/quota logic, the Telethon command/settings
-UI, and one download engine (direct HTTP(S) links) implemented end-to-end -
-download, split over 2GB, upload, credit deduction, disk cleanup. YouTube, TikTok,
-and Instagram engines are UI-only stubs; the real engines land in M2/M3.
+M1: skeleton, DB schema parity, credits/quota logic, the Telethon command/settings UI, and direct HTTP(S) links engine.
+M2: YouTube engine (yt-dlp) with quality menu, concurrency limiting, and caching.
+M3: extraction provider layer (`media_bot_v2/providers/`) with adaptive DB health tracking (`provider_health` table) and automatic fallback. TikTok engine implemented end-to-end (tikwm -> tikdownloader -> musicaldown -> cobalt -> local yt-dlp). YouTube fallback wired (yt-dlp -> ytmp3 -> cobalt). Detailed provider research documented in `docs/providers.md`.
 
 **The bot has not been started and has not connected to Telegram at any point
 during this milestone.** The old bot is running in production against the same
@@ -102,16 +101,33 @@ media_bot_v2/
   logging_setup.py       # rotating structured file logs
   bootstrap.py            # entrypoint wiring (not run at import time)
   pipeline.py              # download -> split -> upload -> charge -> cleanup
-  db/                       # SQLAlchemy models (same schema as the old bot) + session
+  db/                       # SQLAlchemy models (same schema + provider_health) + session
   credits/                  # credit/quota service ported from the old bot's logic
+  providers/                # external extraction providers (tikwm, musicaldown, ytmp3, cobalt)
   telegram/                 # Telethon client bootstrap, router, menus, callback_data
-  engines/                  # per-platform download engines (direct done, rest M2+)
+  engines/                  # per-platform engines (direct, youtube, tiktok)
   queue/                    # concurrency limiting
   upload/                   # large-file splitting for uploads over 2GB
+docs/
+  providers.md              # verified endpoints, request flows, and limitations reference
 tests/                      # pytest, no live Telegram/DB connections
 spec/SPEC.md                # full specification
 spec/INVENTORY.md           # old-bot audit (keep/rebuild/drop per item)
 ```
+
+## Provider Layer & Health Tracking (M3)
+
+- **Adaptive Ordering & Cooldown:** Provider performance is tracked in the `provider_health` table. The `order_for()` query dynamically sorts providers by highest success rate and lowest latency. Providers exceeding `PROVIDER_FAILURE_THRESHOLD` consecutive failures are temporarily suppressed for `PROVIDER_COOLDOWN_SECONDS` and retried after expiry.
+- **Provider Fallback:** If the primary provider or engine fails, the bot attempts subsequent providers in priority order before reporting an error to the user.
+- **Configuration Variables:**
+  - `TIKTOK_PROVIDERS`: Comma-separated order for TikTok (default: `tikwm,tikdownloader,musicaldown,cobalt`).
+  - `YOUTUBE_PROVIDERS`: Comma-separated order for YouTube fallbacks (default: `ytmp3,cobalt`).
+  - `DISABLED_PROVIDERS`: Comma-separated list of globally disabled providers.
+  - `COBALT_URL`: Optional URL to a public or private Cobalt instance without Turnstile.
+  - `YTMP3_API_KEY`: Fixed API key for ytmp3.gl (gamma.gammacloud.net).
+  - `PROVIDER_TIMEOUT`: HTTP request timeout per provider in seconds (default: 15.0).
+  - `PROVIDER_FAILURE_THRESHOLD`: Number of consecutive failures to trigger cooldown (default: 3).
+  - `PROVIDER_COOLDOWN_SECONDS`: Cooldown duration in seconds before retry (default: 300).
 
 ## Design decisions worth knowing
 
@@ -127,3 +143,6 @@ spec/INVENTORY.md           # old-bot audit (keep/rebuild/drop per item)
   instead of the old bot's bare `Exception` (`src/database/model.py:244-245`).
 - Progress is reported through **one message, edited in place**, never a
   stream of new messages per download phase.
+- **`provider_health` is a v2-only table**: Created with `IF NOT EXISTS` on startup,
+  it does not alter or conflict with the shared legacy production tables.
+
