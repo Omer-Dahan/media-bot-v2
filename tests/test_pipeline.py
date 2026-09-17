@@ -9,6 +9,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from media_bot_v2.cache.video_cache import VideoCacheStore, compute_cache_key
 from media_bot_v2.credits.exceptions import CreditsExhaustedException
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
@@ -52,23 +53,49 @@ class _PartialWriteFailingEngine(BaseEngine):
         raise RuntimeError("boom: connection dropped mid-download")
 
 
+class _FakeMessage:
+    def __init__(self, id: int, label: str):
+        self.id = id
+        self.label = label
+
+    def __repr__(self):
+        return self.label
+
+
 class _FakeUploader:
-    def __init__(self, *, fail_on_part: int | None = None, fail_archive: bool = False):
+    def __init__(
+        self,
+        *,
+        fail_on_part: int | None = None,
+        fail_archive: bool = False,
+        fail_cached_send: bool = False,
+    ):
         self.sent: list[Path] = []
         self.archived: list[object] = []
+        self.cached_sends: list[tuple[str, list[int]]] = []
         self._fail_on_part = fail_on_part
         self._fail_archive = fail_archive
+        self._fail_cached_send = fail_cached_send
+        self._next_archive_id = 1000
 
     async def send_file(self, path: Path, *, caption=None):
         if self._fail_on_part is not None and len(self.sent) == self._fail_on_part:
             raise RuntimeError("boom: upload failed")
         self.sent.append(path)
-        return f"message-for-{path.name}"
+        return _FakeMessage(len(self.sent), f"message-for-{path.name}")
 
-    async def forward_to_archive(self, message) -> None:
+    async def forward_to_archive(self, message):
         if self._fail_archive:
             raise RuntimeError("boom: archive channel unreachable")
         self.archived.append(message)
+        self._next_archive_id += 1
+        return _FakeMessage(self._next_archive_id, f"archived-{message}")
+
+    async def send_cached(self, archive_chat: str, message_ids: list[int]):
+        if self._fail_cached_send:
+            raise RuntimeError("boom: cached message no longer exists")
+        self.cached_sends.append((archive_chat, message_ids))
+        return _FakeMessage(9999, "resent-from-cache")
 
 
 class _FakeProgress:
@@ -93,6 +120,11 @@ def session_factory():
 @pytest.fixture
 def credits_service(session_factory):
     return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=2_000_000_000)
+
+
+@pytest.fixture
+def cache_store(session_factory):
+    return VideoCacheStore(session_factory)
 
 
 async def test_successful_download_charges_credits_and_deletes_local_file(
@@ -230,3 +262,141 @@ async def test_archive_forward_failure_does_not_fail_download_or_undo_charge(
         assert user.free == 2  # still charged - the user got the file
 
     assert progress.updates[-1] == "הושלם ✅"
+
+
+async def test_successful_download_writes_a_cache_entry_when_archive_channel_configured(
+    session_factory, credits_service, cache_store, tmp_path
+):
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    key = compute_cache_key("video123", "720")
+
+    await pipeline.run(
+        user_id=1,
+        url="http://x",
+        engine=_FakeEngine(filename="clip.mp4"),
+        uploader=uploader,
+        progress=_FakeProgress(),
+        cache=cache_store,
+        cache_key=key,
+        archive_channel="@archive",
+    )
+
+    entry = cache_store.get(key)
+    assert entry is not None
+    assert entry.archive_chat == "@archive"
+    assert entry.title == "clip.mp4"
+
+
+async def test_no_cache_entry_written_without_an_archive_channel(
+    session_factory, credits_service, cache_store, tmp_path
+):
+    """Caching leans entirely on the archive-channel forward for a stable
+    resend source - without one configured there is nothing to cache from."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    key = compute_cache_key("video123", "720")
+
+    await pipeline.run(
+        user_id=1,
+        url="http://x",
+        engine=_FakeEngine(),
+        uploader=uploader,
+        progress=_FakeProgress(),
+        cache=cache_store,
+        cache_key=key,
+        archive_channel=None,
+    )
+
+    assert cache_store.get(key) is None
+
+
+async def test_no_cache_entry_written_when_archive_forward_fails(
+    session_factory, credits_service, cache_store, tmp_path
+):
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader(fail_archive=True)
+    key = compute_cache_key("video123", "720")
+
+    await pipeline.run(
+        user_id=1,
+        url="http://x",
+        engine=_FakeEngine(),
+        uploader=uploader,
+        progress=_FakeProgress(),
+        cache=cache_store,
+        cache_key=key,
+        archive_channel="@archive",
+    )
+
+    assert cache_store.get(key) is None
+
+
+async def test_cache_hit_resends_without_calling_the_engine_and_charges_no_credits(
+    session_factory, credits_service, cache_store, tmp_path
+):
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    key = compute_cache_key("video123", "720")
+    cache_store.put(key, archive_chat="@archive", message_ids=[42, 43], title="Cached Clip")
+
+    class _EngineThatMustNotBeCalled(BaseEngine):
+        def matches(self, url: str) -> bool:
+            return True
+
+        async def download(self, url: str, *, dest_dir: Path):
+            raise AssertionError("engine.download must not run on a cache hit")
+
+    progress = _FakeProgress()
+    await pipeline.run(
+        user_id=1,
+        url="http://x",
+        engine=_EngineThatMustNotBeCalled(),
+        uploader=uploader,
+        progress=progress,
+        cache=cache_store,
+        cache_key=key,
+        archive_channel="@archive",
+    )
+
+    assert uploader.cached_sends == [("@archive", [42, 43])]
+    assert uploader.sent == []  # nothing was freshly uploaded
+
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 3  # cache hits are free - no credit deducted
+
+    assert progress.updates[-1] == "הושלם ✅"
+
+
+async def test_cache_hit_that_fails_to_resend_deletes_the_stale_entry_and_downloads_fresh(
+    session_factory, credits_service, cache_store, tmp_path
+):
+    """A cache entry can go stale (the archived message was deleted, the
+    channel access changed) - that must not fail the whole request, it
+    should fall back to a normal download and self-heal the cache."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader(fail_cached_send=True)
+    key = compute_cache_key("video123", "720")
+    cache_store.put(key, archive_chat="@archive", message_ids=[42], title="Stale Clip")
+
+    await pipeline.run(
+        user_id=1,
+        url="http://x",
+        engine=_FakeEngine(),
+        uploader=uploader,
+        progress=_FakeProgress(),
+        cache=cache_store,
+        cache_key=key,
+        archive_channel="@archive",
+    )
+
+    assert len(uploader.sent) == 1  # fell back to a real download
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 2  # charged normally for the fresh download
+
+    # the stale entry was replaced by a fresh one from this successful run
+    entry = cache_store.get(key)
+    assert entry is not None
+    assert entry.message_ids != [42]
