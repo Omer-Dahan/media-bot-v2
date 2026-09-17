@@ -164,6 +164,7 @@ def _make_router(
     owner_ids=None,
     free_download=3,
     credits_service=None,
+    registry=None,
 ):
     client = TelegramClient(MemorySession(), 1, "hash")
     if session_factory is None:
@@ -188,6 +189,7 @@ def _make_router(
         archive_channel=archive_channel,
         max_download_size=4 * 1024 * 1024 * 1024,
         limiter=limiter,
+        registry=registry,
     )
     return client
 
@@ -421,5 +423,25 @@ async def test_url_handler_tiktok_link_runs_pipeline_with_tiktok_engine():
     assert isinstance(kwargs["engine"], TikTokEngine)
     assert kwargs["archive_channel"] == "@my_archive"
     assert kwargs["cache_key"] == compute_cache_key("https://www.tiktok.com/@user/video/7123456789", "tiktok")
+
+
+def test_register_handlers_without_registry_warns_providers_disabled(caplog):
+    """Covers the M3 audit finding: omitting `registry` used to build an
+    empty ProviderRegistry silently, pushing every TikTok/YouTube download
+    to local yt-dlp only with no signal that external providers were off."""
+    with caplog.at_level("WARNING", logger="media_bot_v2.telegram.router"):
+        _make_router()
+
+    assert any("external extraction providers" in record.message for record in caplog.records)
+    assert any("DISABLED" in record.message for record in caplog.records)
+
+
+def test_register_handlers_with_registry_does_not_warn(caplog):
+    from media_bot_v2.providers.registry import ProviderRegistry
+
+    with caplog.at_level("WARNING", logger="media_bot_v2.telegram.router"):
+        _make_router(registry=ProviderRegistry())
+
+    assert not any("external extraction providers" in record.message for record in caplog.records)
 
 

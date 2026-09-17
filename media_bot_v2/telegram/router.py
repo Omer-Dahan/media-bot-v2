@@ -89,6 +89,18 @@ def register_handlers(
     if health_tracker is None:
         health_tracker = ProviderHealthTracker(session_factory)
     if registry is None:
+        # An empty registry has no providers registered for any platform, so
+        # get_providers_for_platform() always returns [] and TikTok/YouTube
+        # fallback silently never leaves local yt-dlp. That is fine for tests
+        # that don't exercise provider fallback, but it must never happen
+        # quietly in a real deployment - see README "Provider registry
+        # default" for the intentional-vs-accidental distinction.
+        logger.warning(
+            "register_handlers() called without a registry - external extraction "
+            "providers (TikWM, ytmp3, cobalt, etc.) are DISABLED for this process; "
+            "TikTok/YouTube downloads will only use local yt-dlp. Pass "
+            "registry=build_provider_registry(settings) to enable provider fallback."
+        )
         registry = ProviderRegistry()
 
     @client.on(events.NewMessage(pattern="/start"))

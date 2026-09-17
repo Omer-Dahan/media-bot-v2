@@ -61,7 +61,16 @@ def _stream_url_to_file(
     max_size: int | None,
     headers: dict[str, str] | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
-) -> None:
+    *,
+    downloaded_so_far: int = 0,
+) -> int:
+    """Stream url to dest_path, return the number of bytes written.
+
+    max_size is the cap for the whole task, not just this file: callers
+    downloading multiple items (e.g. a TikWM photo slideshow) pass in
+    downloaded_so_far so a slideshow of many individually-small images still
+    gets rejected once their sum crosses the limit.
+    """
     req_headers = {
         "User-Agent": (
             "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -74,14 +83,16 @@ def _stream_url_to_file(
     with requests.get(url, stream=True, timeout=timeout, headers=req_headers) as response:
         response.raise_for_status()
 
-        # Reject early if server declared Content-Length exceeds max_size
+        # Reject early if server declared Content-Length exceeds the remaining budget
         if max_size is not None:
             declared = response.headers.get("Content-Length")
             if declared is not None:
                 try:
-                    if int(declared) > max_size:
+                    if downloaded_so_far + int(declared) > max_size:
                         raise DownloadTooLargeError(
-                            f"Declared Content-Length {declared} exceeds limit {max_size}"
+                            f"Declared Content-Length {declared} for {url} would bring the "
+                            f"task's cumulative size past the {max_size} byte limit "
+                            f"(already downloaded {downloaded_so_far} bytes)"
                         )
                 except ValueError:
                     pass
@@ -93,14 +104,16 @@ def _stream_url_to_file(
                     if not chunk:
                         continue
                     total_bytes += len(chunk)
-                    if max_size is not None and total_bytes > max_size:
+                    if max_size is not None and downloaded_so_far + total_bytes > max_size:
                         raise DownloadTooLargeError(
-                            f"Download exceeded {max_size} bytes limit for {url}"
+                            f"Task's cumulative download size exceeded the {max_size} byte "
+                            f"limit while downloading {url}"
                         )
                     f.write(chunk)
         except Exception:
             dest_path.unlink(missing_ok=True)
             raise
+    return total_bytes
 
 
 async def download_provider_media(
@@ -115,17 +128,20 @@ async def download_provider_media(
     downloaded_paths: list[str] = []
 
     total_items = len(result.media_urls)
+    total_downloaded = 0
     for idx, media_url in enumerate(result.media_urls, start=1):
         filename = _filename_for_item(result, media_url, idx, total_items)
         dest_path = dest_dir / filename
-        await asyncio.to_thread(
+        bytes_written = await asyncio.to_thread(
             _stream_url_to_file,
             media_url,
             dest_path,
             max_size,
             result.headers,
             timeout,
+            downloaded_so_far=total_downloaded,
         )
+        total_downloaded += bytes_written
         downloaded_paths.append(str(dest_path))
 
     return DownloadResult(

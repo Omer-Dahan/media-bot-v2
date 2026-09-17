@@ -57,11 +57,9 @@ class CobaltProvider(BaseProvider):
         }
         payload = {"url": url}
 
-        # Try base instance URL or /api/json endpoint
+        # Try the configured URL as-is first; a bare base like
+        # https://cobalt.domain falls back to /api/json below on a 404.
         endpoint = self.instance_url
-        if not endpoint.endswith("/api/json") and not endpoint.endswith("/"):
-            # If endpoint is a bare base like https://cobalt.domain, POST to root or /api/json
-            pass
 
         try:
             response = requests.post(
