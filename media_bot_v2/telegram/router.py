@@ -54,9 +54,10 @@ def register_handlers(
     free_download: int,
     pipeline: DownloadPipeline,
     archive_channel: str | None,
+    max_download_size: int,
 ) -> None:
     quality_store = QualitySelectionStore()
-    direct_engine = DirectEngine()
+    direct_engine = DirectEngine(max_download_size=max_download_size)
 
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
@@ -105,7 +106,11 @@ def register_handlers(
             )
             answer = settings_menu.apply_toggle(user.settings, toggle_key)
             buttons = settings_menu.build_settings_buttons(user.settings)
-        await event.answer(answer)
+        # The old bot popped an alert for the title-length toggle since its
+        # answer text explains a behavior change (separate message/Telegraph
+        # link), not just a value flip - a toast is easy to miss for that.
+        alert = toggle_key == settings_menu.TOGGLE_TITLE_LEN
+        await event.answer(answer, alert=alert)
         try:
             await event.edit(texts.SETTINGS, buttons=buttons)
         except MessageNotModifiedError:
@@ -113,6 +118,10 @@ def register_handlers(
 
     @client.on(events.CallbackQuery(pattern=rb"^ytq:"))
     async def quality_pick_handler(event: events.CallbackQuery.Event) -> None:
+        with session_scope(session_factory) as session:
+            settings_menu.get_or_create_user(
+                session, event.sender_id, first_name=None, username=None, free_download=free_download
+            )
         await event.answer(texts.YOUTUBE_NOT_YET_IMPLEMENTED, alert=True)
 
     @client.on(events.NewMessage())
@@ -124,6 +133,12 @@ def register_handlers(
         if not match:
             return
         url = match.group(0)
+
+        first_name, username = _sender_info(event)
+        with session_scope(session_factory) as session:
+            settings_menu.get_or_create_user(
+                session, event.sender_id, first_name=first_name, username=username, free_download=free_download
+            )
 
         if _host_matches(url, YOUTUBE_HOSTS):
             url_hash = quality_store.put(url)

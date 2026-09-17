@@ -39,19 +39,36 @@ class _FailingEngine(BaseEngine):
         raise RuntimeError("boom: download failed")
 
 
-class _FakeUploader:
-    def __init__(self, *, fail_on_part: int | None = None):
-        self.sent: list[Path] = []
-        self.archived: list[Path] = []
-        self._fail_on_part = fail_on_part
+class _PartialWriteFailingEngine(BaseEngine):
+    """Simulates a download that dies mid-write, leaving a partial file."""
 
-    async def send_file(self, path: Path, *, caption=None) -> None:
+    def matches(self, url: str) -> bool:
+        return True
+
+    async def download(self, url: str, *, dest_dir: Path):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        partial_path = dest_dir / "partial.bin"
+        partial_path.write_bytes(b"only-some-of-the-bytes")
+        raise RuntimeError("boom: connection dropped mid-download")
+
+
+class _FakeUploader:
+    def __init__(self, *, fail_on_part: int | None = None, fail_archive: bool = False):
+        self.sent: list[Path] = []
+        self.archived: list[object] = []
+        self._fail_on_part = fail_on_part
+        self._fail_archive = fail_archive
+
+    async def send_file(self, path: Path, *, caption=None):
         if self._fail_on_part is not None and len(self.sent) == self._fail_on_part:
             raise RuntimeError("boom: upload failed")
         self.sent.append(path)
+        return f"message-for-{path.name}"
 
-    async def forward_to_archive(self, path: Path, *, caption=None) -> None:
-        self.archived.append(path)
+    async def forward_to_archive(self, message) -> None:
+        if self._fail_archive:
+            raise RuntimeError("boom: archive channel unreachable")
+        self.archived.append(message)
 
 
 class _FakeProgress:
@@ -163,3 +180,53 @@ async def test_quota_exhausted_never_calls_engine_and_charges_nothing(session_fa
             uploader=_FakeUploader(),
             progress=_FakeProgress(),
         )
+
+
+async def test_download_failure_mid_write_leaves_no_partial_file_on_disk(
+    session_factory, credits_service, tmp_path
+):
+    """Covers finding 2: a download that dies mid-write must not leak a
+    partial file, even though `result` is never assigned in that case."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    progress = _FakeProgress()
+
+    with pytest.raises(RuntimeError):
+        await pipeline.run(
+            user_id=1,
+            url="http://x",
+            engine=_PartialWriteFailingEngine(),
+            uploader=uploader,
+            progress=progress,
+        )
+
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 3  # untouched - no charge on failure
+
+    user_dir = tmp_path / "1"
+    assert not user_dir.exists() or not any(user_dir.iterdir())
+
+
+async def test_archive_forward_failure_does_not_fail_download_or_undo_charge(
+    session_factory, credits_service, tmp_path
+):
+    """Covers finding 4: the user already received the file and the bytes
+    already count toward their charge - an archive-channel hiccup must not
+    turn a successful delivery into a reported failure or a missed charge."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader(fail_archive=True)
+    progress = _FakeProgress()
+
+    await pipeline.run(
+        user_id=1, url="http://x", engine=_FakeEngine(), uploader=uploader, progress=progress
+    )
+
+    assert len(uploader.sent) == 1
+    assert uploader.archived == []  # archive forward failed, nothing recorded
+
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 2  # still charged - the user got the file
+
+    assert progress.updates[-1] == "הושלם ✅"

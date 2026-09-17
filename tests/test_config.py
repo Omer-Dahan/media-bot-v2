@@ -1,5 +1,8 @@
 """Config loading from environment variables, matching the old bot's names."""
 
+import pytest
+from pydantic import ValidationError
+
 from media_bot_v2.config import Settings
 
 
@@ -39,6 +42,17 @@ def test_session_name_defaults_to_v2_not_the_old_bots_main(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.session_name == "v2"
     assert settings.session_name != "main"
+
+
+def test_session_name_main_is_rejected(monkeypatch):
+    """Covers finding 8: copying an old .env with SESSION_NAME=main would
+    otherwise make this bot open the old bot's live production session."""
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.setenv("SESSION_NAME", "main")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
 
 
 def test_db_dsn_defaults_to_local_sqlite(monkeypatch):

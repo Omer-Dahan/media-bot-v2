@@ -8,8 +8,13 @@ this rewrite are documented in spec/SPEC.md.
 
 from __future__ import annotations
 
-from pydantic import Field
+from pydantic import Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
+
+# The old bot's Telethon session file name. Starting this bot with the same
+# session name would open/corrupt the old bot's live MTProto session while
+# it's running in production against the same bot token.
+OLD_BOT_SESSION_NAME = "main"
 
 
 class Settings(BaseSettings):
@@ -48,6 +53,17 @@ class Settings(BaseSettings):
     # --- Download limits (not user-configurable, kept as constants for clarity) ---
     tg_normal_max_size: int = 2000 * 1024 * 1024
     max_download_size: int = 4 * 1024 * 1024 * 1024
+
+    @field_validator("session_name")
+    @classmethod
+    def _forbid_old_bot_session_name(cls, value: str) -> str:
+        if value == OLD_BOT_SESSION_NAME:
+            raise ValueError(
+                f"SESSION_NAME={OLD_BOT_SESSION_NAME!r} is the old bot's live session file. "
+                "Starting this bot with it would corrupt that session while the old bot is "
+                "running in production. Set SESSION_NAME to something else (default 'v2')."
+            )
+        return value
 
     @property
     def owner_ids(self) -> list[int]:

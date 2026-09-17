@@ -45,6 +45,7 @@ def main() -> None:
         free_download=settings.free_download,
         pipeline=pipeline,
         archive_channel=settings.archive_channel,
+        max_download_size=settings.max_download_size,
     )
 
     logger.info("Starting media-bot-v2")

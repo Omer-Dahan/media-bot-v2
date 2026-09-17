@@ -91,6 +91,24 @@ def test_use_quota_dynamic_zero_bytes_deducts_nothing(session_factory, service):
     assert remaining == 3
 
 
+def test_check_quota_raises_loudly_for_unknown_user_instead_of_skipping(session_factory, service):
+    """Covers finding 1: a user who never ran get_or_create_user (e.g. sent
+    a direct link before /start) must not be treated as unlimited/exempt -
+    that silent skip is exactly what let new users download for free."""
+    with pytest.raises(RuntimeError):
+        service.check_quota(999999)  # no such user_id in the DB
+
+
+def test_use_quota_dynamic_raises_loudly_for_unknown_user(session_factory, service):
+    with pytest.raises(RuntimeError):
+        service.use_quota_dynamic(999999, 1024)
+
+
+def test_add_bandwidth_used_raises_loudly_for_unknown_user(session_factory, service):
+    with pytest.raises(RuntimeError):
+        service.add_bandwidth_used(999999, 1024)
+
+
 def test_disabled_vip_skips_all_enforcement():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)

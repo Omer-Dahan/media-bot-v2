@@ -70,6 +70,36 @@ def test_users_config_renders_as_json_on_mysql():
     assert "config JSON" in ddl
 
 
+def test_users_id_columns_render_as_expected_mysql_types():
+    """Covers finding 7: column presence alone doesn't catch a type
+    regression - user_id must stay BIGINT (a plain INTEGER truncates modern
+    64-bit Telegram user IDs), and the bandwidth counters must stay BIGINT
+    since they accumulate bytes transferred, not row counts."""
+    ddl = _compiled_ddl(User)
+    assert re.search(r"\buser_id BIGINT NOT NULL\b", ddl)
+    assert re.search(r"\bbandwidth_used BIGINT\b", ddl)
+    assert re.search(r"\btotal_bandwidth BIGINT\b", ddl)
+    assert re.search(r"\bid INTEGER NOT NULL AUTO_INCREMENT\b", ddl)
+
+
+def test_users_varchar_lengths_match_old_schema():
+    ddl = _compiled_ddl(User)
+    assert "first_name VARCHAR(100)" in ddl
+    assert "username VARCHAR(100)" in ddl
+
+
+def test_payments_columns_render_as_expected_mysql_types():
+    ddl = _compiled_ddl(Payment)
+    assert re.search(r"\buser_id INTEGER NOT NULL\b", ddl)  # FK to users.id (Integer PK)
+    assert "transaction_id VARCHAR(100)" in ddl
+    assert "method VARCHAR(50)" in ddl
+
+
+def test_video_cache_columns_render_as_expected_mysql_types():
+    ddl = _compiled_ddl(VideoCache)
+    assert "cache_key VARCHAR(64)" in ddl
+
+
 def test_metadata_create_all_compiles_for_every_table():
     """Full metadata (all 4 tables + FKs) must compile as one DDL batch."""
     for table in Base.metadata.sorted_tables:

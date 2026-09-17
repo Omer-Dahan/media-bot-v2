@@ -26,8 +26,9 @@ is deleted.
 from __future__ import annotations
 
 import logging
+import shutil
 from pathlib import Path
-from typing import Protocol
+from typing import Any, Protocol
 
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
@@ -42,8 +43,8 @@ class ProgressReporter(Protocol):
 
 
 class Uploader(Protocol):
-    async def send_file(self, path: Path, *, caption: str | None = None) -> None: ...
-    async def forward_to_archive(self, path: Path, *, caption: str | None = None) -> None: ...
+    async def send_file(self, path: Path, *, caption: str | None = None) -> Any: ...
+    async def forward_to_archive(self, message: Any) -> None: ...
 
 
 class DownloadPipeline:
@@ -63,13 +64,12 @@ class DownloadPipeline:
         self._credits.check_quota(user_id)
 
         user_dir = self._download_dir / str(user_id)
-        result: DownloadResult | None = None
-        parts: list[Path] = []
         try:
             await progress.update(texts.DOWNLOADING)
-            result = await engine.download(url, dest_dir=user_dir)
+            result: DownloadResult = await engine.download(url, dest_dir=user_dir)
 
             await progress.update(texts.PROCESSING)
+            parts: list[Path] = []
             for raw_path in result.file_paths:
                 parts.extend(splitter.split_file(Path(raw_path)))
 
@@ -77,9 +77,21 @@ class DownloadPipeline:
             total_size = 0
             for index, part in enumerate(parts, start=1):
                 caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
-                await uploader.send_file(part, caption=caption)
-                await uploader.forward_to_archive(part, caption=caption)
+                message = await uploader.send_file(part, caption=caption)
                 total_size += part.stat().st_size
+                try:
+                    await uploader.forward_to_archive(message)
+                except Exception:
+                    # The file already reached the user and its bytes count
+                    # toward their charge - an archive-channel hiccup is not
+                    # their problem and must not undo either.
+                    logger.warning(
+                        "Archive forward failed for user=%s url=%s part=%s",
+                        user_id,
+                        url,
+                        part,
+                        exc_info=True,
+                    )
 
             self._credits.use_quota_dynamic(user_id, total_size)
             self._credits.add_bandwidth_used(user_id, total_size)
@@ -89,22 +101,29 @@ class DownloadPipeline:
             await progress.update(texts.DOWNLOAD_FAILED)
             raise
         finally:
-            self._cleanup(result, parts, user_dir)
+            self._cleanup(user_dir)
 
-    def _cleanup(self, result: DownloadResult | None, parts: list[Path], user_dir: Path) -> None:
-        paths_to_remove: set[Path] = set(parts)
-        if result:
-            paths_to_remove.update(Path(p) for p in result.file_paths)
+    def _cleanup(self, user_dir: Path) -> None:
+        """Remove every file this run wrote, regardless of how far it got.
 
-        for path in paths_to_remove:
+        Must not depend on which download/split step actually ran or on
+        `DownloadResult`/part lists being populated - a download that fails
+        partway through (engine crash mid-write, ffmpeg crash mid-split)
+        still leaves bytes in `user_dir` that a result/parts-based cleanup
+        would silently miss.
+        """
+        if not user_dir.exists():
+            return
+        for child in user_dir.iterdir():
             try:
-                if path.exists():
-                    path.unlink()
+                if child.is_dir():
+                    shutil.rmtree(child)
+                else:
+                    child.unlink()
             except OSError:
-                logger.warning("Failed to delete leftover file %s", path)
+                logger.warning("Failed to delete leftover path %s", child)
 
         try:
-            if user_dir.exists() and not any(user_dir.iterdir()):
-                user_dir.rmdir()
+            user_dir.rmdir()
         except OSError:
             pass

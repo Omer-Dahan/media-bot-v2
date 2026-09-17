@@ -12,6 +12,10 @@ from dataclasses import dataclass
 from pathlib import Path
 
 
+class DownloadTooLargeError(Exception):
+    """Raised when a download exceeds the engine's configured max size."""
+
+
 @dataclass
 class DownloadResult:
     file_paths: list[str]

@@ -47,7 +47,10 @@ class CreditsService:
         with session_scope(self._sessions) as session:
             user = session.query(User).filter(User.user_id == user_id).first()
             if user is None:
-                return
+                raise RuntimeError(
+                    f"check_quota called for unknown user_id={user_id}; the caller must "
+                    "get_or_create_user before running any quota-gated action"
+                )
             if user.is_blocked:
                 raise UserBlockedException("המשתמש שלך נחסם. פנה למנהל.")
             if (user.free or 0) + (user.paid or 0) <= 0:
@@ -71,7 +74,10 @@ class CreditsService:
         with session_scope(self._sessions) as session:
             user = session.query(User).filter(User.user_id == user_id).first()
             if user is None:
-                return 0
+                raise RuntimeError(
+                    f"use_quota_dynamic called for unknown user_id={user_id}; the caller must "
+                    "get_or_create_user before running any quota-gated action"
+                )
             for _ in range(credits_to_deduct):
                 if (user.free or 0) > 0:
                     user.free -= 1
@@ -86,9 +92,13 @@ class CreditsService:
             return
         with session_scope(self._sessions) as session:
             user = session.query(User).filter(User.user_id == user_id).first()
-            if user is not None:
-                user.bandwidth_used = (user.bandwidth_used or 0) + size
-                user.total_bandwidth = (user.total_bandwidth or 0) + size
+            if user is None:
+                raise RuntimeError(
+                    f"add_bandwidth_used called for unknown user_id={user_id}; the caller must "
+                    "get_or_create_user before running any quota-gated action"
+                )
+            user.bandwidth_used = (user.bandwidth_used or 0) + size
+            user.total_bandwidth = (user.total_bandwidth or 0) + size
 
     def get_total_credits(self, user_id: int) -> int:
         if not self._enable_vip:
