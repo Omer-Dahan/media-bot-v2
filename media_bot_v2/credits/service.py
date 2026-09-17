@@ -20,6 +20,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from media_bot_v2.credits.exceptions import (
     BandwidthExhaustedException,
     CreditsExhaustedException,
+    UserBlockedException,
 )
 from media_bot_v2.db.models import User
 from media_bot_v2.db.session import session_scope
@@ -48,7 +49,7 @@ class CreditsService:
             if user is None:
                 return
             if user.is_blocked:
-                raise Exception("המשתמש שלך נחסם. פנה למנהל.")
+                raise UserBlockedException("המשתמש שלך נחסם. פנה למנהל.")
             if (user.free or 0) + (user.paid or 0) <= 0:
                 raise CreditsExhaustedException("הקרדיטים שלך נגמרו.")
             if (user.paid or 0) <= 0 and (user.bandwidth_used or 0) >= self._free_bandwidth:

@@ -7,6 +7,7 @@ from sqlalchemy.orm import sessionmaker
 from media_bot_v2.credits.exceptions import (
     BandwidthExhaustedException,
     CreditsExhaustedException,
+    UserBlockedException,
 )
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
@@ -30,8 +31,10 @@ def service(session_factory):
 
 
 def _add_user(session_factory, **kwargs):
+    defaults = {"user_id": 1, "free": 3, "paid": 0, "bandwidth_used": 0, "total_bandwidth": 0, "is_blocked": 0}
+    defaults.update(kwargs)
     with session_factory() as session:
-        user = User(user_id=1, free=3, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0, **kwargs)
+        user = User(**defaults)
         session.add(user)
         session.commit()
 
@@ -56,6 +59,12 @@ def test_check_quota_raises_on_bandwidth_cap_for_free_users(session_factory, ser
 def test_check_quota_ignores_bandwidth_cap_for_paid_users(session_factory, service):
     _add_user(session_factory, free=0, paid=5, bandwidth_used=2_147_483_648)
     service.check_quota(1)  # should not raise
+
+
+def test_check_quota_raises_user_blocked_for_blocked_user(session_factory, service):
+    _add_user(session_factory, is_blocked=1)
+    with pytest.raises(UserBlockedException):
+        service.check_quota(1)
 
 
 def test_owner_bypasses_all_checks(session_factory, service):
