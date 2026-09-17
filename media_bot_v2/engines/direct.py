@@ -1,0 +1,55 @@
+"""Direct HTTP(S) link download engine.
+
+This is the one engine implemented end-to-end in M1 (see spec/SPEC.md M1
+item 7): download -> split -> upload -> charge credits -> delete from disk.
+YouTube/TikTok/Instagram engines (src/engine/generic.py, tiktok.py,
+instagram.py in the old bot) land in M2/M3 - this module only handles plain
+HTTP(S) URLs that don't belong to a known platform.
+
+Streaming download runs via `requests` (already a transitive dependency of
+instaloader/gallery-dl) in a worker thread, since `requests` is synchronous
+and this engine's `download()` must not block the event loop.
+"""
+
+from __future__ import annotations
+
+import asyncio
+import re
+from pathlib import Path
+from urllib.parse import unquote, urlparse
+
+import requests
+
+from media_bot_v2.engines.base import BaseEngine, DownloadResult
+
+_URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_CHUNK_SIZE = 1024 * 1024
+_REQUEST_TIMEOUT = 30
+
+
+class DirectEngine(BaseEngine):
+    """Downloads an arbitrary HTTP(S) URL to disk via a streaming GET."""
+
+    def matches(self, url: str) -> bool:
+        return bool(_URL_RE.match(url))
+
+    async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        filename = _filename_from_url(url)
+        dest_path = dest_dir / filename
+        await asyncio.to_thread(_stream_to_file, url, dest_path)
+        return DownloadResult(file_paths=[str(dest_path)], title=filename)
+
+
+def _filename_from_url(url: str) -> str:
+    name = Path(urlparse(url).path).name
+    return unquote(name) or "download.bin"
+
+
+def _stream_to_file(url: str, dest_path: Path) -> None:
+    with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
+        response.raise_for_status()
+        with open(dest_path, "wb") as f:
+            for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+                if chunk:
+                    f.write(chunk)

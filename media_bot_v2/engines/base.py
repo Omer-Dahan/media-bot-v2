@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
+from pathlib import Path
 
 
 @dataclass
@@ -26,5 +27,5 @@ class BaseEngine(ABC):
         """Return True if this engine should handle the given URL."""
 
     @abstractmethod
-    async def download(self, url: str) -> DownloadResult:
-        """Download the media and return local file paths + metadata."""
+    async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+        """Download the media into dest_dir, return local file paths + metadata."""

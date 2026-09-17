@@ -23,6 +23,8 @@ dependencies = [
     # Media probing/splitting (ffmpeg binary is a system requirement, not a pip package)
     "ffmpeg-python>=0.2.0",
     "filetype>=1.2.0",
+    # Direct-link engine's streaming HTTP download
+    "requests>=2.32.0",
 ]
 
 [dependency-groups]
