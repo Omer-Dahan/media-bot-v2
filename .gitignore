@@ -1,0 +1,38 @@
+# Python
+__pycache__/
+*.pyc
+*.egg-info/
+.venv/
+venv/
+env/
+
+# Environment
+.env
+*.env
+
+# Telegram session
+*.session
+*.session-journal
+
+# Database (local dev copy only - prod DB lives outside the repo)
+*.sqlite3
+*.db
+
+# Cookies
+*cookies*.txt
+
+# Logs
+logs/
+
+# Temp
+downloads/
+temp/
+tmp/
+
+# IDE
+.idea/
+.vscode/
+
+# Test artifacts
+.pytest_cache/
+.ruff_cache/
