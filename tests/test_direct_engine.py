@@ -20,6 +20,16 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.send_response(404)
             self.end_headers()
             return
+        if self.path == "/declared-oversized":
+            # Declares a huge Content-Length but only ever sends a few bytes -
+            # proves the engine rejects based on the header alone, before
+            # reading (let alone writing) any of the body.
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Length", "999999999")
+            self.end_headers()
+            self.wfile.write(b"short")
+            return
         self.send_response(200)
         self.send_header("Content-Type", "application/octet-stream")
         self.end_headers()
@@ -82,3 +92,16 @@ async def test_download_allows_file_under_max_size(local_server, tmp_path):
     engine = DirectEngine(max_download_size=len(FILE_CONTENT) + 1)
     result = await engine.download(f"{local_server}/test-file.bin", dest_dir=tmp_path)
     assert Path(result.file_paths[0]).read_bytes() == FILE_CONTENT
+
+
+async def test_download_rejects_declared_content_length_before_writing_any_bytes(
+    local_server, tmp_path
+):
+    """A response that declares an oversized Content-Length must fail
+    immediately, before streaming gigabytes to disk in the background."""
+    engine = DirectEngine(max_download_size=100)
+
+    with pytest.raises(DownloadTooLargeError):
+        await engine.download(f"{local_server}/declared-oversized", dest_dir=tmp_path)
+
+    assert not any(tmp_path.iterdir())  # no file was ever opened for writing

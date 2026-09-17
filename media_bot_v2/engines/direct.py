@@ -52,6 +52,7 @@ def _filename_from_url(url: str) -> str:
 def _stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
     with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
+        _reject_if_declared_size_too_large(response, url, max_size)
         total = 0
         try:
             with open(dest_path, "wb") as f:
@@ -67,3 +68,23 @@ def _stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
         except DownloadTooLargeError:
             dest_path.unlink(missing_ok=True)
             raise
+
+
+def _reject_if_declared_size_too_large(response, url: str, max_size: int | None) -> None:
+    """Fail before writing a single byte if the server already declared a
+    too-large size, instead of discovering it after streaming gigabytes to
+    disk (the chunk-by-chunk check below still catches a server that lies
+    about or omits Content-Length)."""
+    if max_size is None:
+        return
+    declared = response.headers.get("Content-Length")
+    if declared is None:
+        return
+    try:
+        declared_size = int(declared)
+    except ValueError:
+        return
+    if declared_size > max_size:
+        raise DownloadTooLargeError(
+            f"Declared Content-Length {declared_size} exceeds the {max_size} byte limit for {url}"
+        )

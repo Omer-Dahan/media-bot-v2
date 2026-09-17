@@ -43,3 +43,27 @@ async def test_update_swallows_generic_rpc_error_on_final_status():
     reporter = MessageProgressReporter(message)
 
     await reporter.update("הושלם ✅")  # must not raise
+
+
+async def test_update_swallows_connection_error_on_final_status():
+    """ConnectionError/TimeoutError/OSError do not inherit from RPCError - a
+    dropped connection while editing the "done" message must not surface as
+    a failed download after the file was already sent and charged."""
+    message = _Message(raises=ConnectionError("connection reset"))
+    reporter = MessageProgressReporter(message)
+
+    await reporter.update("הושלם ✅")  # must not raise
+
+
+async def test_update_swallows_timeout_error():
+    message = _Message(raises=TimeoutError("timed out"))
+    reporter = MessageProgressReporter(message)
+
+    await reporter.update("הושלם ✅")  # must not raise
+
+
+async def test_update_swallows_os_error():
+    message = _Message(raises=OSError("network is unreachable"))
+    reporter = MessageProgressReporter(message)
+
+    await reporter.update("הושלם ✅")  # must not raise

@@ -12,6 +12,11 @@ error), the download must still be reported as a success: the failure is
 swallowed here rather than left to propagate into the pipeline's except
 block, which would otherwise tell the user "download failed" after they
 already received and paid for the file.
+
+`ConnectionError`/`TimeoutError`/`OSError` are caught alongside `RPCError`
+because they do not inherit from it - a socket hiccup while editing the
+message is exactly as harmless to the already-completed transfer as an
+`RPCError` and must not be allowed to propagate either.
 """
 
 from __future__ import annotations
@@ -36,5 +41,5 @@ class MessageProgressReporter:
             await self._message.edit(text)
         except MessageNotModifiedError:
             pass  # content unchanged from Telegram's point of view - nothing to surface
-        except RPCError:
+        except (RPCError, ConnectionError, TimeoutError, OSError):
             logger.warning("Failed to edit progress message to %r", text, exc_info=True)
