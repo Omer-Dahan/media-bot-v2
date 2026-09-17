@@ -23,7 +23,17 @@ from __future__ import annotations
 
 import datetime as dt
 
-from sqlalchemy import BigInteger, DateTime, Enum, Float, ForeignKey, Integer, String, Text
+from sqlalchemy import (
+    BigInteger,
+    DateTime,
+    Enum,
+    Float,
+    ForeignKey,
+    Integer,
+    String,
+    Text,
+    UniqueConstraint,
+)
 from sqlalchemy.orm import DeclarativeBase, Mapped, mapped_column, relationship
 from sqlalchemy.types import JSON
 
@@ -121,3 +131,34 @@ class VideoCache(Base):
     created_at: Mapped[dt.datetime] = mapped_column(
         DateTime, default=lambda: dt.datetime.now(dt.UTC)
     )
+
+
+class ProviderHealth(Base):
+    """Health and performance metrics for external extraction providers.
+
+    This table is v2-only (not part of the old bot's legacy schema).
+    It is created with IF NOT EXISTS on startup and does not alter
+    any of the shared legacy tables.
+    """
+
+    __tablename__ = "provider_health"
+    __table_args__ = (UniqueConstraint("provider", "platform", name="uq_provider_platform"),)
+
+    id: Mapped[int] = mapped_column(Integer, primary_key=True, autoincrement=True)
+    provider: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    platform: Mapped[str] = mapped_column(String(50), nullable=False, index=True)
+    total_attempts: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    successes: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    total_response_time: Mapped[float] = mapped_column(Float, nullable=False, default=0.0)
+    consecutive_failures: Mapped[int] = mapped_column(Integer, nullable=False, default=0)
+    last_error: Mapped[str | None] = mapped_column(Text, nullable=True)
+    disabled_until: Mapped[dt.datetime | None] = mapped_column(DateTime, nullable=True)
+    created_at: Mapped[dt.datetime] = mapped_column(
+        DateTime, default=lambda: dt.datetime.now(dt.UTC)
+    )
+    updated_at: Mapped[dt.datetime] = mapped_column(
+        DateTime,
+        default=lambda: dt.datetime.now(dt.UTC),
+        onupdate=lambda: dt.datetime.now(dt.UTC),
+    )
+

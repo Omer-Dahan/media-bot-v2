@@ -16,7 +16,7 @@ import re
 from sqlalchemy.dialects import mysql
 from sqlalchemy.schema import CreateTable
 
-from media_bot_v2.db.models import Base, Payment, Setting, User, VideoCache
+from media_bot_v2.db.models import Base, Payment, ProviderHealth, Setting, User, VideoCache
 
 EXPECTED_COLUMNS = {
     "users": {
@@ -100,8 +100,23 @@ def test_video_cache_columns_render_as_expected_mysql_types():
     assert "cache_key VARCHAR(64)" in ddl
 
 
+def test_provider_health_compiles_against_mysql_dialect():
+    """ProviderHealth is a v2-only table added in M3, not present in the legacy schema.
+
+    Verify it compiles cleanly to valid MySQL DDL without affecting legacy tables.
+    """
+    ddl = _compiled_ddl(ProviderHealth)
+    assert "CREATE TABLE provider_health" in ddl
+    assert "provider VARCHAR(50) NOT NULL" in ddl
+    assert "platform VARCHAR(50) NOT NULL" in ddl
+    assert "total_attempts INTEGER NOT NULL" in ddl
+    assert "total_response_time FLOAT NOT NULL" in ddl
+    assert "disabled_until DATETIME" in ddl
+
+
 def test_metadata_create_all_compiles_for_every_table():
-    """Full metadata (all 4 tables + FKs) must compile as one DDL batch."""
+    """Full metadata (all shared tables + v2-only tables + FKs) must compile as one DDL batch."""
     for table in Base.metadata.sorted_tables:
         ddl = str(CreateTable(table).compile(dialect=mysql.dialect()))
         assert table.name in ddl
+

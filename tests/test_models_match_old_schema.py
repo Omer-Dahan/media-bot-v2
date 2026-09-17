@@ -63,5 +63,9 @@ def test_create_all_on_fresh_sqlite_db_succeeds(tmp_path):
 
     engine = create_engine(f"sqlite:///{tmp_path / 'schema_check.sqlite3'}")
     Base.metadata.create_all(engine)
-    tables = inspect(engine).get_table_names()
-    assert set(tables) == {"users", "settings", "payments", "video_cache"}
+    tables = set(inspect(engine).get_table_names())
+    # The shared tables from the old bot are users, settings, payments, and video_cache.
+    # provider_health is added in M3 as a v2-only table.
+    assert {"users", "settings", "payments", "video_cache"} <= tables
+    assert "provider_health" in tables
+
