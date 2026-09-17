@@ -333,15 +333,21 @@ class YouTubeEngine(BaseEngine):
         force_ipv4: bool = False,
         cookies_file: str | None = None,
         po_token: str | None = None,
+        is_playlist: bool = False,
         playlist_item_limit: int | None = None,
         max_retries: int = 2,
     ) -> None:
+        if playlist_item_limit is not None:
+            if playlist_item_limit <= 0:
+                raise ValueError(f"playlist_item_limit must be positive, got {playlist_item_limit}")
+            is_playlist = True
         self._quality = quality
         self._max_download_size = max_download_size
         self._progress = progress
         self._force_ipv4 = force_ipv4
         self._cookies_file = cookies_file
         self._po_token = po_token
+        self._is_playlist = is_playlist
         self._playlist_item_limit = playlist_item_limit
         self._max_retries = max_retries
 
@@ -354,7 +360,7 @@ class YouTubeEngine(BaseEngine):
         return await asyncio.to_thread(self._download_sync, url, dest_dir, loop)
 
     def _build_ydl_opts(self, dest_dir: Path, loop: asyncio.AbstractEventLoop) -> dict:
-        is_playlist_request = self._playlist_item_limit is not None
+        is_playlist_request = self._is_playlist
         opts: dict = {
             "format": build_format_selector(self._quality),
             "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
@@ -368,7 +374,7 @@ class YouTubeEngine(BaseEngine):
             "fragment_retries": 3,
             "ignoreerrors": "only_download" if is_playlist_request else False,
         }
-        if is_playlist_request:
+        if is_playlist_request and self._playlist_item_limit is not None:
             opts["playlistend"] = self._playlist_item_limit
         if self._force_ipv4:
             opts["source_address"] = "0.0.0.0"

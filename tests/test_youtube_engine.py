@@ -237,6 +237,27 @@ async def test_download_sets_playlist_end_only_for_playlist_requests(tmp_path):
     assert _FakeYoutubeDL.calls[0]["playlistend"] == 5
 
 
+async def test_download_playlist_unlimited_when_no_limit_specified(tmp_path):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(
+        quality="720", max_download_size=1_000_000_000, is_playlist=True, playlist_item_limit=None
+    )
+
+    await engine.download("https://youtube.com/playlist?list=PL1", dest_dir=tmp_path)
+
+    assert _FakeYoutubeDL.calls[0]["noplaylist"] is False
+    assert "playlistend" not in _FakeYoutubeDL.calls[0]
+    assert _FakeYoutubeDL.calls[0]["ignoreerrors"] == "only_download"
+
+
+def test_youtube_engine_rejects_non_positive_playlist_limit():
+    with pytest.raises(ValueError, match="playlist_item_limit must be positive"):
+        YouTubeEngine(quality="720", max_download_size=1000, playlist_item_limit=0)
+
+    with pytest.raises(ValueError, match="playlist_item_limit must be positive"):
+        YouTubeEngine(quality="720", max_download_size=1000, playlist_item_limit=-1)
+
+
 async def test_download_single_video_forces_noplaylist(tmp_path):
     _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
     engine = YouTubeEngine(quality="720", max_download_size=1_000_000_000)
@@ -245,6 +266,41 @@ async def test_download_single_video_forces_noplaylist(tmp_path):
 
     assert _FakeYoutubeDL.calls[0]["noplaylist"] is True
     assert "playlistend" not in _FakeYoutubeDL.calls[0]
+
+
+async def test_download_omits_cookies_and_po_token_by_default(tmp_path):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(quality="720", max_download_size=1_000_000_000)
+
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+
+    assert "cookiefile" not in _FakeYoutubeDL.calls[0]
+    assert "extractor_args" not in _FakeYoutubeDL.calls[0]
+
+
+async def test_download_passes_cookies_file_when_provided(tmp_path):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    cookies_path = str(tmp_path / "cookies.txt")
+    engine = YouTubeEngine(
+        quality="720", max_download_size=1_000_000_000, cookies_file=cookies_path
+    )
+
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+
+    assert _FakeYoutubeDL.calls[0]["cookiefile"] == cookies_path
+
+
+async def test_download_passes_po_token_when_provided(tmp_path):
+    _FakeYoutubeDL.results = [_single_video_info(str(tmp_path / "v.mp4"))]
+    engine = YouTubeEngine(
+        quality="720", max_download_size=1_000_000_000, po_token="my_po_token_123"
+    )
+
+    await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+
+    assert _FakeYoutubeDL.calls[0]["extractor_args"] == {
+        "youtube": ["player-client=web,default", "po_token=web+my_po_token_123"]
+    }
 
 
 async def test_download_retries_network_error_and_then_succeeds(tmp_path):

@@ -166,28 +166,33 @@ def register_handlers(
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
 
-        total_credits = credits_service.get_total_credits(event.sender_id)
-        playlist_limit = (
-            int(total_credits) if math.isfinite(total_credits) and is_playlist_url(url) else None
-        )
-
-        engine = YouTubeEngine(
-            quality=quality,
-            max_download_size=max_download_size,
-            progress=progress,
-            force_ipv4=force_ipv4,
-            cookies_file=youtube_cookies_file,
-            po_token=potoken,
-            playlist_item_limit=playlist_limit,
-        )
-
-        media_ref = extract_video_id(url) or url
-        cache_key = compute_cache_key(media_ref, quality)
-
-        async def on_wait() -> None:
-            await progress.update(texts.YOUTUBE_QUEUE_WAIT)
-
         try:
+            is_playlist = is_playlist_url(url)
+            total_credits = credits_service.get_total_credits(event.sender_id)
+            if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
+                raise CreditsExhaustedException("הקרדיטים שלך נגמרו.")
+
+            playlist_limit = (
+                int(total_credits) if is_playlist and math.isfinite(total_credits) else None
+            )
+
+            engine = YouTubeEngine(
+                quality=quality,
+                max_download_size=max_download_size,
+                progress=progress,
+                force_ipv4=force_ipv4,
+                cookies_file=youtube_cookies_file,
+                po_token=potoken,
+                is_playlist=is_playlist,
+                playlist_item_limit=playlist_limit,
+            )
+
+            media_ref = extract_video_id(url) or url
+            cache_key = compute_cache_key(media_ref, quality)
+
+            async def on_wait() -> None:
+                await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+
             async with limiter.slot(event.sender_id, on_wait=on_wait):
                 await pipeline.run(
                     user_id=event.sender_id,

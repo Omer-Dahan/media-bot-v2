@@ -154,20 +154,35 @@ class _FakeCallbackEvent:
         return msg
 
 
-def _make_router(session_factory=None, pipeline=None, limiter=None, archive_channel=None):
+def _make_router(
+    session_factory=None,
+    pipeline=None,
+    limiter=None,
+    archive_channel=None,
+    enable_vip=True,
+    owner_ids=None,
+    free_download=3,
+    credits_service=None,
+):
     client = TelegramClient(MemorySession(), 1, "hash")
     if session_factory is None:
         engine = create_engine("sqlite:///:memory:")
         Base.metadata.create_all(engine)
         session_factory = sessionmaker(bind=engine)
-    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=1)
+    if credits_service is None:
+        credits_service = CreditsService(
+            session_factory,
+            enable_vip=enable_vip,
+            owner_ids=owner_ids or [],
+            free_bandwidth=1,
+        )
     if pipeline is None:
         pipeline = DownloadPipeline(credits_service=credits_service, download_dir=Path("/tmp/media-bot-v2-test"))
     register_handlers(
         client,
         session_factory=session_factory,
         credits_service=credits_service,
-        free_download=3,
+        free_download=free_download,
         pipeline=pipeline,
         archive_channel=archive_channel,
         max_download_size=4 * 1024 * 1024 * 1024,
@@ -249,6 +264,8 @@ async def test_quality_pick_valid_link_runs_pipeline_with_youtube_engine():
     assert kwargs["url"] == "https://www.youtube.com/watch?v=dQw4w9WgXcQ"
     assert isinstance(kwargs["engine"], YouTubeEngine)
     assert kwargs["engine"]._quality == "1080"
+    assert kwargs["engine"]._is_playlist is False
+    assert kwargs["engine"]._playlist_item_limit is None
     assert kwargs["cache_key"] == compute_cache_key("dQw4w9WgXcQ", "1080")
     assert kwargs["archive_channel"] == "@my_archive"
 
@@ -294,3 +311,96 @@ async def test_quality_pick_surfaces_classified_youtube_error():
 
     assert len(cb_event.messages) == 1
     assert "הסרטון אינו זמין (סרטון פרטי)" in cb_event.messages[0].edits
+
+
+async def test_quality_pick_playlist_with_vip_disabled_downloads_full_playlist():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline, enable_vip=False)
+    url_handler = _find_url_handler(client)
+    ytq_handler = _find_ytq_handler(client)
+
+    url_event = _QualityEvent("https://www.youtube.com/playlist?list=PLtest", 1)
+    await url_handler(url_event)
+
+    assert url_event.buttons
+    button_data = url_event.buttons[0][0].type.data
+
+    cb_event = _FakeCallbackEvent(button_data, sender_id=1)
+    await ytq_handler(cb_event)
+
+    pipeline.run.assert_awaited_once()
+    _, kwargs = pipeline.run.call_args
+    assert kwargs["user_id"] == 1
+    assert kwargs["url"] == "https://www.youtube.com/playlist?list=PLtest"
+    assert isinstance(kwargs["engine"], YouTubeEngine)
+    assert kwargs["engine"]._is_playlist is True
+    assert kwargs["engine"]._playlist_item_limit is None
+
+
+async def test_quality_pick_playlist_with_credits_sets_limit():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline, enable_vip=True, free_download=5)
+    url_handler = _find_url_handler(client)
+    ytq_handler = _find_ytq_handler(client)
+
+    url_event = _QualityEvent("https://www.youtube.com/playlist?list=PLtest", 1)
+    await url_handler(url_event)
+
+    assert url_event.buttons
+    button_data = url_event.buttons[0][0].type.data
+
+    cb_event = _FakeCallbackEvent(button_data, sender_id=1)
+    await ytq_handler(cb_event)
+
+    pipeline.run.assert_awaited_once()
+    _, kwargs = pipeline.run.call_args
+    assert kwargs["user_id"] == 1
+    assert kwargs["url"] == "https://www.youtube.com/playlist?list=PLtest"
+    assert isinstance(kwargs["engine"], YouTubeEngine)
+    assert kwargs["engine"]._is_playlist is True
+    assert kwargs["engine"]._playlist_item_limit == 5
+
+
+async def test_quality_pick_playlist_owner_with_zero_credits_downloads_unlimited():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline, enable_vip=True, owner_ids=[777], free_download=0)
+    url_handler = _find_url_handler(client)
+    ytq_handler = _find_ytq_handler(client)
+
+    url_event = _QualityEvent("https://www.youtube.com/playlist?list=PLtest", 777)
+    await url_handler(url_event)
+
+    assert url_event.buttons
+    button_data = url_event.buttons[0][0].type.data
+
+    cb_event = _FakeCallbackEvent(button_data, sender_id=777)
+    await ytq_handler(cb_event)
+
+    pipeline.run.assert_awaited_once()
+    _, kwargs = pipeline.run.call_args
+    assert kwargs["user_id"] == 777
+    assert kwargs["url"] == "https://www.youtube.com/playlist?list=PLtest"
+    assert isinstance(kwargs["engine"], YouTubeEngine)
+    assert kwargs["engine"]._is_playlist is True
+    assert kwargs["engine"]._playlist_item_limit is None
+
+
+async def test_quality_pick_playlist_regular_user_zero_credits_shows_error():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline, enable_vip=True, owner_ids=[999], free_download=0)
+    url_handler = _find_url_handler(client)
+    ytq_handler = _find_ytq_handler(client)
+
+    url_event = _QualityEvent("https://www.youtube.com/playlist?list=PLtest", 1)
+    await url_handler(url_event)
+
+    assert url_event.buttons
+    button_data = url_event.buttons[0][0].type.data
+
+    cb_event = _FakeCallbackEvent(button_data, sender_id=1)
+    await ytq_handler(cb_event)
+
+    pipeline.run.assert_not_called()
+    assert len(cb_event.messages) == 1
+    assert "הקרדיטים שלך נגמרו." in cb_event.messages[0].edits
+

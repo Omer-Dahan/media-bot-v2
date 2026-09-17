@@ -100,9 +100,10 @@ class CreditsService:
             user.bandwidth_used = (user.bandwidth_used or 0) + size
             user.total_bandwidth = (user.total_bandwidth or 0) + size
 
-    def get_total_credits(self, user_id: int) -> int:
-        if not self._enable_vip:
-            return math.inf  # type: ignore[return-value]
+    def get_total_credits(self, user_id: int) -> int | float:
+        if not self._enable_vip or user_id in self._owner_ids:
+            return math.inf
         with session_scope(self._sessions) as session:
             user = session.query(User).filter(User.user_id == user_id).first()
             return (user.free or 0) + (user.paid or 0) if user else 0
+

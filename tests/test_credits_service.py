@@ -1,5 +1,7 @@
 """Credit/quota behavior parity with the old bot's database/model.py logic."""
 
+import math
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -115,3 +117,28 @@ def test_disabled_vip_skips_all_enforcement():
     factory = sessionmaker(bind=engine)
     service = CreditsService(factory, enable_vip=False, owner_ids=[], free_bandwidth=100)
     service.check_quota(42)  # no user row exists at all; must not raise
+
+
+def test_get_total_credits_returns_inf_when_vip_disabled(session_factory):
+    service = CreditsService(session_factory, enable_vip=False, owner_ids=[], free_bandwidth=100)
+    assert service.get_total_credits(42) == math.inf
+
+
+def test_get_total_credits_returns_inf_for_owner_even_with_zero_credits(session_factory, service):
+    _add_user(session_factory, user_id=999, free=0, paid=0)
+    assert service.get_total_credits(999) == math.inf
+
+
+def test_get_total_credits_returns_balance_for_normal_user(session_factory, service):
+    _add_user(session_factory, user_id=1, free=3, paid=2)
+    assert service.get_total_credits(1) == 5
+
+
+def test_get_total_credits_returns_zero_when_user_has_no_credits(session_factory, service):
+    _add_user(session_factory, user_id=1, free=0, paid=0)
+    assert service.get_total_credits(1) == 0
+
+
+def test_get_total_credits_returns_zero_for_unknown_user_when_vip_enabled(session_factory, service):
+    assert service.get_total_credits(999999) == 0
+
