@@ -71,6 +71,7 @@ def test_youtube_and_concurrency_defaults(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.force_ipv4 is False
     assert settings.potoken is None
+    assert settings.potoken_provider_url is None
     assert settings.youtube_cookies_file is None
     assert settings.youtube_player_client is None
     assert settings.youtube_js_runtimes is None
@@ -85,6 +86,7 @@ def test_youtube_and_concurrency_custom_values(monkeypatch):
     monkeypatch.setenv("BOT_TOKEN", "t")
     monkeypatch.setenv("FORCE_IPV4", "true")
     monkeypatch.setenv("POTOKEN", "po_token_value")
+    monkeypatch.setenv("POTOKEN_PROVIDER_URL", "http://127.0.0.1:4416")
     monkeypatch.setenv("YOUTUBE_COOKIES_FILE", "/path/to/cookies.txt")
     monkeypatch.setenv("YOUTUBE_PLAYER_CLIENT", "android,web")
     monkeypatch.setenv("YOUTUBE_JS_RUNTIMES", "node")
@@ -94,6 +96,7 @@ def test_youtube_and_concurrency_custom_values(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.force_ipv4 is True
     assert settings.potoken == "po_token_value"
+    assert settings.potoken_provider_url == "http://127.0.0.1:4416"
     assert settings.youtube_cookies_file == "/path/to/cookies.txt"
     assert settings.youtube_player_client == "android,web"
     assert settings.youtube_js_runtimes == "node"

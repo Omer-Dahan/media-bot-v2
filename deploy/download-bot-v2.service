@@ -1,0 +1,56 @@
+[Unit]
+# Sample systemd unit for media-bot-v2. Copy to /etc/systemd/system/,
+# fill in the placeholders below (marked CHANGE-ME), then:
+#   systemctl daemon-reload
+#   systemctl enable download-bot-v2.service
+# See docs/DEPLOY.md for the full cutover procedure - do not start this
+# unit while the old bot's unit is still active against the same BOT_TOKEN.
+Description=media-bot-v2 (Telethon media download bot)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+
+# CHANGE-ME: absolute path to the project checkout. pydantic-settings loads
+# ".env" relative to the working directory, so this must be the directory
+# that contains the project's .env file.
+WorkingDirectory=/opt/media-bot-v2
+
+# CHANGE-ME: run the bot through the project's own uv-managed venv, not a
+# system Python - it has yt-dlp, yt-dlp-ejs, and every other pinned
+# dependency this project needs.
+ExecStart=/opt/media-bot-v2/.venv/bin/python -m media_bot_v2.bootstrap
+
+# systemd services start with a minimal PATH (typically
+# /usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin) that does
+# NOT include an interactive shell's PATH additions. yt-dlp needs a
+# JavaScript runtime (deno/node/bun) to solve YouTube's n-challenge
+# signatures (see docs/DEPLOY.md) - if that runtime lives outside the
+# default PATH (a Deno install under a user's home directory, an nvm
+# Node.js install, etc.), it must be added here explicitly or yt-dlp will
+# report a JS runtime missing error under this service even though the
+# same command works fine from an interactive shell. CHANGE-ME to match
+# wherever the runtime was actually installed (`which deno` / `which node`
+# as the service's user).
+Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/deno/bin"
+
+# Restart policy: come back after a crash, but don't hot-loop against a
+# persistent failure (bad token, DB unreachable).
+Restart=on-failure
+RestartSec=10
+
+# Graceful shutdown: Telethon's run_until_disconnected() exits its event
+# loop on SIGTERM, but an in-flight upload (large video, slow network) can
+# take a while to finish or roll back. The old bot's unit only allowed
+# SIGTERM 90 seconds before systemd force-killed it, which could cut off an
+# in-flight upload/cleanup mid-write. Give this one more headroom, and let
+# systemd escalate to SIGKILL for the whole cgroup (not just the main
+# process) if it still hasn't stopped by then, so no stray child process
+# from ffmpeg/yt-dlp survives a stop.
+KillMode=mixed
+KillSignal=SIGTERM
+TimeoutStopSec=120
+
+[Install]
+WantedBy=multi-user.target

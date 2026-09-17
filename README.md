@@ -93,6 +93,15 @@ production token at once, stop the old bot's process before pointing this bot
 at the production `BOT_TOKEN`/`DB_DSN`, and keep the old bot's code and systemd
 unit in place (disabled) for a rollback window after cutover.
 
+The full deployment kit, including exact server-side install commands (JS
+runtime for yt-dlp, PO token provider), the systemd unit, and the
+step-by-step cutover/rollback procedure, is in `docs/DEPLOY.md`. Before ever
+pointing this bot at production, run the read-only readiness check:
+
+```bash
+uv run python -m media_bot_v2.preflight
+```
+
 ## Layout
 
 ```
@@ -101,6 +110,7 @@ media_bot_v2/
   logging_setup.py       # rotating structured file logs
   bootstrap.py            # entrypoint wiring (not run at import time)
   pipeline.py              # download -> split -> upload -> charge -> cleanup
+  preflight.py             # read-only cutover readiness checks (docs/DEPLOY.md)
   db/                       # SQLAlchemy models (same schema + provider_health) + session
   credits/                  # credit/quota service ported from the old bot's logic
   providers/                # external extraction providers (tikwm, musicaldown, ytmp3, cobalt)
@@ -108,8 +118,11 @@ media_bot_v2/
   engines/                  # per-platform engines (direct, youtube, tiktok)
   queue/                    # concurrency limiting
   upload/                   # large-file splitting for uploads over 2GB
+deploy/
+  download-bot-v2.service  # sample systemd unit
 docs/
   providers.md              # verified endpoints, request flows, and limitations reference
+  DEPLOY.md                 # server setup, PO token/JS runtime install, cutover, rollback
 tests/                      # pytest, no live Telegram/DB connections
 spec/SPEC.md                # full specification
 spec/INVENTORY.md           # old-bot audit (keep/rebuild/drop per item)
@@ -145,4 +158,14 @@ spec/INVENTORY.md           # old-bot audit (keep/rebuild/drop per item)
   stream of new messages per download phase.
 - **`provider_health` is a v2-only table**: Created with `IF NOT EXISTS` on startup,
   it does not alter or conflict with the shared legacy production tables.
+- **Provider registry default in `register_handlers`**: if no `registry` is
+  passed, one is created empty and logged as a warning rather than silently
+  used. An empty registry has no providers registered for any platform, so
+  TikTok/YouTube fallback silently never leaves local yt-dlp. This is
+  intentional for tests that only exercise handler wiring or the direct-link
+  engine and don't care about provider fallback; `bootstrap.py` always passes
+  `registry=build_provider_registry(settings)` for the real running bot. If
+  you see the "external extraction providers are DISABLED" warning in
+  production logs, `register_handlers` is being called without a registry
+  somewhere it shouldn't be.
 

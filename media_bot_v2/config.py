@@ -53,6 +53,10 @@ class Settings(BaseSettings):
     # --- YouTube / Network options ---
     force_ipv4: bool = Field(default=False, validation_alias="FORCE_IPV4")
     potoken: str | None = Field(default=None, validation_alias="POTOKEN")
+    # Base URL of a self-hosted PO token provider server (e.g. bgutil-ytdlp-pot-provider,
+    # see docs/DEPLOY.md). Optional: only used by media_bot_v2.preflight to verify the
+    # provider is reachable before cutover; the engine itself only consumes POTOKEN above.
+    potoken_provider_url: str | None = Field(default=None, validation_alias="POTOKEN_PROVIDER_URL")
     youtube_cookies_file: str | None = Field(default=None, validation_alias="YOUTUBE_COOKIES_FILE")
     youtube_player_client: str | None = Field(
         default=None,
