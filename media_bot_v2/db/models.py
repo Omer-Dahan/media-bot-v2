@@ -53,10 +53,10 @@ class User(Base):
     is_blocked: Mapped[int | None] = mapped_column(Integer)
     config: Mapped[dict | None] = mapped_column(JSON)
 
-    settings: Mapped["Setting | None"] = relationship(
+    settings: Mapped[Setting | None] = relationship(
         back_populates="user", cascade="all, delete-orphan", uselist=False
     )
-    payments: Mapped[list["Payment"]] = relationship(
+    payments: Mapped[list[Payment]] = relationship(
         back_populates="user", cascade="all, delete-orphan"
     )
 
@@ -79,7 +79,7 @@ class Setting(Base):
     title_length: Mapped[int] = mapped_column(Integer, nullable=False, default=500)
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
 
-    user: Mapped["User"] = relationship(back_populates="settings")
+    user: Mapped[User] = relationship(back_populates="settings")
 
 
 class Payment(Base):
@@ -101,7 +101,7 @@ class Payment(Base):
     transaction_id: Mapped[str | None] = mapped_column(String(100))
     user_id: Mapped[int] = mapped_column(ForeignKey("users.id"), nullable=False)
 
-    user: Mapped["User"] = relationship(back_populates="payments")
+    user: Mapped[User] = relationship(back_populates="payments")
 
 
 class VideoCache(Base):
@@ -119,5 +119,5 @@ class VideoCache(Base):
     file_id: Mapped[str] = mapped_column(Text, nullable=False)
     meta: Mapped[str] = mapped_column(Text, nullable=False)
     created_at: Mapped[dt.datetime] = mapped_column(
-        DateTime, default=lambda: dt.datetime.now(dt.timezone.utc)
+        DateTime, default=lambda: dt.datetime.now(dt.UTC)
     )
