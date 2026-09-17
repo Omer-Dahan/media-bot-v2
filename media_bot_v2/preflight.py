@@ -17,14 +17,18 @@ Exit code is 0 if every check passed or was skipped, 1 if any check failed.
 
 from __future__ import annotations
 
+import contextlib
+import re
 import shutil
 import subprocess
 import sys
+import urllib.parse
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Literal
 
 import requests
+from pydantic import ValidationError
 from sqlalchemy import create_engine, inspect, text
 from sqlalchemy.engine import make_url
 
@@ -46,15 +50,58 @@ class CheckResult:
     detail: str
 
 
+def _mask_url(url_str: str) -> str:
+    """Render a URL or DSN with credentials redacted, for safe printing."""
+    with contextlib.suppress(Exception):
+        url = make_url(url_str)
+        return url.render_as_string(hide_password=True)
+    with contextlib.suppress(Exception):
+        parsed = urllib.parse.urlsplit(url_str)
+        if parsed.password:
+            user = parsed.username or ""
+            port_part = f":{parsed.port}" if parsed.port is not None else ""
+            host_part = parsed.hostname or ""
+            netloc = f"{user}:***@{host_part}{port_part}"
+            return urllib.parse.urlunsplit(
+                (parsed.scheme, netloc, parsed.path, parsed.query, parsed.fragment)
+            )
+    return re.sub(r"://([^:@/\s]*):([^@/\s]+)@", r"://\1:***@", url_str)
+
+
 def _mask_dsn(dsn: str) -> str:
     """Render a DB DSN with the password redacted, for safe printing."""
-    try:
-        url = make_url(dsn)
-    except Exception:  # noqa: BLE001 - malformed DSN just prints unmasked, still a report line
-        return dsn
-    if url.password:
-        url = url.set(password="***")
-    return str(url)
+    return _mask_url(dsn)
+
+
+def _extract_credentials(url_str: str) -> list[str]:
+    secrets: list[str] = []
+    with contextlib.suppress(Exception):
+        url = make_url(url_str)
+        if url.password:
+            secrets.append(url.password)
+    with contextlib.suppress(Exception):
+        parsed = urllib.parse.urlsplit(url_str)
+        if parsed.password and parsed.password not in secrets:
+            secrets.append(parsed.password)
+    m = re.search(r"://[^:@/\s]*:([^@/\s]+)@", url_str)
+    if m and m.group(1) not in secrets:
+        secrets.append(m.group(1))
+    return secrets
+
+
+def _sanitize_text(text: str, *source_urls: str | None) -> str:
+    """Redact credentials and full URLs from any error or report string."""
+    result = text
+    for url_str in source_urls:
+        if not url_str:
+            continue
+        if url_str in result:
+            result = result.replace(url_str, _mask_url(url_str))
+        for secret in _extract_credentials(url_str):
+            if secret and secret in result:
+                result = result.replace(secret, "***")
+    result = re.sub(r"://([^:@/\s]*):([^@/\s]+)@", r"://\1:***@", result)
+    return result
 
 
 def check_database(settings: Settings) -> CheckResult:
@@ -62,15 +109,18 @@ def check_database(settings: Settings) -> CheckResult:
     tables the old bot created are present, so we know we're pointed at
     the real production schema rather than an empty database."""
     masked = _mask_dsn(settings.db_dsn)
-    engine = create_engine(settings.db_dsn)
+    engine = None
     try:
+        engine = create_engine(settings.db_dsn)
         with engine.connect() as conn:
             conn.execute(text("SELECT 1"))
             tables = set(inspect(conn).get_table_names())
     except Exception as exc:  # noqa: BLE001 - any DB driver error is a readiness failure, not a crash
-        return CheckResult("database", "fail", f"Could not connect to {masked}: {exc}")
+        safe_exc = _sanitize_text(str(exc), settings.db_dsn)
+        return CheckResult("database", "fail", f"Could not connect to {masked}: {safe_exc}")
     finally:
-        engine.dispose()
+        if engine is not None:
+            engine.dispose()
 
     missing = [t for t in EXPECTED_LEGACY_TABLES if t not in tables]
     if missing:
@@ -148,20 +198,22 @@ def check_potoken_provider(settings: Settings) -> CheckResult:
             "POTOKEN_PROVIDER_URL is not set; skipping (a static POTOKEN, if set, is not "
             "verified by this check)",
         )
+    masked_url = _mask_url(settings.potoken_provider_url)
     url = settings.potoken_provider_url.rstrip("/") + "/ping"
     try:
         response = requests.get(url, timeout=_HTTP_TIMEOUT_SECONDS)
         response.raise_for_status()
     except Exception as exc:  # noqa: BLE001 - any connection/HTTP error means the provider isn't ready
+        safe_exc = _sanitize_text(str(exc), settings.potoken_provider_url)
         return CheckResult(
             "potoken_provider",
             "fail",
-            f"PO token provider at {settings.potoken_provider_url} did not respond: {exc}",
+            f"PO token provider at {masked_url} did not respond: {safe_exc}",
         )
     return CheckResult(
         "potoken_provider",
         "pass",
-        f"PO token provider at {settings.potoken_provider_url} responded",
+        f"PO token provider at {masked_url} responded",
     )
 
 
@@ -224,16 +276,22 @@ def check_provider_health_table(settings: Settings) -> CheckResult:
     """Create the v2-only provider_health table if missing. Scoped to this
     one table (not Base.metadata.create_all) so it can never attempt DDL
     against the shared legacy tables."""
-    engine = create_engine(settings.db_dsn)
+    masked = _mask_dsn(settings.db_dsn)
+    engine = None
     try:
+        engine = create_engine(settings.db_dsn)
         existed_before = ProviderHealth.__tablename__ in inspect(engine).get_table_names()
         ProviderHealth.__table__.create(bind=engine, checkfirst=True)
     except Exception as exc:  # noqa: BLE001 - any DDL/driver error is a readiness failure, not a crash
+        safe_exc = _sanitize_text(str(exc), settings.db_dsn)
         return CheckResult(
-            "provider_health_table", "fail", f"Could not create/verify provider_health: {exc}"
+            "provider_health_table",
+            "fail",
+            f"Could not create/verify provider_health on {masked}: {safe_exc}",
         )
     finally:
-        engine.dispose()
+        if engine is not None:
+            engine.dispose()
     if existed_before:
         return CheckResult("provider_health_table", "pass", "provider_health table already exists")
     return CheckResult(
@@ -271,8 +329,35 @@ def format_report(results: list[CheckResult]) -> str:
     return "\n".join(lines)
 
 
+def format_config_error(exc: Exception) -> str:
+    """Format a configuration error into a human-readable report without tracebacks."""
+    problems: list[str] = []
+    if isinstance(exc, ValidationError):
+        for error in exc.errors():
+            loc = ".".join(str(part) for part in error.get("loc", ())) or "settings"
+            msg = error.get("msg", "Invalid value")
+            if msg.startswith("Value error, "):
+                msg = msg.removeprefix("Value error, ")
+            problems.append(f"{loc}: {msg}")
+    else:
+        problems.append(str(exc))
+
+    formatted_problems = "\n".join(f"  - {p}" for p in problems)
+    detail = (
+        f"Missing or invalid configuration:\n{formatted_problems}\n\n"
+        "Set the required variables in .env (see .env.example) or the environment."
+    )
+    result = CheckResult("configuration", "fail", detail)
+    return format_report([result])
+
+
 def main() -> int:
-    settings = load_settings()
+    try:
+        settings = load_settings()
+    except Exception as exc:  # noqa: BLE001 - user-facing CLI error, not an unhandled crash
+        print(format_config_error(exc))
+        return 1
+
     results = run_all(settings)
     print(format_report(results))
     return 1 if any(r.status == "fail" for r in results) else 0

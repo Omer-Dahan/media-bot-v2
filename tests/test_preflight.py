@@ -8,6 +8,7 @@ import threading
 import types
 from pathlib import Path
 
+import requests
 from sqlalchemy import create_engine
 
 from media_bot_v2 import preflight
@@ -248,3 +249,111 @@ def test_main_returns_zero_exit_code_when_all_pass(tmp_path, monkeypatch, capsys
 
     assert exit_code == 0
     assert "FAIL" not in capsys.readouterr().out
+
+
+def test_mask_url_redacts_credentials():
+    assert (
+        preflight._mask_url("mysql+pymysql://user:secret@localhost:3306/db")
+        == "mysql+pymysql://user:***@localhost:3306/db"
+    )
+    assert (
+        preflight._mask_url("http://user:secret@provider.internal:4416")
+        == "http://user:***@provider.internal:4416"
+    )
+    assert preflight._mask_url("sqlite:///tmp/db.sqlite3") == "sqlite:///tmp/db.sqlite3"
+    assert (
+        preflight._mask_url("custom://admin:pass@host:99999/path")
+        == "custom://admin:***@host:99999/path"
+    )
+
+
+def test_sanitize_text_redacts_credentials_and_urls():
+    dsn = "mysql+pymysql://dbuser:mypassword@localhost/dbname"
+    error_message = (
+        "Could not connect to mysql+pymysql://dbuser:mypassword@localhost: "
+        "Access denied for user 'dbuser' (using password: mypassword)"
+    )
+    sanitized = preflight._sanitize_text(error_message, dsn)
+    assert "mypassword" not in sanitized
+    assert "mysql+pymysql://dbuser:***@localhost" in sanitized
+    assert "***" in sanitized
+
+
+def test_check_database_masks_credentials_in_exception(monkeypatch):
+    def fake_create_engine(*args, **kwargs):
+        raise RuntimeError("Connection error for mysql+pymysql://user:secret@localhost:3306/db")
+
+    monkeypatch.setattr(preflight, "create_engine", fake_create_engine)
+    settings = types.SimpleNamespace(db_dsn="mysql+pymysql://user:secret@localhost:3306/db")
+    result = preflight.check_database(settings)
+    assert result.status == "fail"
+    assert "secret" not in result.detail
+    assert "***" in result.detail
+
+
+def test_check_potoken_provider_masks_credentials_in_url_and_exception(monkeypatch):
+    def fake_get(*args, **kwargs):
+        raise requests.exceptions.HTTPError(
+            "500 Server Error for url: http://user:secret@127.0.0.1:4416/ping"
+        )
+
+    monkeypatch.setattr(preflight.requests, "get", fake_get)
+    settings = types.SimpleNamespace(potoken_provider_url="http://user:secret@127.0.0.1:4416")
+    result = preflight.check_potoken_provider(settings)
+    assert result.status == "fail"
+    assert "secret" not in result.detail
+    assert "http://user:***@127.0.0.1:4416" in result.detail
+    assert "***" in result.detail
+
+
+def test_check_potoken_provider_masks_credentials_on_pass(monkeypatch):
+    class _FakeResponse:
+        def raise_for_status(self):
+            pass
+
+    monkeypatch.setattr(preflight.requests, "get", lambda *a, **k: _FakeResponse())
+    settings = types.SimpleNamespace(potoken_provider_url="http://user:secret@127.0.0.1:4416")
+    result = preflight.check_potoken_provider(settings)
+    assert result.status == "pass"
+    assert "secret" not in result.detail
+    assert "http://user:***@127.0.0.1:4416" in result.detail
+
+
+def test_check_provider_health_table_masks_credentials_on_failure(monkeypatch):
+    def fake_create_engine(*args, **kwargs):
+        raise RuntimeError("Failed to connect with mysql+pymysql://user:secret@localhost:3306/db")
+
+    monkeypatch.setattr(preflight, "create_engine", fake_create_engine)
+    settings = types.SimpleNamespace(db_dsn="mysql+pymysql://user:secret@localhost:3306/db")
+    result = preflight.check_provider_health_table(settings)
+    assert result.status == "fail"
+    assert "secret" not in result.detail
+    assert "***" in result.detail
+
+
+def test_main_handles_missing_config_without_traceback(capsys, monkeypatch):
+    monkeypatch.delenv("APP_ID", raising=False)
+    monkeypatch.delenv("APP_HASH", raising=False)
+    monkeypatch.delenv("BOT_TOKEN", raising=False)
+    monkeypatch.setattr(preflight, "load_settings", lambda: Settings(_env_file=None))
+
+    exit_code = preflight.main()
+
+    captured = capsys.readouterr()
+    assert exit_code == 1
+    assert "Traceback" not in captured.out
+    assert "Traceback" not in captured.err
+    assert "[FAIL] configuration: Missing or invalid configuration:" in captured.out
+    assert "APP_ID" in captured.out
+    assert "APP_HASH" in captured.out
+    assert "BOT_TOKEN" in captured.out
+    assert "1 check(s) failed - not ready for cutover." in captured.out
+
+
+def test_format_config_error_with_generic_exception():
+    err = RuntimeError("Unexpected disk failure")
+    report = preflight.format_config_error(err)
+    assert "[FAIL] configuration: Missing or invalid configuration:" in report
+    assert "Unexpected disk failure" in report
+    assert "Traceback" not in report
+    assert "1 check(s) failed - not ready for cutover." in report
