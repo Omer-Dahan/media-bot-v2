@@ -1,16 +1,156 @@
-"""Request router: maps incoming messages/commands to engine dispatch.
-
-Placeholder for M1 - wires up command handlers (/start, /help, /settings,
-...) and delegates URL messages to media_bot_v2.engines. No engine logic
-lives here.
+"""Request router: Telethon event handlers wired to commands, the settings
+menu, the YouTube quality-select menu (UI only - the YouTube engine itself
+lands in M2), and the direct-link download pipeline, which is the one
+engine implemented end-to-end in M1 (spec/SPEC.md M1 item 7).
 """
 
 from __future__ import annotations
 
-from telethon import TelegramClient, events
+import logging
+import re
+import time
+
+from sqlalchemy.orm import sessionmaker
+from telethon import Button, TelegramClient, events
+from telethon.errors import MessageNotModifiedError
+
+from media_bot_v2.credits.exceptions import (
+    BandwidthExhaustedException,
+    CreditsExhaustedException,
+    UserBlockedException,
+)
+from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.db.session import session_scope
+from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.telegram import settings_menu, texts
+from media_bot_v2.telegram.callback_data import decode
+from media_bot_v2.telegram.progress import MessageProgressReporter
+from media_bot_v2.telegram.quality_menu import QualitySelectionStore, build_quality_markup
+from media_bot_v2.telegram.uploader import TelethonUploader
+
+logger = logging.getLogger(__name__)
+
+URL_RE = re.compile(r"https?://\S+")
+YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
+TIKTOK_HOSTS = ("tiktok.com",)
+INSTAGRAM_HOSTS = ("instagram.com",)
 
 
-def register_handlers(client: TelegramClient) -> None:
+def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
+    return any(host in url.lower() for host in hosts)
+
+
+def _sender_info(event) -> tuple[str | None, str | None]:
+    sender = event.sender
+    return getattr(sender, "first_name", None), getattr(sender, "username", None)
+
+
+def register_handlers(
+    client: TelegramClient,
+    *,
+    session_factory: sessionmaker,
+    credits_service: CreditsService,
+    free_download: int,
+    pipeline: DownloadPipeline,
+    archive_channel: str | None,
+) -> None:
+    quality_store = QualitySelectionStore()
+    direct_engine = DirectEngine()
+
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
-        await event.respond("media-bot-v2 skeleton: handlers not implemented yet.")
+        first_name, username = _sender_info(event)
+        with session_scope(session_factory) as session:
+            settings_menu.get_or_create_user(
+                session, event.sender_id, first_name=first_name, username=username, free_download=free_download
+            )
+        await event.respond(texts.START, link_preview=False)
+
+    @client.on(events.NewMessage(pattern="/help"))
+    async def help_handler(event: events.NewMessage.Event) -> None:
+        await event.respond(
+            texts.HELP,
+            link_preview=False,
+            buttons=[[Button.url("לצ'אט איתי 💬", "https://t.me/YD_IL")]],
+        )
+
+    @client.on(events.NewMessage(pattern="/about"))
+    async def about_handler(event: events.NewMessage.Event) -> None:
+        await event.respond(texts.ABOUT)
+
+    @client.on(events.NewMessage(pattern="/ping"))
+    async def ping_handler(event: events.NewMessage.Event) -> None:
+        start = time.monotonic()
+        message = await event.respond(texts.PING_MESSAGE)
+        elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+        await message.edit(texts.PING_RESULT.format(ms=elapsed_ms))
+
+    @client.on(events.NewMessage(pattern="/settings"))
+    async def settings_handler(event: events.NewMessage.Event) -> None:
+        first_name, username = _sender_info(event)
+        with session_scope(session_factory) as session:
+            user = settings_menu.get_or_create_user(
+                session, event.sender_id, first_name=first_name, username=username, free_download=free_download
+            )
+            buttons = settings_menu.build_settings_buttons(user.settings)
+        await event.respond(texts.SETTINGS, buttons=buttons)
+
+    @client.on(events.CallbackQuery(pattern=rb"^toggle_"))
+    async def toggle_handler(event: events.CallbackQuery.Event) -> None:
+        toggle_key = decode(event.data)[0]
+        with session_scope(session_factory) as session:
+            user = settings_menu.get_or_create_user(
+                session, event.sender_id, first_name=None, username=None, free_download=free_download
+            )
+            answer = settings_menu.apply_toggle(user.settings, toggle_key)
+            buttons = settings_menu.build_settings_buttons(user.settings)
+        await event.answer(answer)
+        try:
+            await event.edit(texts.SETTINGS, buttons=buttons)
+        except MessageNotModifiedError:
+            pass  # content unchanged (e.g. same toggle value) - nothing to surface
+
+    @client.on(events.CallbackQuery(pattern=rb"^ytq:"))
+    async def quality_pick_handler(event: events.CallbackQuery.Event) -> None:
+        await event.answer(texts.YOUTUBE_NOT_YET_IMPLEMENTED, alert=True)
+
+    @client.on(events.NewMessage())
+    async def url_handler(event: events.NewMessage.Event) -> None:
+        raw_text = event.raw_text or ""
+        if raw_text.startswith("/"):
+            return
+        match = URL_RE.search(raw_text)
+        if not match:
+            return
+        url = match.group(0)
+
+        if _host_matches(url, YOUTUBE_HOSTS):
+            url_hash = quality_store.put(url)
+            await event.respond(
+                texts.YOUTUBE_QUALITY_SELECT.format(title="סרטון יוטיוב", duration="לא ידוע"),
+                buttons=build_quality_markup(url_hash),
+            )
+            return
+        if _host_matches(url, TIKTOK_HOSTS):
+            await event.respond(texts.TIKTOK_NOT_YET_IMPLEMENTED)
+            return
+        if _host_matches(url, INSTAGRAM_HOSTS):
+            await event.respond(texts.INSTAGRAM_NOT_YET_IMPLEMENTED)
+            return
+
+        message = await event.respond(texts.DOWNLOAD_STARTED)
+        progress = MessageProgressReporter(message)
+        uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+        try:
+            await pipeline.run(
+                user_id=event.sender_id,
+                url=url,
+                engine=direct_engine,
+                uploader=uploader,
+                progress=progress,
+            )
+        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+            await progress.update(str(exc))
+        except Exception:
+            logger.exception("Direct download failed for url=%s", url)
