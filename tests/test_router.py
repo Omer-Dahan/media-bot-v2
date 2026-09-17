@@ -14,6 +14,7 @@ from telethon.sessions import MemorySession
 from media_bot_v2.cache.video_cache import compute_cache_key
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
+from media_bot_v2.engines.tiktok import TikTokEngine
 from media_bot_v2.engines.youtube import YouTubeDownloadError, YouTubeEngine
 from media_bot_v2.pipeline import DownloadPipeline
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
@@ -403,4 +404,22 @@ async def test_quality_pick_playlist_regular_user_zero_credits_shows_error():
     pipeline.run.assert_not_called()
     assert len(cb_event.messages) == 1
     assert "הקרדיטים שלך נגמרו." in cb_event.messages[0].edits
+
+
+async def test_url_handler_tiktok_link_runs_pipeline_with_tiktok_engine():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline, archive_channel="@my_archive")
+    url_handler = _find_url_handler(client)
+
+    url_event = _FakeEvent("https://www.tiktok.com/@user/video/7123456789", 1)
+    await url_handler(url_event)
+
+    pipeline.run.assert_awaited_once()
+    _, kwargs = pipeline.run.call_args
+    assert kwargs["user_id"] == 1
+    assert kwargs["url"] == "https://www.tiktok.com/@user/video/7123456789"
+    assert isinstance(kwargs["engine"], TikTokEngine)
+    assert kwargs["archive_channel"] == "@my_archive"
+    assert kwargs["cache_key"] == compute_cache_key("https://www.tiktok.com/@user/video/7123456789", "tiktok")
+
 

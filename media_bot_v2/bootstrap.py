@@ -17,6 +17,8 @@ from media_bot_v2.db.session import build_session_factory
 from media_bot_v2.engines.youtube import check_js_runtime
 from media_bot_v2.logging_setup import configure_logging
 from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.providers.health import ProviderHealthTracker
+from media_bot_v2.providers.registry import build_provider_registry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram.client import build_client
 from media_bot_v2.telegram.router import register_handlers
@@ -45,6 +47,12 @@ def main() -> None:
         per_user_limit=settings.user_workers,
     )
     video_cache_store = VideoCacheStore(session_factory)
+    health_tracker = ProviderHealthTracker(
+        session_factory,
+        failure_threshold=settings.provider_failure_threshold,
+        cooldown_seconds=settings.provider_cooldown_seconds,
+    )
+    registry = build_provider_registry(settings)
 
     client = build_client(settings, session_name=settings.session_name)
     register_handlers(
@@ -63,6 +71,9 @@ def main() -> None:
         youtube_player_client=settings.youtube_player_client,
         youtube_js_runtimes=settings.youtube_js_runtimes,
         youtube_remote_components=settings.youtube_remote_components,
+        health_tracker=health_tracker,
+        registry=registry,
+        tiktok_cookies_file=settings.tiktok_cookies_file,
     )
 
     logger.info("Starting media-bot-v2")

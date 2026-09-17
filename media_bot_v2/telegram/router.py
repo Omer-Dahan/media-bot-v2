@@ -25,6 +25,7 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.session import session_scope
 from media_bot_v2.engines.base import DownloadTooLargeError
 from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import (
     YouTubeDownloadError,
     YouTubeEngine,
@@ -32,6 +33,8 @@ from media_bot_v2.engines.youtube import (
     is_playlist_url,
 )
 from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.providers.health import ProviderHealthTracker
+from media_bot_v2.providers.registry import ProviderRegistry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import settings_menu, texts
 from media_bot_v2.telegram.callback_data import decode
@@ -73,6 +76,9 @@ def register_handlers(
     youtube_player_client: str | None = None,
     youtube_js_runtimes: str | None = None,
     youtube_remote_components: str | None = None,
+    health_tracker: ProviderHealthTracker | None = None,
+    registry: ProviderRegistry | None = None,
+    tiktok_cookies_file: str | None = None,
 ) -> None:
     quality_store = QualitySelectionStore()
     direct_engine = DirectEngine(max_download_size=max_download_size)
@@ -80,6 +86,10 @@ def register_handlers(
         limiter = ConcurrencyLimiter(global_limit=100, per_user_limit=2)
     if video_cache_store is None:
         video_cache_store = VideoCacheStore(session_factory)
+    if health_tracker is None:
+        health_tracker = ProviderHealthTracker(session_factory)
+    if registry is None:
+        registry = ProviderRegistry()
 
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
@@ -191,6 +201,8 @@ def register_handlers(
                 player_client=youtube_player_client,
                 js_runtimes=youtube_js_runtimes,
                 remote_components=youtube_remote_components,
+                registry=registry,
+                health_tracker=health_tracker,
             )
 
             media_ref = extract_video_id(url) or url
@@ -241,7 +253,39 @@ def register_handlers(
             )
             return
         if _host_matches(url, TIKTOK_HOSTS):
-            await event.respond(texts.TIKTOK_NOT_YET_IMPLEMENTED)
+            message = await event.respond(texts.DOWNLOAD_STARTED)
+            progress = MessageProgressReporter(message)
+            uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+
+            async def on_wait() -> None:
+                await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+
+            tiktok_engine = TikTokEngine(
+                registry=registry,
+                health_tracker=health_tracker,
+                max_download_size=max_download_size,
+                cookies_file=tiktok_cookies_file,
+                progress=progress,
+            )
+
+            try:
+                async with limiter.slot(event.sender_id, on_wait=on_wait):
+                    await pipeline.run(
+                        user_id=event.sender_id,
+                        url=url,
+                        engine=tiktok_engine,
+                        uploader=uploader,
+                        progress=progress,
+                        cache=video_cache_store,
+                        cache_key=compute_cache_key(url, "tiktok"),
+                        archive_channel=archive_channel,
+                    )
+            except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+                await progress.update(str(exc))
+            except (TikTokDownloadError, DownloadTooLargeError) as exc:
+                await progress.update(str(exc))
+            except Exception:
+                logger.exception("TikTok download failed for url=%s", url)
             return
         if _host_matches(url, INSTAGRAM_HOSTS):
             await event.respond(texts.INSTAGRAM_NOT_YET_IMPLEMENTED)

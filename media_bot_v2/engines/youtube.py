@@ -33,12 +33,18 @@ import re
 import shutil
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 
 from media_bot_v2.engines.base import BaseEngine, DownloadResult, DownloadTooLargeError
+from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.telegram import texts
+
+if TYPE_CHECKING:
+    from media_bot_v2.providers.health import ProviderHealthTracker
+    from media_bot_v2.providers.registry import ProviderRegistry
 
 logger = logging.getLogger(__name__)
 
@@ -415,6 +421,8 @@ class YouTubeEngine(BaseEngine):
         player_client: str | None = None,
         js_runtimes: dict[str, dict] | list[str] | str | None = None,
         remote_components: list[str] | set[str] | dict | str | None = None,
+        registry: ProviderRegistry | None = None,
+        health_tracker: ProviderHealthTracker | None = None,
     ) -> None:
         if playlist_item_limit is not None:
             if playlist_item_limit <= 0:
@@ -429,6 +437,8 @@ class YouTubeEngine(BaseEngine):
         self._is_playlist = is_playlist
         self._playlist_item_limit = playlist_item_limit
         self._max_retries = max_retries
+        self._registry = registry
+        self._health_tracker = health_tracker
         self._player_client = resolve_player_client(
             player_client,
             has_cookies=bool(cookies_file),
@@ -446,7 +456,58 @@ class YouTubeEngine(BaseEngine):
     async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
         dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
-        return await asyncio.to_thread(self._download_sync, url, dest_dir, loop)
+        try:
+            return await asyncio.to_thread(self._download_sync, url, dest_dir, loop)
+        except DownloadTooLargeError:
+            raise
+        except YouTubeDownloadError as exc:
+            if self._registry is None or self._health_tracker is None or self._is_playlist:
+                raise
+            logger.info("Local YouTube engine failed (%s); attempting provider fallback", exc)
+            fallback_res = await self._try_fallback_providers(url, dest_dir)
+            if fallback_res is not None:
+                return fallback_res
+            raise
+
+    async def _try_fallback_providers(self, url: str, dest_dir: Path) -> DownloadResult | None:
+        if self._registry is None or self._health_tracker is None:
+            return None
+        candidates = self._registry.get_providers_for_platform("youtube")
+        ordered_providers = self._health_tracker.order_for("youtube", candidates)
+
+        for provider in ordered_providers:
+            start_time = time.monotonic()
+            try:
+                logger.info("Attempting YouTube provider %s for %s", provider.name, url)
+                res = await provider.fetch(url)
+                dl_result = await download_provider_media(
+                    res,
+                    dest_dir=dest_dir,
+                    max_size=self._max_download_size,
+                )
+                elapsed = time.monotonic() - start_time
+                self._health_tracker.record_success(provider.name, "youtube", elapsed)
+                logger.info(
+                    "YouTube provider %s succeeded in %.2fs for %s",
+                    provider.name,
+                    elapsed,
+                    url,
+                )
+                return dl_result
+            except DownloadTooLargeError:
+                raise
+            except Exception as prov_exc:  # noqa: BLE001 - any provider failure must fall through to next candidate
+                elapsed = time.monotonic() - start_time
+                logger.warning(
+                    "YouTube provider %s failed for %s (took %.2fs): %s",
+                    provider.name,
+                    url,
+                    elapsed,
+                    prov_exc,
+                )
+                self._health_tracker.record_failure(provider.name, "youtube", str(prov_exc))
+        return None
+
 
     def _build_ydl_opts(self, dest_dir: Path, loop: asyncio.AbstractEventLoop) -> dict:
         is_playlist_request = self._is_playlist
