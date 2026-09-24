@@ -42,6 +42,8 @@ def main() -> None:
         credits_service=credits_service,
         download_dir=Path(settings.download_dir),
         request_timeout=settings.request_timeout,
+        download_timeout=settings.request_timeout,
+        upload_timeout=settings.upload_timeout,
     )
     limiter = ConcurrencyLimiter(
         global_limit=settings.workers,

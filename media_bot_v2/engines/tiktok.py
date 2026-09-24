@@ -11,12 +11,14 @@ import yt_dlp
 
 from media_bot_v2.engines.base import (
     BaseEngine,
+    CancellationToken,
     DownloadResult,
     DownloadTooLargeError,
     RouteAttemptTracker,
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.youtube import (
+    _DownloadCancelledSignal,
     _result_from_info,
     summarize_provider_failure,
     summarize_ytdlp_failure,
@@ -58,7 +60,13 @@ class TikTokEngine(BaseEngine):
     def matches(self, url: str) -> bool:
         return matches_tiktok_url(url)
 
-    async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+    async def download(
+        self,
+        url: str,
+        *,
+        dest_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
         if not self.matches(url):
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
@@ -70,6 +78,8 @@ class TikTokEngine(BaseEngine):
         attempted_providers: set[str] = set()
 
         for provider in ordered_providers:
+            if cancel_token is not None and cancel_token.is_set():
+                break
             if not provider.matches(url):
                 logger.info("Skipping TikTok provider %s for %s: URL capability not supported", provider.name, url)
                 continue
@@ -85,6 +95,7 @@ class TikTokEngine(BaseEngine):
                     res,
                     dest_dir=dest_dir,
                     max_size=self._max_download_size,
+                    cancel_token=cancel_token,
                 )
                 elapsed = time.monotonic() - start_time
                 self._health_tracker.record_success(provider.name, "tiktok", elapsed)
@@ -109,10 +120,13 @@ class TikTokEngine(BaseEngine):
                 self._health_tracker.record_failure(provider.name, "tiktok", str(exc))
                 tracker.record(provider.name, summarize_provider_failure(exc))
 
+        if cancel_token is not None and cancel_token.is_set():
+            return DownloadResult(file_paths=[])
+
         # All providers failed or were suppressed; try local yt-dlp engine
         logger.info("All TikTok providers failed for %s, falling back to local yt-dlp", url)
         try:
-            return await asyncio.to_thread(self._download_local_sync, url, dest_dir)
+            return await asyncio.to_thread(self._download_local_sync, url, dest_dir, cancel_token)
         except DownloadTooLargeError:
             raise
         except Exception as exc:
@@ -120,17 +134,39 @@ class TikTokEngine(BaseEngine):
             tracker.record("מנוע מקומי (yt-dlp)", summarize_ytdlp_failure(exc))
             raise TikTokDownloadError(tracker.format_summary()) from exc
 
-    def _download_local_sync(self, url: str, dest_dir: Path) -> DownloadResult:
+    def _download_local_sync(
+        self,
+        url: str,
+        dest_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
+        if cancel_token is not None and cancel_token.is_set():
+            return DownloadResult(file_paths=[])
+
+        def hook(d: dict) -> None:
+            if cancel_token is not None and cancel_token.is_set():
+                raise _DownloadCancelledSignal("Download cancelled by timeout budget")
+
         ydl_opts = {
             "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
             "max_filesize": self._max_download_size,
             "quiet": True,
             "no_warnings": True,
             "noplaylist": True,
+            "progress_hooks": [hook],
         }
         if self._cookies_file:
             ydl_opts["cookiefile"] = self._cookies_file
 
-        with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-            info = ydl.extract_info(url, download=True)
-            return _result_from_info(info)
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                info = ydl.extract_info(url, download=True)
+                return _result_from_info(info)
+        except _DownloadCancelledSignal:
+            logger.info("TikTok download cancelled by timeout budget")
+            return DownloadResult(file_paths=[])
+        except yt_dlp.utils.DownloadError as exc:
+            if isinstance(exc.__cause__, _DownloadCancelledSignal):
+                logger.info("TikTok download cancelled by timeout budget")
+                return DownloadResult(file_paths=[])
+            raise

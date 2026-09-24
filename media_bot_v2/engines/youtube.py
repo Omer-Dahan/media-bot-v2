@@ -40,6 +40,7 @@ import yt_dlp
 
 from media_bot_v2.engines.base import (
     BaseEngine,
+    CancellationToken,
     DownloadResult,
     DownloadTooLargeError,
     RouteAttemptTracker,
@@ -58,10 +59,15 @@ _QUALITY_HEIGHTS = {"1080": 1080, "720": 720, "480": 480, "360": 360}
 _VIDEO_ID_RE = re.compile(r"^[0-9A-Za-z_-]{11}$")
 _PROGRESS_THROTTLE_SECONDS = 2.0
 _JS_RUNTIME_BINARIES = ("deno", "node", "bun")
+YOUTUBE_DOMAINS = ("youtube.com", "youtu.be")
 
 
 class YouTubeDownloadError(Exception):
     """Raised with an already-classified, Hebrew, user-facing message."""
+
+    def __init__(self, message: str, original_error: str | Exception | None = None) -> None:
+        super().__init__(message)
+        self.original_error = str(original_error) if original_error is not None else message
 
 
 class _DownloadTooLargeSignal(Exception):
@@ -69,10 +75,33 @@ class _DownloadTooLargeSignal(Exception):
     the reported total exceeds the configured cap - converted to
     DownloadTooLargeError once it surfaces back in `_download_sync`."""
 
+    def __init__(self, file_size: float | str, max_size: float | None = None) -> None:
+        if isinstance(file_size, str):
+            match = re.search(r"(\d+)\s*bytes exceeds.*?(\d+)", file_size)
+            if match:
+                self.file_size = float(match.group(1))
+                self.max_size = float(match.group(2))
+            else:
+                self.file_size = 0.0
+                self.max_size = float(max_size) if max_size is not None else 0.0
+        else:
+            self.file_size = float(file_size)
+            self.max_size = float(max_size) if max_size is not None else 0.0
+        super().__init__(texts.format_download_too_large(self.file_size, self.max_size))
+
+
+class _DownloadCancelledSignal(Exception):
+    """Raised from inside a yt-dlp progress hook to abort download when cancelled."""
+
 
 def matches_youtube_url(url: str) -> bool:
-    lowered = url.lower()
-    return "youtube.com" in lowered or "youtu.be" in lowered
+    try:
+        host = urlparse(url).netloc.split(":")[0].lower()
+    except (ValueError, AttributeError):
+        return False
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in YOUTUBE_DOMAINS)
 
 
 def extract_video_id(url: str) -> str | None:
@@ -338,6 +367,41 @@ _NETWORK_PATTERNS = (
 )
 
 
+_INTERNAL_LEAK_PATTERNS = (
+    "/srv/",
+    "/tmp/",
+    "/home/",
+    "/var/",
+    "/etc/",
+    "/usr/",
+    ".part",
+    ".tmp",
+    ".ytdl",
+    "http://",
+    "https://",
+    ".internal",
+    ".local",
+    "localhost",
+    "127.0.0.1",
+    "://",
+    "traceback",
+    'file "',
+)
+
+
+def _contains_internal_details(message: str) -> bool:
+    lowered = message.lower()
+    if any(pat in lowered for pat in _INTERNAL_LEAK_PATTERNS):
+        return True
+    if "/" in message and (" " not in message or "/" in message.split()[0]):
+        return True
+    # Detect unix paths like /path/to/file
+    if re.search(r"/[a-zA-Z0-9_\.-]+/[a-zA-Z0-9_\.-]+", message):
+        return True
+    # Detect IP addresses
+    return bool(re.search(r"\b\d{1,3}\.\d{1,3}\.\d{1,3}\.\d{1,3}\b", message))
+
+
 def classify_youtube_error(message: str | None) -> str:
     if not message:
         return "ההורדה נכשלה: לא התקבל קובץ מדיה מיוטיוב."
@@ -347,6 +411,10 @@ def classify_youtube_error(message: str | None) -> str:
             return hebrew
     if any(pattern in lowered for pattern in _NETWORK_PATTERNS):
         return "שגיאת רשת בהורדה מיוטיוב. נסה שוב בעוד מספר רגעים."
+    if _contains_internal_details(message):
+        logger.warning("Internal details suppressed from user error message: %s", message)
+        return "ההורדה מיוטיוב נכשלה. נסה שוב או שלח קישור אחר."
+    logger.warning("Unclassified YouTube error: %s", message)
     return f"ההורדה מיוטיוב נכשלה: {message[:200]}"
 
 
@@ -405,21 +473,22 @@ def _extract_file_paths(entry: dict) -> list[str]:
 
 
 def summarize_ytdlp_failure(exc: Exception | str) -> str:
-    msg = str(exc)
+    original = getattr(exc, "original_error", None)
+    msg = str(original) if original else str(exc)
     lowered = msg.lower()
-    if any(k in lowered for k in ("sign in", "bot detection", "login required", "authentication", "confirm you're not a bot")):
-        return "סרטון דורש התחברות או אימות"
-    if any(k in lowered for k in ("javascript runtime", "js runtime", "n challenge")):
+    if any(k in lowered for k in ("javascript runtime", "js runtime", "n challenge", "runtime", "javascript", "פענוח")):
         return "חסר runtime של JavaScript"
-    if any(k in lowered for k in ("po token", "po_token")):
+    if any(k in lowered for k in ("sign in", "bot detection", "login required", "authentication", "confirm you're not a bot", "זיהוי בוט", "נדרש אימות", "התחברות")):
+        return "סרטון דורש התחברות או אימות"
+    if any(k in lowered for k in ("po token", "po_token", "טוקן")):
         return "נדרש PO token"
-    if any(k in lowered for k in ("private", "unavailable", "removed")):
+    if any(k in lowered for k in ("private", "unavailable", "removed", "members-only", "פרטי", "אינו זמין", "נמחק")):
         return "סרטון פרטי או אינו זמין"
-    if any(k in lowered for k in ("format not available", "no video formats")):
+    if any(k in lowered for k in ("format not available", "no video formats", "requested format", "פורמט")):
         return "פורמט מבוקש אינו זמין"
-    if any(k in lowered for k in ("timeout", "connection")):
+    if any(k in lowered for k in ("timeout", "connection", "שגיאת רשת")):
         return "שגיאת רשת"
-    return msg[:60] if msg else "שגיאה במנוע המקומי"
+    return "שגיאה במנוע המקומי"
 
 
 def summarize_provider_failure(exc: Exception | str) -> str:
@@ -435,10 +504,10 @@ def summarize_provider_failure(exc: Exception | str) -> str:
         return "לא נמצאה כתובת להורדה"
     if "500" in lowered or "502" in lowered or "503" in lowered or "server error" in lowered:
         return "שגיאת שרת של הספק"
-    return msg[:60] if msg else "שגיאה בספק"
+    return "שגיאה בספק"
 
 
-def _result_from_info(info: dict) -> DownloadResult:
+def _result_from_info(info: dict, *, playlist_item_limit: int | None = None) -> DownloadResult:
     if info.get("_type") == "playlist" or "entries" in info:
         entries = [e for e in (info.get("entries") or []) if e]
         file_paths: list[str] = []
@@ -448,11 +517,18 @@ def _result_from_info(info: dict) -> DownloadResult:
         playlist_count = info.get("playlist_count") or info.get("n_entries")
         playlist_total = int(playlist_count) if playlist_count else None
         playlist_downloaded = len(file_paths)
+        playlist_trimmed_reason = None
+        if playlist_total is not None and playlist_downloaded < playlist_total:
+            if playlist_item_limit is not None and playlist_downloaded >= playlist_item_limit:
+                playlist_trimmed_reason = "ההורדה הוגבלה לפי יתרת הקרדיטים"
+            else:
+                playlist_trimmed_reason = "חלק מהפריטים אינם זמינים או נכשלו"
     else:
         file_paths = _extract_file_paths(info)
         title = info.get("title") or "YouTube"
         playlist_total = None
         playlist_downloaded = None
+        playlist_trimmed_reason = None
 
     if not file_paths:
         raise YouTubeDownloadError(classify_youtube_error(None))
@@ -461,6 +537,7 @@ def _result_from_info(info: dict) -> DownloadResult:
         title=title,
         playlist_total=playlist_total,
         playlist_downloaded=playlist_downloaded,
+        playlist_trimmed_reason=playlist_trimmed_reason,
     )
 
 
@@ -483,7 +560,7 @@ class YouTubeEngine(BaseEngine):
         po_token: str | None = None,
         is_playlist: bool = False,
         playlist_item_limit: int | None = None,
-        max_retries: int = 2,
+        max_retries: int = 0,
         player_client: str | None = None,
         js_runtimes: dict[str, dict] | list[str] | str | None = None,
         remote_components: list[str] | set[str] | dict | str | None = None,
@@ -519,13 +596,19 @@ class YouTubeEngine(BaseEngine):
     def matches(self, url: str) -> bool:
         return matches_youtube_url(url)
 
-    async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+    async def download(
+        self,
+        url: str,
+        *,
+        dest_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
         if not self.matches(url):
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._download_sync, url, dest_dir, loop)
+            return await asyncio.to_thread(self._download_sync, url, dest_dir, loop, cancel_token)
         except DownloadTooLargeError:
             raise
         except UnsupportedUrlError:
@@ -534,7 +617,9 @@ class YouTubeEngine(BaseEngine):
             if self._registry is None or self._health_tracker is None or self._is_playlist:
                 raise
             logger.info("Local YouTube engine failed (%s); attempting provider fallback", exc)
-            fallback_res = await self._try_fallback_providers(url, dest_dir, initial_error=exc)
+            fallback_res = await self._try_fallback_providers(
+                url, dest_dir, initial_error=exc, cancel_token=cancel_token
+            )
             if fallback_res is not None:
                 return fallback_res
             raise
@@ -544,6 +629,7 @@ class YouTubeEngine(BaseEngine):
         url: str,
         dest_dir: Path,
         initial_error: YouTubeDownloadError | None = None,
+        cancel_token: CancellationToken | None = None,
     ) -> DownloadResult | None:
         if self._registry is None or self._health_tracker is None:
             return None
@@ -557,6 +643,8 @@ class YouTubeEngine(BaseEngine):
         attempted_providers: set[str] = set()
 
         for provider in ordered_providers:
+            if cancel_token is not None and cancel_token.is_set():
+                break
             if not provider.matches(url):
                 logger.info("Skipping YouTube provider %s for %s: URL capability not supported", provider.name, url)
                 continue
@@ -572,6 +660,7 @@ class YouTubeEngine(BaseEngine):
                     res,
                     dest_dir=dest_dir,
                     max_size=self._max_download_size,
+                    cancel_token=cancel_token,
                 )
                 elapsed = time.monotonic() - start_time
                 self._health_tracker.record_success(provider.name, "youtube", elapsed)
@@ -600,8 +689,12 @@ class YouTubeEngine(BaseEngine):
             raise YouTubeDownloadError(tracker.format_summary())
         return None
 
-
-    def _build_ydl_opts(self, dest_dir: Path, loop: asyncio.AbstractEventLoop) -> dict:
+    def _build_ydl_opts(
+        self,
+        dest_dir: Path,
+        loop: asyncio.AbstractEventLoop,
+        cancel_token: CancellationToken | None = None,
+    ) -> dict:
         is_playlist_request = self._is_playlist
         opts: dict = {
             "format": build_format_selector(self._quality),
@@ -610,7 +703,7 @@ class YouTubeEngine(BaseEngine):
             "noplaylist": not is_playlist_request,
             "quiet": True,
             "no_warnings": True,
-            "progress_hooks": [self._make_progress_hook(loop)],
+            "progress_hooks": [self._make_progress_hook(loop, cancel_token)],
             "max_filesize": self._max_download_size,
             "retries": 3,
             "fragment_retries": 3,
@@ -637,16 +730,20 @@ class YouTubeEngine(BaseEngine):
         opts["extractor_args"] = {"youtube": youtube_args}
         return opts
 
-    def _make_progress_hook(self, loop: asyncio.AbstractEventLoop):
+    def _make_progress_hook(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        cancel_token: CancellationToken | None = None,
+    ):
         state = {"last_forward": 0.0}
 
         def hook(d: dict) -> None:
+            if cancel_token is not None and cancel_token.is_set():
+                raise _DownloadCancelledSignal("Download cancelled by timeout budget")
             if d.get("status") == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 if total and total > self._max_download_size:
-                    raise _DownloadTooLargeSignal(
-                        f"{total} bytes exceeds the {self._max_download_size} byte limit"
-                    )
+                    raise _DownloadTooLargeSignal(total, self._max_download_size)
             if self._progress is None:
                 return
             text = format_progress_text(d)
@@ -659,19 +756,42 @@ class YouTubeEngine(BaseEngine):
 
         return hook
 
-    def _download_sync(self, url: str, dest_dir: Path, loop: asyncio.AbstractEventLoop) -> DownloadResult:
-        ydl_opts = self._build_ydl_opts(dest_dir, loop)
+    def _download_sync(
+        self,
+        url: str,
+        dest_dir: Path,
+        loop: asyncio.AbstractEventLoop,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
+        ydl_opts = self._build_ydl_opts(dest_dir, loop, cancel_token)
         last_message: str | None = None
         for attempt in range(self._max_retries + 1):
+            if cancel_token is not None and cancel_token.is_set():
+                return DownloadResult(file_paths=[])
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
-                return _result_from_info(info)
+                return _result_from_info(info, playlist_item_limit=self._playlist_item_limit)
+            except _DownloadCancelledSignal:
+                logger.info("YouTube download cancelled by timeout budget")
+                return DownloadResult(file_paths=[])
             except _DownloadTooLargeSignal as exc:
-                raise DownloadTooLargeError(str(exc)) from exc
+                raise DownloadTooLargeError(
+                    texts.format_download_too_large(exc.file_size, exc.max_size),
+                    file_size=exc.file_size,
+                    max_size=exc.max_size,
+                ) from exc
             except yt_dlp.utils.DownloadError as exc:
+                if isinstance(exc.__cause__, _DownloadCancelledSignal):
+                    logger.info("YouTube download cancelled by timeout budget")
+                    return DownloadResult(file_paths=[])
                 if isinstance(exc.__cause__, _DownloadTooLargeSignal):
-                    raise DownloadTooLargeError(str(exc.__cause__)) from exc
+                    sig = exc.__cause__
+                    raise DownloadTooLargeError(
+                        texts.format_download_too_large(sig.file_size, sig.max_size),
+                        file_size=sig.file_size,
+                        max_size=sig.max_size,
+                    ) from exc
                 last_message = str(exc)
                 if attempt < self._max_retries and is_retryable_error(last_message):
                     logger.warning(
@@ -683,5 +803,5 @@ class YouTubeEngine(BaseEngine):
                     )
                     time.sleep(min(2**attempt, 8))
                     continue
-                raise YouTubeDownloadError(classify_youtube_error(last_message)) from exc
-        raise YouTubeDownloadError(classify_youtube_error(last_message))
+                raise YouTubeDownloadError(classify_youtube_error(last_message), original_error=last_message) from exc
+        raise YouTubeDownloadError(classify_youtube_error(last_message), original_error=last_message)

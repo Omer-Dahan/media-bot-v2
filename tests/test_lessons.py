@@ -15,6 +15,8 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import threading
+import time
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -22,20 +24,32 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
+from media_bot_v2.cache.video_cache import VideoCacheStore, compute_cache_key
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import (
     BaseEngine,
+    CancellationToken,
     DownloadResult,
     DownloadTooLargeError,
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.direct import DirectEngine
-from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
+from media_bot_v2.engines.tiktok import (
+    TikTokDownloadError,
+    TikTokEngine,
+    matches_tiktok_url,
+)
 from media_bot_v2.engines.youtube import (
     YouTubeDownloadError,
     YouTubeEngine,
+    _DownloadCancelledSignal,
+    _DownloadTooLargeSignal,
+    _result_from_info,
     classify_youtube_error,
+    matches_youtube_url,
+    summarize_provider_failure,
+    summarize_ytdlp_failure,
 )
 from media_bot_v2.pipeline import DownloadPipeline
 from media_bot_v2.providers.base import BaseProvider, ProviderFetchError, ProviderResult
@@ -47,6 +61,11 @@ from media_bot_v2.providers.tikdownloader import TikDownloaderProvider
 from media_bot_v2.providers.tikwm import TikWMProvider
 from media_bot_v2.providers.ytmp3 import YTmp3Provider
 from media_bot_v2.telegram import texts
+from media_bot_v2.telegram.router import (
+    TIKTOK_HOSTS,
+    YOUTUBE_HOSTS,
+    _host_matches,
+)
 
 
 class _MockProgress:
@@ -430,43 +449,316 @@ async def test_lesson7_playlist_trimming_reports_downloaded_out_of_total(tmp_pat
 # ==============================================================================
 
 
-async def test_lesson8_request_timeout_stops_reports_and_cleans_up(tmp_path):
-    """Exceeding request timeout budget cancels execution, updates progress, and deletes local files."""
+class _SlowStreamingSource:
+    """Simulates a slow server transferring chunks over real time."""
+
+    def __init__(self, total_bytes: int = 20 * 1024 * 1024, chunk_size: int = 64 * 1024) -> None:
+        self.total_bytes = total_bytes
+        self.chunk_size = chunk_size
+        self.bytes_sent = 0
+        self.closed = False
+        self._lock = threading.Lock()
+
+    def iter_content(self, chunk_size: int | None = None):
+        chunk_data = b"x" * self.chunk_size
+        while self.bytes_sent < self.total_bytes:
+            with self._lock:
+                if self.closed:
+                    break
+            time.sleep(0.01)  # Real time delay in streaming worker thread
+            with self._lock:
+                if self.closed:
+                    break
+                self.bytes_sent += len(chunk_data)
+            yield chunk_data
+
+    def close(self) -> None:
+        with self._lock:
+            self.closed = True
+
+    @property
+    def headers(self) -> dict[str, str]:
+        return {
+            "Content-Length": str(self.total_bytes),
+            "Content-Type": "application/octet-stream",
+        }
+
+    def raise_for_status(self) -> None:
+        pass
+
+    def __enter__(self):
+        return self
+
+    def __exit__(self, *args):
+        self.close()
+
+
+async def test_lesson8_active_transfer_actually_stops_on_timeout_with_byte_counter(tmp_path):
+    """Exceeding download timeout actually halts background thread streaming,
+    stops byte transfer well before total payload, and cleans up partial files."""
     _, credits_service, _ = _setup_test_db()
 
-    # Set a tiny timeout budget of 0.05 seconds
     pipeline = DownloadPipeline(
         credits_service=credits_service,
         download_dir=tmp_path,
-        request_timeout=0.05,
+        download_timeout=0.08,
     )
     uploader = _MockUploader()
     progress = _MockProgress()
+    direct_engine = DirectEngine()
 
-    class _HangingEngine(BaseEngine):
+    source = _SlowStreamingSource(total_bytes=20 * 1024 * 1024)
+
+    with (
+        patch("media_bot_v2.engines.direct.requests.get", return_value=source),
+        pytest.raises(TimeoutError),
+    ):
+        await pipeline.run(
+            user_id=1,
+            url="https://example.com/big_file.bin",
+            engine=direct_engine,
+            uploader=uploader,
+            progress=progress,
+        )
+
+    # Transfer was stopped far before transferring all 20MB
+    bytes_at_stop = source.bytes_sent
+    assert bytes_at_stop < 20 * 1024 * 1024
+    assert source.closed is True
+
+    # Confirm thread has actually stopped transferring: wait and verify byte counter is frozen
+    await asyncio.sleep(0.05)
+    assert source.bytes_sent == bytes_at_stop
+
+    # Progress message updated with timeout message
+    assert any(texts.REQUEST_TIMEOUT_EXCEEDED in update for update in progress.updates)
+    # All task files are cleaned up from disk
+    assert not any(tmp_path.rglob("*.bin"))
+    # No credits were charged
+    assert credits_service.get_total_credits(1) == 5
+
+
+def test_lesson8_ytdlp_progress_hook_raises_cancelled_signal_on_cancel_token():
+    token = CancellationToken()
+    engine = YouTubeEngine(quality="720", max_download_size=1000)
+    loop = asyncio.new_event_loop()
+    hook = engine._make_progress_hook(loop, cancel_token=token)
+
+    # When not cancelled, hook runs without raising
+    hook({"status": "downloading", "downloaded_bytes": 100, "total_bytes": 500})
+
+    # Set cancellation
+    token.set()
+    with pytest.raises(_DownloadCancelledSignal):
+        hook({"status": "downloading", "downloaded_bytes": 200, "total_bytes": 500})
+    loop.close()
+
+
+# ==============================================================================
+# M4.1 Regression Tests for Independent Verification Findings
+# ==============================================================================
+
+
+def test_m4_1_finding2_summarize_ytdlp_failure_preserves_english_and_handles_hebrew():
+    """Finding 2: failure summary works with English source message and with translated Hebrew message."""
+    # 1. Error wrapped in YouTubeDownloadError with original English error
+    err1 = YouTubeDownloadError(
+        "שגיאת פענוח ביוטיוב: חסר בשרת runtime של JavaScript (Node.js",
+        original_error="ERROR: No supported JavaScript runtime could be found",
+    )
+    assert summarize_ytdlp_failure(err1) == "חסר runtime של JavaScript"
+
+    # 2. String that was already translated to Hebrew
+    err2 = "שגיאת פענוח ביוטיוב: חסר בשרת runtime של JavaScript (Node.js"
+    assert summarize_ytdlp_failure(err2) == "חסר runtime של JavaScript"
+
+    # 3. Bot detection / auth required in Hebrew
+    err3 = "סרטון זה דורש אימות או זיהוי בוט"
+    assert summarize_ytdlp_failure(err3) == "סרטון דורש התחברות או אימות"
+
+
+def test_m4_1_finding3_youtube_oversized_uses_exact_hebrew_and_real_limit():
+    """Finding 3: oversized file error in YouTube uses unified Hebrew message and real limit."""
+    sig = _DownloadTooLargeSignal(5368709120, 2147483648)
+    msg = str(sig)
+    assert "5.0GB" in msg
+    assert "2.0GB" in msg
+    assert "הקובץ גדול מדי" in msg
+    assert "5368709120 bytes exceeds" not in msg
+
+
+def test_m4_1_finding4_no_internal_path_or_host_leak_in_error_messages():
+    """Finding 4: internal paths (/srv/media/...) and provider hosts never leak to user."""
+    # File path leak
+    leaky_path_msg = classify_youtube_error("ERROR: /srv/media/tmp/abc123.part: Permission denied")
+    assert "/srv/media" not in leaky_path_msg
+    assert ".part" not in leaky_path_msg
+    assert leaky_path_msg == "ההורדה מיוטיוב נכשלה. נסה שוב או שלח קישור אחר."
+
+    # Hostname leak
+    leaky_host_msg = classify_youtube_error("Failed to connect to internal-supplier.cloud.internal:8080")
+    assert "internal-supplier" not in leaky_host_msg
+    assert ".internal" not in leaky_host_msg
+    assert leaky_host_msg == "ההורדה מיוטיוב נכשלה. נסה שוב או שלח קישור אחר."
+
+    # Failure summaries do not leak raw [:60]
+    assert summarize_ytdlp_failure("/srv/media/tmp/abc123.part died") == "שגיאה במנוע המקומי"
+    assert summarize_provider_failure("http://supplier.secret.internal:8080/v1 failed") == "שגיאה בספק"
+
+
+def test_m4_1_finding5_host_only_matching_rejects_query_and_prefix_spoofs():
+    """Finding 5: URL routing checks parsed host, not substring on entire URL."""
+    spoofed_query = "https://files.example.com/f.zim?ref=youtube.com"
+    spoofed_domain = "https://notyoutube.com/watch?v=x"
+    spoofed_tiktok = "https://evil-tiktok.com/@user/video/123"
+
+    assert DirectEngine().matches(spoofed_query) is True
+    assert matches_youtube_url(spoofed_query) is False
+    assert matches_youtube_url(spoofed_domain) is False
+    assert matches_tiktok_url(spoofed_tiktok) is False
+    assert TikWMProvider().matches(spoofed_tiktok) is False
+
+    # router _host_matches rejects query param spoof and prefix spoof
+    assert _host_matches(spoofed_query, YOUTUBE_HOSTS) is False
+    assert _host_matches(spoofed_domain, YOUTUBE_HOSTS) is False
+    assert _host_matches(spoofed_tiktok, TIKTOK_HOSTS) is False
+
+    # valid youtube hosts match
+    assert matches_youtube_url("https://www.youtube.com/watch?v=123") is True
+    assert matches_youtube_url("https://youtu.be/123") is True
+    assert matches_youtube_url("https://m.youtube.com/watch?v=123") is True
+
+
+def test_m4_1_finding6_local_route_default_max_retries_is_zero():
+    """Finding 6: local YouTube route is attempted at most once (max_retries=0)."""
+    engine = YouTubeEngine(quality="720", max_download_size=1000)
+    assert engine._max_retries == 0
+
+
+async def test_m4_1_finding7_multipart_upload_failure_charges_and_caches_delivered_part(tmp_path):
+    """Finding 7: multi-part upload failure charges and caches parts that were delivered."""
+    session_factory, credits_service, _ = _setup_test_db()
+    cache_store = VideoCacheStore(session_factory)
+    pipeline = DownloadPipeline(
+        credits_service=credits_service,
+        download_dir=tmp_path,
+        download_timeout=30.0,
+        upload_timeout=30.0,
+    )
+
+    class _TwoPartEngine(BaseEngine):
         def matches(self, url: str) -> bool:
             return True
 
         async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
             dest_dir.mkdir(parents=True, exist_ok=True)
-            # Write a partial file before sleeping
-            partial = dest_dir / "partial.bin"
-            partial.write_bytes(b"partial-data")
-            await asyncio.sleep(1.0)  # Hangs beyond 0.05s budget
-            return DownloadResult(file_paths=[str(partial)])
+            p1 = dest_dir / "part1.bin"
+            p2 = dest_dir / "part2.bin"
+            p1.write_bytes(b"A" * 1000)
+            p2.write_bytes(b"B" * 1000)
+            return DownloadResult(file_paths=[str(p1), str(p2)], title="TwoPart")
+
+    class _PartialFailUploader(_MockUploader):
+        def __init__(self) -> None:
+            super().__init__()
+            self.calls = 0
+
+        async def send_file(self, path: Path, *, caption: str | None = None) -> MagicMock:
+            self.calls += 1
+            if self.calls > 1:
+                raise RuntimeError("Upload network dropped on part 2")
+            return await super().send_file(path, caption=caption)
+
+    uploader = _PartialFailUploader()
+    progress = _MockProgress()
+    cache_key = compute_cache_key("test_url", "720")
+
+    with pytest.raises(RuntimeError):
+        await pipeline.run(
+            user_id=1,
+            url="http://example.com/twopart",
+            engine=_TwoPartEngine(),
+            uploader=uploader,
+            progress=progress,
+            cache=cache_store,
+            cache_key=cache_key,
+            archive_channel="@archive",
+        )
+
+    # User received part 1, so they were charged for 1 credit and 1000 bytes
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 4  # 5 - 1 = 4
+        assert user.bandwidth_used == 1000
+
+    # Part 1 was cached
+    cached = cache_store.get(cache_key)
+    assert cached is not None
+    assert len(cached.message_ids) == 1
+
+
+async def test_m4_1_finding8_foreign_timeout_error_reports_download_failed_not_budget(tmp_path):
+    """Finding 8: foreign TimeoutError from socket is reported as download failure, not budget timeout."""
+    _, credits_service, _ = _setup_test_db()
+    pipeline = DownloadPipeline(
+        credits_service=credits_service,
+        download_dir=tmp_path,
+        download_timeout=60.0,
+    )
+    uploader = _MockUploader()
+    progress = _MockProgress()
+
+    class _ForeignTimeoutEngine(BaseEngine):
+        def matches(self, url: str) -> bool:
+            return True
+
+        async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+            raise TimeoutError("Socket read timeout from upstream")
 
     with pytest.raises(TimeoutError):
         await pipeline.run(
             user_id=1,
-            url="http://example.com/hanging",
-            engine=_HangingEngine(),
+            url="http://example.com/hang",
+            engine=_ForeignTimeoutEngine(),
             uploader=uploader,
             progress=progress,
         )
 
-    # Progress message updated with timeout message
-    assert any(texts.REQUEST_TIMEOUT_EXCEEDED in update for update in progress.updates)
-    # All task files are deleted
-    assert not any(tmp_path.rglob("*.bin"))
-    # No credits were charged
-    assert credits_service.get_total_credits(1) == 5
+    # Must report DOWNLOAD_FAILED, not REQUEST_TIMEOUT_EXCEEDED
+    assert progress.updates[-1] == texts.DOWNLOAD_FAILED
+    assert not any(texts.REQUEST_TIMEOUT_EXCEEDED in u for u in progress.updates)
+
+
+def test_m4_1_finding9_playlist_trimming_reasons():
+    """Finding 9: playlist trimming states the exact reason (credits limit vs unavailable)."""
+    # 1. Trimming due to credits limit
+    info_limited = {
+        "_type": "playlist",
+        "entries": [{"filepath": "/tmp/a.mp4"}, {"filepath": "/tmp/b.mp4"}],
+        "playlist_count": 10,
+        "title": "My Playlist",
+    }
+    res_limited = _result_from_info(info_limited, playlist_item_limit=2)
+    assert res_limited.playlist_downloaded == 2
+    assert res_limited.playlist_total == 10
+    assert "יתרת הקרדיטים" in str(res_limited.playlist_trimmed_reason)
+
+    # 2. Trimming due to unavailable items (no item limit)
+    res_unavailable = _result_from_info(info_limited, playlist_item_limit=None)
+    assert "אינם זמינים" in str(res_unavailable.playlist_trimmed_reason)
+
+
+async def test_m4_1_finding10_direct_engine_rejects_html_content_type(tmp_path):
+    """Finding 10: direct download rejects HTML Content-Type with UnsupportedUrlError."""
+    engine = DirectEngine()
+
+    mock_resp = MagicMock()
+    mock_resp.headers = {"Content-Type": "text/html; charset=utf-8", "Content-Length": "500"}
+    mock_resp.raise_for_status.return_value = None
+    mock_resp.__enter__.return_value = mock_resp
+    mock_resp.__exit__.return_value = None
+
+    with patch("media_bot_v2.engines.direct.requests.get", return_value=mock_resp):
+        with pytest.raises(UnsupportedUrlError) as exc_info:
+            await engine.download("https://example.com/page.html", dest_dir=tmp_path)
+        assert "HTML" in str(exc_info.value)

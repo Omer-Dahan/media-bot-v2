@@ -23,6 +23,7 @@ import requests
 
 from media_bot_v2.engines.base import (
     BaseEngine,
+    CancellationToken,
     DownloadResult,
     DownloadTooLargeError,
     UnsupportedUrlError,
@@ -32,7 +33,14 @@ from media_bot_v2.telegram import texts
 logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
-_KNOWN_PLATFORM_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com")
+_KNOWN_PLATFORM_DOMAINS = (
+    "youtube.com",
+    "youtu.be",
+    "tiktok.com",
+    "douyin.com",
+    "instagram.com",
+    "instagr.am",
+)
 _CHUNK_SIZE = 1024 * 1024
 _REQUEST_TIMEOUT = 30
 
@@ -49,16 +57,33 @@ class DirectEngine(BaseEngine):
     def matches(self, url: str) -> bool:
         if not _URL_RE.match(url):
             return False
-        lowered = url.lower()
-        return not any(h in lowered for h in _KNOWN_PLATFORM_HOSTS)
+        try:
+            host = urlparse(url).netloc.split(":")[0].lower()
+        except (ValueError, AttributeError):
+            return False
+        if not host:
+            return False
+        return not any(host == d or host.endswith("." + d) for d in _KNOWN_PLATFORM_DOMAINS)
 
-    async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+    async def download(
+        self,
+        url: str,
+        *,
+        dest_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
         if not self.matches(url):
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
         filename = _filename_from_url(url)
         dest_path = dest_dir / filename
-        await asyncio.to_thread(_preflight_and_stream_to_file, url, dest_path, self._max_download_size)
+        await asyncio.to_thread(
+            _preflight_and_stream_to_file,
+            url,
+            dest_path,
+            self._max_download_size,
+            cancel_token,
+        )
         return DownloadResult(file_paths=[str(dest_path)], title=filename)
 
 
@@ -67,30 +92,57 @@ def _filename_from_url(url: str) -> str:
     return unquote(name) or "download.bin"
 
 
-def _preflight_and_stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
-    if max_size is not None:
-        try:
-            with requests.head(url, allow_redirects=True, timeout=10) as head_resp:
-                if head_resp.status_code < 400:
-                    _reject_if_declared_size_too_large(head_resp, url, max_size)
-        except DownloadTooLargeError:
-            raise
-        except Exception as exc:  # noqa: BLE001
-            logger.debug("Preflight HEAD request failed for %s: %s; proceeding to GET", url, exc)
-
-    _stream_to_file(url, dest_path, max_size)
+def _reject_if_html(response: requests.Response, url: str) -> None:
+    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
+    if content_type in ("text/html", "application/xhtml+xml"):
+        raise UnsupportedUrlError("קישור זה מפנה לדף אינטרנט (HTML) ולא לקובץ מדיה או הורדה ישירה.")
 
 
-def _stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
+def _preflight_and_stream_to_file(
+    url: str,
+    dest_path: Path,
+    max_size: int | None,
+    cancel_token: CancellationToken | None = None,
+) -> None:
+    try:
+        with requests.head(url, allow_redirects=True, timeout=10) as head_resp:
+            if head_resp.status_code < 400:
+                _reject_if_html(head_resp, url)
+                _reject_if_declared_size_too_large(head_resp, url, max_size)
+    except (DownloadTooLargeError, UnsupportedUrlError):
+        raise
+    except Exception as exc:  # noqa: BLE001
+        logger.debug("Preflight HEAD request failed for %s: %s; proceeding to GET", url, exc)
+
+    _stream_to_file(url, dest_path, max_size, cancel_token)
+
+
+def _stream_to_file(
+    url: str,
+    dest_path: Path,
+    max_size: int | None,
+    cancel_token: CancellationToken | None = None,
+) -> None:
     with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
+        _reject_if_html(response, url)
         _reject_if_declared_size_too_large(response, url, max_size)
+        if cancel_token is not None:
+            if cancel_token.is_set():
+                response.close()
+                return
+            cancel_token.on_cancel(response.close)
         total = 0
         try:
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+                    if cancel_token is not None and cancel_token.is_set():
+                        response.close()
+                        break
                     if not chunk:
                         continue
+                    if total == 0 and chunk.lstrip().lower().startswith((b"<!doctype html", b"<html")):
+                        raise UnsupportedUrlError("קישור זה מפנה לדף אינטרנט (HTML) ולא לקובץ מדיה או הורדה ישירה.")
                     total += len(chunk)
                     if max_size is not None and total > max_size:
                         raise DownloadTooLargeError(
@@ -100,8 +152,13 @@ def _stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
                             url=url,
                         )
                     f.write(chunk)
-        except DownloadTooLargeError:
+        except (DownloadTooLargeError, UnsupportedUrlError):
             dest_path.unlink(missing_ok=True)
+            raise
+        except Exception:
+            if cancel_token is not None and cancel_token.is_set():
+                dest_path.unlink(missing_ok=True)
+                return
             raise
 
 

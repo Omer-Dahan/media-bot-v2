@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+from urllib.parse import urlparse
 
 import requests
 
@@ -15,8 +16,13 @@ TIKTOK_HOSTS = ("tiktok.com", "douyin.com")
 
 
 def matches_tiktok_url(url: str) -> bool:
-    lowered = url.lower()
-    return any(host in lowered for host in TIKTOK_HOSTS)
+    try:
+        host = urlparse(url).netloc.split(":")[0].lower()
+    except (ValueError, AttributeError):
+        return False
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in TIKTOK_HOSTS)
 
 
 class TikWMProvider(BaseProvider):

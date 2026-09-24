@@ -26,6 +26,7 @@ is deleted.
 from __future__ import annotations
 
 import asyncio
+import inspect
 import logging
 import shutil
 import uuid
@@ -41,6 +42,7 @@ from media_bot_v2.credits.exceptions import (
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.engines.base import (
     BaseEngine,
+    CancellationToken,
     DownloadResult,
     DownloadTooLargeError,
     UnsupportedUrlError,
@@ -71,10 +73,14 @@ class DownloadPipeline:
         credits_service: CreditsService,
         download_dir: Path,
         request_timeout: float = 600.0,
+        download_timeout: float | None = None,
+        upload_timeout: float | None = None,
     ) -> None:
         self._credits = credits_service
         self._download_dir = download_dir
         self._request_timeout = request_timeout
+        self._download_timeout = download_timeout if download_timeout is not None else request_timeout
+        self._upload_timeout = upload_timeout if upload_timeout is not None else request_timeout
 
     async def run(
         self,
@@ -108,95 +114,121 @@ class DownloadPipeline:
         # one) must not write into the same directory, where one download's
         # cleanup could delete the other's still-in-flight files.
         task_dir = self._download_dir / str(user_id) / uuid.uuid4().hex
+        cancel_token = CancellationToken()
+        dl_cm = None
+        up_cm = None
+
         try:
-            timeout_ctx = (
-                asyncio.timeout(self._request_timeout)
-                if self._request_timeout and self._request_timeout > 0
+            # 1. Download phase under download_timeout
+            await progress.update(texts.DOWNLOADING)
+            dl_timeout_ctx = (
+                asyncio.timeout(self._download_timeout)
+                if self._download_timeout and self._download_timeout > 0
                 else asyncio.nullcontext()
             )
-            async with timeout_ctx:
-                self._credits.check_quota(user_id)
-
-                if cache is not None and cache_key is not None:
-                    cached = cache.get(cache_key)
-                    if cached is not None and await self._try_serve_from_cache(
-                        user_id=user_id, uploader=uploader, cached=cached, progress=progress
-                    ):
-                        return
-                    if cached is not None:
-                        # Entry looked valid but couldn't actually be resent (the
-                        # archive message was deleted, the channel access changed,
-                        # etc.) - drop it so we don't keep retrying a dead reference,
-                        # then fall through to a normal fresh download below.
-                        cache.delete(cache_key)
-
-                await progress.update(texts.DOWNLOADING)
-                result: DownloadResult = await engine.download(url, dest_dir=task_dir)
-
-                await progress.update(texts.PROCESSING)
-                parts: list[Path] = []
-                for raw_path in result.file_paths:
-                    parts.extend(splitter.split_file(Path(raw_path)))
-
-                await progress.update(texts.UPLOADING)
-                total_size = 0
-                archived_message_ids: list[int] = []
-                for index, part in enumerate(parts, start=1):
-                    caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
-                    message = await uploader.send_file(part, caption=caption)
-                    total_size += part.stat().st_size
-                    try:
-                        forwarded = await uploader.forward_to_archive(message)
-                    except Exception:
-                        # The file already reached the user and its bytes count
-                        # toward their charge - an archive-channel hiccup is not
-                        # their problem and must not undo either.
-                        logger.warning(
-                            "Archive forward failed for user=%s url=%s part=%s",
-                            user_id,
-                            url,
-                            part,
-                            exc_info=True,
-                        )
-                        forwarded = None
-                    if forwarded is not None:
-                        archived_message_ids.append(forwarded.id)
-
-                self._credits.use_quota_dynamic(user_id, total_size)
-                self._credits.add_bandwidth_used(user_id, total_size)
-
-                if (
-                    cache is not None
-                    and cache_key is not None
-                    and archive_channel is not None
-                    and parts
-                    and len(archived_message_ids) == len(parts)
-                ):
-                    cache.put(
-                        cache_key,
-                        archive_chat=archive_channel,
-                        message_ids=archived_message_ids,
-                        title=result.title,
-                    )
-
-                if (
-                    result.playlist_total is not None
-                    and result.playlist_downloaded is not None
-                    and result.playlist_downloaded < result.playlist_total
-                ):
-                    await progress.update(
-                        texts.format_playlist_trimmed(result.playlist_downloaded, result.playlist_total)
+            async with dl_timeout_ctx as cm:
+                dl_cm = cm
+                sig = inspect.signature(engine.download)
+                supports_cancel = "cancel_token" in sig.parameters or any(
+                    p.kind == inspect.Parameter.VAR_KEYWORD for p in sig.parameters.values()
+                )
+                if supports_cancel:
+                    result: DownloadResult = await engine.download(
+                        url, dest_dir=task_dir, cancel_token=cancel_token
                     )
                 else:
-                    await progress.update(texts.DOWNLOAD_DONE)
-        except TimeoutError:
+                    result = await engine.download(url, dest_dir=task_dir)
+
+            # 2. Processing & splitting phase
+            await progress.update(texts.PROCESSING)
+            parts: list[Path] = []
+            for raw_path in result.file_paths:
+                parts.extend(splitter.split_file(Path(raw_path)))
+
+            # 3. Upload phase under upload_timeout, charging & caching per delivered part
+            await progress.update(texts.UPLOADING)
+            archived_message_ids: list[int] = []
+            for index, part in enumerate(parts, start=1):
+                caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
+                up_timeout_ctx = (
+                    asyncio.timeout(self._upload_timeout)
+                    if self._upload_timeout and self._upload_timeout > 0
+                    else asyncio.nullcontext()
+                )
+                async with up_timeout_ctx as cm:
+                    up_cm = cm
+                    message = await uploader.send_file(part, caption=caption)
+
+                part_size = part.stat().st_size
+                self._credits.use_quota_dynamic(user_id, part_size)
+                self._credits.add_bandwidth_used(user_id, part_size)
+
+                try:
+                    forwarded = await uploader.forward_to_archive(message)
+                except Exception:
+                    logger.warning(
+                        "Archive forward failed for user=%s url=%s part=%s",
+                        user_id,
+                        url,
+                        part,
+                        exc_info=True,
+                    )
+                    forwarded = None
+
+                if forwarded is not None:
+                    archived_message_ids.append(forwarded.id)
+                    if (
+                        cache is not None
+                        and cache_key is not None
+                        and archive_channel is not None
+                    ):
+                        cache.put(
+                            cache_key,
+                            archive_chat=archive_channel,
+                            message_ids=archived_message_ids,
+                            title=result.title,
+                        )
+
+            if (
+                result.playlist_total is not None
+                and result.playlist_downloaded is not None
+                and result.playlist_downloaded < result.playlist_total
+            ):
+                await progress.update(
+                    texts.format_playlist_trimmed(
+                        result.playlist_downloaded,
+                        result.playlist_total,
+                        reason=result.playlist_trimmed_reason,
+                    )
+                )
+            else:
+                await progress.update(texts.DOWNLOAD_DONE)
+        except TimeoutError as exc:
+            cancel_token.set()
+            dl_expired = bool(dl_cm and callable(getattr(dl_cm, "expired", None)) and dl_cm.expired())
+            up_expired = bool(up_cm and callable(getattr(up_cm, "expired", None)) and up_cm.expired())
+            if dl_expired or up_expired:
+                logger.warning(
+                    "Download pipeline timed out for user=%s url=%s (dl_timeout=%ss dl_expired=%s, up_timeout=%ss up_expired=%s)",
+                    user_id,
+                    url,
+                    self._download_timeout,
+                    dl_expired,
+                    self._upload_timeout,
+                    up_expired,
+                )
+                await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED)
+                raise
             logger.warning(
-                "Download pipeline timed out after %ss for user=%s url=%s",
-                self._request_timeout,
+                "Foreign TimeoutError in pipeline for user=%s url=%s: %s",
                 user_id,
                 url,
+                exc,
             )
-            await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED)
+            await progress.update(texts.DOWNLOAD_FAILED)
+            raise
+        except asyncio.CancelledError:
+            cancel_token.set()
             raise
         except (
             DownloadTooLargeError,
@@ -215,6 +247,7 @@ class DownloadPipeline:
             await progress.update(texts.DOWNLOAD_FAILED)
             raise
         finally:
+            cancel_token.set()
             self._cleanup(task_dir)
 
     async def _try_serve_from_cache(

@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import time
+from urllib.parse import urlparse
 
 from sqlalchemy.orm import sessionmaker
 from telethon import Button, TelegramClient, events
@@ -52,12 +53,18 @@ logger = logging.getLogger(__name__)
 
 URL_RE = re.compile(r"https?://\S+")
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
-TIKTOK_HOSTS = ("tiktok.com",)
+TIKTOK_HOSTS = ("tiktok.com", "douyin.com")
 INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 
 
 def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
-    return any(host in url.lower() for host in hosts)
+    try:
+        host = urlparse(url).netloc.split(":")[0].lower()
+    except (ValueError, AttributeError):
+        return False
+    if not host:
+        return False
+    return any(host == d or host.endswith("." + d) for d in hosts)
 
 
 def _sender_info(event) -> tuple[str | None, str | None]:

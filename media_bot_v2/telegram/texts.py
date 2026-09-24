@@ -137,8 +137,10 @@ def format_download_too_large(file_size: float, max_size: float) -> str:
     )
 
 
-def format_playlist_trimmed(downloaded: int, total: int) -> str:
-    return f"הושלם ✅\nהורדו {downloaded} מתוך {total} פריטים בפלייליסט (ההורדה הוגבלה לפי יתרת הקרדיטים)."
+def format_playlist_trimmed(downloaded: int, total: int, reason: str | None = None) -> str:
+    if reason:
+        return f"הושלם ✅\nהורדו {downloaded} מתוך {total} פריטים בפלייליסט ({reason})."
+    return f"הושלם ✅\nהורדו {downloaded} מתוך {total} פריטים בפלייליסט."
 
 
 def format_failure_summary(attempts: list[tuple[str, str]]) -> str:

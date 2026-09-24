@@ -25,6 +25,7 @@ import yt_dlp
 
 from media_bot_v2.engines.base import (
     BaseEngine,
+    CancellationToken,
     DownloadResult,
     DownloadTooLargeError,
     UnsupportedUrlError,
@@ -50,6 +51,24 @@ class _DownloadTooLargeSignal(Exception):
     """Raised from inside a yt-dlp progress hook to abort mid-download once
     the reported total exceeds the configured cap - converted to
     DownloadTooLargeError once it surfaces back in `_download_sync`."""
+
+    def __init__(self, file_size: float | str, max_size: float | None = None) -> None:
+        if isinstance(file_size, str):
+            match = re.search(r"(\d+)\s*bytes exceeds.*?(\d+)", file_size)
+            if match:
+                self.file_size = float(match.group(1))
+                self.max_size = float(match.group(2))
+            else:
+                self.file_size = 0.0
+                self.max_size = float(max_size) if max_size is not None else 0.0
+        else:
+            self.file_size = float(file_size)
+            self.max_size = float(max_size) if max_size is not None else 0.0
+        super().__init__(texts.format_download_too_large(self.file_size, self.max_size))
+
+
+class _DownloadCancelledSignal(Exception):
+    """Raised from inside a yt-dlp progress hook to abort download when cancelled."""
 
 
 def matches_instagram_url(url: str) -> bool:
@@ -278,13 +297,19 @@ class InstagramEngine(BaseEngine):
     def matches(self, url: str) -> bool:
         return matches_instagram_url(url)
 
-    async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+    async def download(
+        self,
+        url: str,
+        *,
+        dest_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
         if not self.matches(url):
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._download_sync, url, dest_dir, loop)
+            return await asyncio.to_thread(self._download_sync, url, dest_dir, loop, cancel_token)
         except DownloadTooLargeError:
             raise
         except UnsupportedUrlError:
@@ -295,12 +320,17 @@ class InstagramEngine(BaseEngine):
             logger.exception("Unexpected error in Instagram download for %s", url)
             raise InstagramDownloadError(classify_instagram_error(str(exc))) from exc
 
-    def _build_ydl_opts(self, dest_dir: Path, loop: asyncio.AbstractEventLoop) -> dict:
+    def _build_ydl_opts(
+        self,
+        dest_dir: Path,
+        loop: asyncio.AbstractEventLoop,
+        cancel_token: CancellationToken | None = None,
+    ) -> dict:
         opts: dict = {
             "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
             "quiet": True,
             "no_warnings": True,
-            "progress_hooks": [self._make_progress_hook(loop)],
+            "progress_hooks": [self._make_progress_hook(loop, cancel_token)],
             "max_filesize": self._max_download_size,
             "retries": 2,
             "fragment_retries": 2,
@@ -321,16 +351,20 @@ class InstagramEngine(BaseEngine):
 
         return opts
 
-    def _make_progress_hook(self, loop: asyncio.AbstractEventLoop):
+    def _make_progress_hook(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        cancel_token: CancellationToken | None = None,
+    ):
         state = {"last_forward": 0.0}
 
         def hook(d: dict) -> None:
+            if cancel_token is not None and cancel_token.is_set():
+                raise _DownloadCancelledSignal("Download cancelled by timeout budget")
             if d.get("status") == "downloading":
                 total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
                 if total and total > self._max_download_size:
-                    raise _DownloadTooLargeSignal(
-                        f"{total} bytes exceeds the {self._max_download_size} byte limit"
-                    )
+                    raise _DownloadTooLargeSignal(total, self._max_download_size)
             if self._progress is None:
                 return
             text = format_progress_text(d)
@@ -343,22 +377,48 @@ class InstagramEngine(BaseEngine):
 
         return hook
 
-    def _download_sync(self, url: str, dest_dir: Path, loop: asyncio.AbstractEventLoop) -> DownloadResult:
-        ydl_opts = self._build_ydl_opts(dest_dir, loop)
+    def _download_sync(
+        self,
+        url: str,
+        dest_dir: Path,
+        loop: asyncio.AbstractEventLoop,
+        cancel_token: CancellationToken | None = None,
+    ) -> DownloadResult:
+        ydl_opts = self._build_ydl_opts(dest_dir, loop, cancel_token)
         last_message: str | None = None
         for attempt in range(self._max_retries + 1):
+            if cancel_token is not None and cancel_token.is_set():
+                return DownloadResult(file_paths=[])
             try:
                 with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                     info = ydl.extract_info(url, download=True)
                 return _result_from_info(info, dest_dir)
+            except _DownloadCancelledSignal:
+                logger.info("Instagram download cancelled by timeout budget")
+                return DownloadResult(file_paths=[])
             except _DownloadTooLargeSignal as exc:
-                raise DownloadTooLargeError(str(exc)) from exc
+                raise DownloadTooLargeError(
+                    texts.format_download_too_large(exc.file_size, exc.max_size),
+                    file_size=exc.file_size,
+                    max_size=exc.max_size,
+                ) from exc
             except yt_dlp.utils.DownloadError as exc:
+                if isinstance(exc.__cause__, _DownloadCancelledSignal):
+                    logger.info("Instagram download cancelled by timeout budget")
+                    return DownloadResult(file_paths=[])
                 if isinstance(exc.__cause__, _DownloadTooLargeSignal):
-                    raise DownloadTooLargeError(str(exc.__cause__)) from exc
+                    sig = exc.__cause__
+                    raise DownloadTooLargeError(
+                        texts.format_download_too_large(sig.file_size, sig.max_size),
+                        file_size=sig.file_size,
+                        max_size=sig.max_size,
+                    ) from exc
                 last_message = str(exc)
                 if "larger than max-filesize" in last_message.lower():
-                    raise DownloadTooLargeError(last_message) from exc
+                    raise DownloadTooLargeError(
+                        texts.format_download_too_large(self._max_download_size, self._max_download_size),
+                        max_size=self._max_download_size,
+                    ) from exc
                 if attempt < self._max_retries and is_retryable_error(last_message):
                     logger.warning(
                         "Retrying Instagram download (attempt %s/%s) for %s: %s",
