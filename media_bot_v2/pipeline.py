@@ -45,6 +45,7 @@ from media_bot_v2.engines.base import (
     DownloadTooLargeError,
     UnsupportedUrlError,
 )
+from media_bot_v2.engines.instagram import InstagramDownloadError
 from media_bot_v2.engines.tiktok import TikTokDownloadError
 from media_bot_v2.engines.youtube import YouTubeDownloadError
 from media_bot_v2.telegram import texts
@@ -197,7 +198,13 @@ class DownloadPipeline:
             )
             await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED)
             raise
-        except (DownloadTooLargeError, UnsupportedUrlError, YouTubeDownloadError, TikTokDownloadError) as exc:
+        except (
+            DownloadTooLargeError,
+            UnsupportedUrlError,
+            YouTubeDownloadError,
+            TikTokDownloadError,
+            InstagramDownloadError,
+        ) as exc:
             logger.warning("Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
             await progress.update(str(exc))
             raise

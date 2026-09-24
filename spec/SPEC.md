@@ -61,7 +61,7 @@ Matches the skeleton already written under `media_bot_v2/`:
 | `db/session.py` | Engine/session factory for the shared `DB_DSN` | done |
 | `credits/service.py` | Ported quota/credit logic (free-then-paid deduction, 200MB/credit, bandwidth cap, owner bypass), with the pre-charge-before-split bug fixed | done, unit tested |
 | `engines/base.py` | Shared engine contract (`matches()`, `download()`) | skeleton interface only; real base class (cache check → download → split → upload → archive → credit) lands in M2, ported from the old `engine/base.py` flow |
-| `engines/{youtube,tiktok,instagram,direct}.py` | Per-platform engines | not started — M2/M3 |
+| `engines/{youtube,tiktok,instagram,direct}.py` | Per-platform engines | done — all four engines implemented (Instagram backed by local yt-dlp with curl-cffi impersonation as default without cookies, optional `INSTAGRAM_COOKIES_FILE`) |
 | `queue/limiter.py` | Per-user + global concurrency caps via `asyncio.Semaphore` | skeleton done, wired up in M2 |
 | `upload/splitter.py` | ffmpeg-based >2GB video splitting for Telegram's upload limit | skeleton stub (size check only); full split/relabel logic ported in M2 |
 | `bootstrap.py` | Entrypoint wiring; only runs when invoked directly, never at import | done |
@@ -156,8 +156,9 @@ not just claimed.
 
 ### M3 — TikTok + Instagram
 - TikTok engine (including the `vm.tiktok.com` fix noted in
-  `INVENTORY.md` §4) and Instagram engine (public content at minimum;
-  cookie-gated content if the user has provided valid cookies per §4).
+  `INVENTORY.md` §4) and Instagram engine (public content supported via local
+  `yt-dlp` with `curl-cffi` impersonation as default without cookies; optional
+  `INSTAGRAM_COOKIES_FILE` for gated content). Both engines implemented.
 - **Acceptance:** 15 TikTok URLs (mix of `tiktok.com`, `vt.tiktok.com`,
   `vm.tiktok.com`, at least 2 slideshows) and 15 Instagram URLs (posts,
   reels, at least 2 carousels) succeed end-to-end. Success rate ≥ 90%

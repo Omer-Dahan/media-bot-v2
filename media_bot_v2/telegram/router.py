@@ -25,6 +25,12 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.session import session_scope
 from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
 from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.engines.instagram import (
+    InstagramDownloadError,
+    InstagramEngine,
+    extract_instagram_id,
+    matches_instagram_url,
+)
 from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import (
     YouTubeDownloadError,
@@ -47,7 +53,7 @@ logger = logging.getLogger(__name__)
 URL_RE = re.compile(r"https?://\S+")
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
 TIKTOK_HOSTS = ("tiktok.com",)
-INSTAGRAM_HOSTS = ("instagram.com",)
+INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 
 
 def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
@@ -79,6 +85,7 @@ def register_handlers(
     health_tracker: ProviderHealthTracker | None = None,
     registry: ProviderRegistry | None = None,
     tiktok_cookies_file: str | None = None,
+    instagram_cookies_file: str | None = None,
 ) -> None:
     quality_store = QualitySelectionStore()
     direct_engine = DirectEngine(max_download_size=max_download_size)
@@ -308,7 +315,44 @@ def register_handlers(
                 logger.exception("TikTok download failed for url=%s", url)
             return
         if _host_matches(url, INSTAGRAM_HOSTS):
-            await event.respond(texts.INSTAGRAM_NOT_YET_IMPLEMENTED)
+            if not matches_instagram_url(url):
+                await event.respond(texts.UNSUPPORTED_URL)
+                return
+
+            message = await event.respond(texts.DOWNLOAD_STARTED)
+            progress = MessageProgressReporter(message)
+            uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+
+            async def on_wait() -> None:
+                await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+
+            instagram_engine = InstagramEngine(
+                max_download_size=max_download_size,
+                cookies_file=instagram_cookies_file,
+                force_ipv4=force_ipv4,
+                progress=progress,
+            )
+
+            try:
+                async with limiter.slot(event.sender_id, on_wait=on_wait):
+                    await pipeline.run(
+                        user_id=event.sender_id,
+                        url=url,
+                        engine=instagram_engine,
+                        uploader=uploader,
+                        progress=progress,
+                        cache=video_cache_store,
+                        cache_key=compute_cache_key(extract_instagram_id(url) or url, "instagram"),
+                        archive_channel=archive_channel,
+                    )
+            except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+                await progress.update(str(exc))
+            except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
+                await progress.update(str(exc))
+            except TimeoutError:
+                pass
+            except Exception:
+                logger.exception("Instagram download failed for url=%s", url)
             return
 
         if not direct_engine.matches(url):

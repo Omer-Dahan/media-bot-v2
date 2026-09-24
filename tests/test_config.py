@@ -158,3 +158,16 @@ def test_provider_settings_custom_values(monkeypatch):
     assert settings.provider_failure_threshold == 5
     assert settings.provider_cooldown_seconds == 600
 
+
+def test_instagram_cookies_file_setting(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    settings = Settings(_env_file=None)
+    assert settings.instagram_cookies_file is None
+
+    monkeypatch.setenv("INSTAGRAM_COOKIES_FILE", "/path/to/ig_cookies.txt")
+    settings_with_cookies = Settings(_env_file=None)
+    assert settings_with_cookies.instagram_cookies_file == "/path/to/ig_cookies.txt"
+
+

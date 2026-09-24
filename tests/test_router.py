@@ -14,6 +14,7 @@ from telethon.sessions import MemorySession
 from media_bot_v2.cache.video_cache import compute_cache_key
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
+from media_bot_v2.engines.instagram import InstagramDownloadError, InstagramEngine
 from media_bot_v2.engines.tiktok import TikTokEngine
 from media_bot_v2.engines.youtube import YouTubeDownloadError, YouTubeEngine
 from media_bot_v2.pipeline import DownloadPipeline
@@ -72,9 +73,15 @@ class _FakeEvent:
         self.sender_id = sender_id
         self.chat_id = sender_id
         self.sender = _FakeSender()
+        self.responses: list[str] = []
+        self.messages: list[_FakeMessage] = []
 
     async def respond(self, *args, **kwargs):
-        return _FakeMessage()
+        if args and isinstance(args[0], str):
+            self.responses.append(args[0])
+        msg = _FakeMessage()
+        self.messages.append(msg)
+        return msg
 
 
 async def test_url_handler_creates_user_before_running_pipeline():
@@ -423,6 +430,85 @@ async def test_url_handler_tiktok_link_runs_pipeline_with_tiktok_engine():
     assert isinstance(kwargs["engine"], TikTokEngine)
     assert kwargs["archive_channel"] == "@my_archive"
     assert kwargs["cache_key"] == compute_cache_key("https://www.tiktok.com/@user/video/7123456789", "tiktok")
+
+
+async def test_url_handler_instagram_post_runs_pipeline_with_instagram_engine():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline, archive_channel="@my_archive")
+    url_handler = _find_url_handler(client)
+
+    url_event = _FakeEvent("https://www.instagram.com/p/DFxyz123/", 1)
+    await url_handler(url_event)
+
+    pipeline.run.assert_awaited_once()
+    _, kwargs = pipeline.run.call_args
+    assert kwargs["user_id"] == 1
+    assert kwargs["url"] == "https://www.instagram.com/p/DFxyz123/"
+    assert isinstance(kwargs["engine"], InstagramEngine)
+    assert kwargs["archive_channel"] == "@my_archive"
+    assert kwargs["cache_key"] == compute_cache_key("DFxyz123", "instagram")
+
+
+async def test_url_handler_instagram_reels_and_instagr_am_supported():
+    for test_url, expected_id in [
+        ("https://www.instagram.com/reels/CRxyz456/", "CRxyz456"),
+        ("https://instagr.am/p/ABC789/", "ABC789"),
+        ("https://m.instagram.com/reel/REEL123/", "REEL123"),
+    ]:
+        pipeline = AsyncMock()
+        client = _make_router(pipeline=pipeline, archive_channel="@my_archive")
+        url_handler = _find_url_handler(client)
+
+        url_event = _FakeEvent(test_url, 1)
+        await url_handler(url_event)
+
+        pipeline.run.assert_awaited_once()
+        _, kwargs = pipeline.run.call_args
+        assert kwargs["url"] == test_url
+        assert isinstance(kwargs["engine"], InstagramEngine)
+        assert kwargs["cache_key"] == compute_cache_key(expected_id, "instagram")
+
+
+async def test_url_handler_instagram_never_returns_not_yet_implemented_stub():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline)
+    url_handler = _find_url_handler(client)
+
+    url_event = _FakeEvent("https://www.instagram.com/p/DFxyz123/", 1)
+    await url_handler(url_event)
+
+    # Must run the pipeline and not respond with any stub message
+    pipeline.run.assert_awaited_once()
+    assert not hasattr(texts, "INSTAGRAM_NOT_YET_IMPLEMENTED")
+
+
+async def test_url_handler_instagram_unsupported_path():
+    pipeline = AsyncMock()
+    client = _make_router(pipeline=pipeline)
+    url_handler = _find_url_handler(client)
+
+    url_event = _FakeEvent("https://www.instagram.com/about/", 1)
+    await url_handler(url_event)
+
+    pipeline.run.assert_not_called()
+    assert len(url_event.responses) == 1
+    assert url_event.responses[0] == texts.UNSUPPORTED_URL
+
+
+async def test_url_handler_instagram_private_content_shows_hebrew_error():
+    pipeline = AsyncMock()
+    pipeline.run.side_effect = InstagramDownloadError(texts.INSTAGRAM_PRIVATE_OR_LOGIN)
+    client = _make_router(pipeline=pipeline)
+    url_handler = _find_url_handler(client)
+
+    url_event = _FakeEvent("https://www.instagram.com/reel/PRIVATE123/", 1)
+    await url_handler(url_event)
+
+    pipeline.run.assert_awaited_once()
+    assert len(url_event.messages) == 1
+    msg = url_event.messages[0]
+    assert texts.INSTAGRAM_PRIVATE_OR_LOGIN in msg.edits
+
 
 
 def test_register_handlers_without_registry_warns_providers_disabled(caplog):

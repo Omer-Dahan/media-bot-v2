@@ -71,8 +71,9 @@ class Settings(BaseSettings):
         validation_alias=AliasChoices("YOUTUBE_REMOTE_COMPONENTS", "REMOTE_COMPONENTS"),
     )
 
-    # --- Providers & Extraction Layer (M3) ---
+    # --- Providers & Extraction Layer (M3/M6) ---
     tiktok_cookies_file: str | None = Field(default=None, validation_alias="TIKTOK_COOKIES_FILE")
+    instagram_cookies_file: str | None = Field(default=None, validation_alias="INSTAGRAM_COOKIES_FILE")
     tiktok_providers: str = Field(
         default="tikwm,tikdownloader,musicaldown,cobalt",
         validation_alias="TIKTOK_PROVIDERS",

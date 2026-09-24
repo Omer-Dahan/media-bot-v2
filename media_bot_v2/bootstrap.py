@@ -75,6 +75,7 @@ def main() -> None:
         health_tracker=health_tracker,
         registry=registry,
         tiktok_cookies_file=settings.tiktok_cookies_file,
+        instagram_cookies_file=settings.instagram_cookies_file,
     )
 
     logger.info("Starting media-bot-v2")

@@ -125,7 +125,7 @@ ad hoc globals.
 | `generic.py` (YouTube + generic yt-dlp fallback) | ✅ yes | actively wired, well maintained, one harmless unreachable `quality=="custom"` branch | 🔧 rebuild for asyncio, this **is** the M2 YouTube engine |
 | `direct.py` (HTTP direct links, aria2c optional) | ✅ yes | actively wired, solid | 🔧 rebuild for asyncio |
 | `tiktok.py` (yt-dlp + gallery-dl slideshow + tiktokapipy) | ✅ yes | actively wired; `vm.tiktok.com` missing from `DOWNLOADER_MAP` so it silently bypasses TikTok-specific handling (real bug) | 🔧 rebuild for asyncio, fix the `vm.tiktok.com` gap |
-| `instagram.py` (instaloader + yt-dlp fallback) | ✅ yes | actively wired, optional `instaloader` import | 🔧 rebuild for asyncio |
+| `instagram.py` (yt-dlp with curl-cffi impersonation) | ✅ yes | implemented in `media_bot_v2/engines/instagram.py` | ✅ implemented for asyncio; local yt-dlp with curl-cffi impersonation is default without cookies, optional `INSTAGRAM_COOKIES_FILE` |
 | `pixeldrain.py`, `krakenfiles.py` (small direct-link specializations) | ❌ no | working, actively wired, but not in the named v1 platform list | ❌ defer past v1 (or fold trivially into the direct-link engine later) |
 | `reddit.py` | ❌ no | working, depends on optional `RedDownloader` lib | ❌ defer past v1 |
 | `googledrive.py` | ❌ no | **fully implemented but never imported anywhere** — `DOWNLOADER_MAP` routes Google Drive links to a stub that says "temporarily disabled" instead | ❌ drop — dead code, and out of v1 scope anyway |
