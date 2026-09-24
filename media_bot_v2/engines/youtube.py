@@ -38,7 +38,13 @@ from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
 
-from media_bot_v2.engines.base import BaseEngine, DownloadResult, DownloadTooLargeError
+from media_bot_v2.engines.base import (
+    BaseEngine,
+    DownloadResult,
+    DownloadTooLargeError,
+    RouteAttemptTracker,
+    UnsupportedUrlError,
+)
 from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.telegram import texts
 
@@ -228,11 +234,24 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "challenge solver script",
             "supported javascript runtime",
             "signature solving failed",
+            "javascript runtime",
+            "js runtime",
+            "no supported javascript runtime",
+            "a javascript runtime is required",
         ),
         (
             "שגיאת פענוח ביוטיוב: חסר בשרת runtime של JavaScript (Node.js או Deno) הנדרש "
             "לפענוח חתימות יוטיוב.\nיש להתקין Node.js (גרסה 22 ומעלה) או Deno בשרת."
         ),
+    ),
+    (
+        (
+            "unsupported url",
+            "is not a valid url",
+            "unknown url type",
+            "url is not supported",
+        ),
+        texts.UNSUPPORTED_URL,
     ),
     (
         ("po token", "po_token", "missing a required po token"),
@@ -385,6 +404,40 @@ def _extract_file_paths(entry: dict) -> list[str]:
     return [filename] if filename else []
 
 
+def summarize_ytdlp_failure(exc: Exception | str) -> str:
+    msg = str(exc)
+    lowered = msg.lower()
+    if any(k in lowered for k in ("sign in", "bot detection", "login required", "authentication", "confirm you're not a bot")):
+        return "סרטון דורש התחברות או אימות"
+    if any(k in lowered for k in ("javascript runtime", "js runtime", "n challenge")):
+        return "חסר runtime של JavaScript"
+    if any(k in lowered for k in ("po token", "po_token")):
+        return "נדרש PO token"
+    if any(k in lowered for k in ("private", "unavailable", "removed")):
+        return "סרטון פרטי או אינו זמין"
+    if any(k in lowered for k in ("format not available", "no video formats")):
+        return "פורמט מבוקש אינו זמין"
+    if any(k in lowered for k in ("timeout", "connection")):
+        return "שגיאת רשת"
+    return msg[:60] if msg else "שגיאה במנוע המקומי"
+
+
+def summarize_provider_failure(exc: Exception | str) -> str:
+    msg = str(exc)
+    lowered = msg.lower()
+    if "unavailable" in lowered or "not configured" in lowered:
+        return "ספק אינו מוגדר"
+    if "timeout" in lowered or "timed out" in lowered:
+        return "פסק זמן בחיבור"
+    if "403" in lowered or "rate limit" in lowered or "429" in lowered:
+        return "חסימת גישה או הגבלת קצב"
+    if "404" in lowered or "no media" in lowered or "empty" in lowered:
+        return "לא נמצאה כתובת להורדה"
+    if "500" in lowered or "502" in lowered or "503" in lowered or "server error" in lowered:
+        return "שגיאת שרת של הספק"
+    return msg[:60] if msg else "שגיאה בספק"
+
+
 def _result_from_info(info: dict) -> DownloadResult:
     if info.get("_type") == "playlist" or "entries" in info:
         entries = [e for e in (info.get("entries") or []) if e]
@@ -392,19 +445,32 @@ def _result_from_info(info: dict) -> DownloadResult:
         for entry in entries:
             file_paths.extend(_extract_file_paths(entry))
         title = info.get("title") or "YouTube playlist"
+        playlist_count = info.get("playlist_count") or info.get("n_entries")
+        playlist_total = int(playlist_count) if playlist_count else None
+        playlist_downloaded = len(file_paths)
     else:
         file_paths = _extract_file_paths(info)
         title = info.get("title") or "YouTube"
+        playlist_total = None
+        playlist_downloaded = None
 
     if not file_paths:
         raise YouTubeDownloadError(classify_youtube_error(None))
-    return DownloadResult(file_paths=file_paths, title=title)
+    return DownloadResult(
+        file_paths=file_paths,
+        title=title,
+        playlist_total=playlist_total,
+        playlist_downloaded=playlist_downloaded,
+    )
 
 
 class YouTubeEngine(BaseEngine):
     """One instance per download request - unlike DirectEngine, quality and
     the progress reporter vary per request, not per process, so the router
     constructs a fresh instance for each `ytq:` callback."""
+
+    name: str = "youtube"
+    supported_platforms: tuple[str, ...] = ("youtube",)
 
     def __init__(
         self,
@@ -454,28 +520,50 @@ class YouTubeEngine(BaseEngine):
         return matches_youtube_url(url)
 
     async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+        if not self.matches(url):
+            raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
         try:
             return await asyncio.to_thread(self._download_sync, url, dest_dir, loop)
         except DownloadTooLargeError:
             raise
+        except UnsupportedUrlError:
+            raise
         except YouTubeDownloadError as exc:
             if self._registry is None or self._health_tracker is None or self._is_playlist:
                 raise
             logger.info("Local YouTube engine failed (%s); attempting provider fallback", exc)
-            fallback_res = await self._try_fallback_providers(url, dest_dir)
+            fallback_res = await self._try_fallback_providers(url, dest_dir, initial_error=exc)
             if fallback_res is not None:
                 return fallback_res
             raise
 
-    async def _try_fallback_providers(self, url: str, dest_dir: Path) -> DownloadResult | None:
+    async def _try_fallback_providers(
+        self,
+        url: str,
+        dest_dir: Path,
+        initial_error: YouTubeDownloadError | None = None,
+    ) -> DownloadResult | None:
         if self._registry is None or self._health_tracker is None:
             return None
         candidates = self._registry.get_providers_for_platform("youtube")
         ordered_providers = self._health_tracker.order_for("youtube", candidates)
 
+        tracker = RouteAttemptTracker()
+        if initial_error:
+            tracker.record("מנוע מקומי (yt-dlp)", summarize_ytdlp_failure(initial_error))
+
+        attempted_providers: set[str] = set()
+
         for provider in ordered_providers:
+            if not provider.matches(url):
+                logger.info("Skipping YouTube provider %s for %s: URL capability not supported", provider.name, url)
+                continue
+            if provider.name.lower() in attempted_providers:
+                continue
+            attempted_providers.add(provider.name.lower())
+
             start_time = time.monotonic()
             try:
                 logger.info("Attempting YouTube provider %s for %s", provider.name, url)
@@ -506,6 +594,10 @@ class YouTubeEngine(BaseEngine):
                     prov_exc,
                 )
                 self._health_tracker.record_failure(provider.name, "youtube", str(prov_exc))
+                tracker.record(provider.name, summarize_provider_failure(prov_exc))
+
+        if tracker.attempts:
+            raise YouTubeDownloadError(tracker.format_summary())
         return None
 
 

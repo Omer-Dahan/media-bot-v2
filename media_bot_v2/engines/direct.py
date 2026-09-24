@@ -14,15 +14,25 @@ and this engine's `download()` must not block the event loop.
 from __future__ import annotations
 
 import asyncio
+import logging
 import re
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
 import requests
 
-from media_bot_v2.engines.base import BaseEngine, DownloadResult, DownloadTooLargeError
+from media_bot_v2.engines.base import (
+    BaseEngine,
+    DownloadResult,
+    DownloadTooLargeError,
+    UnsupportedUrlError,
+)
+from media_bot_v2.telegram import texts
+
+logger = logging.getLogger(__name__)
 
 _URL_RE = re.compile(r"^https?://", re.IGNORECASE)
+_KNOWN_PLATFORM_HOSTS = ("youtube.com", "youtu.be", "tiktok.com", "instagram.com")
 _CHUNK_SIZE = 1024 * 1024
 _REQUEST_TIMEOUT = 30
 
@@ -30,23 +40,45 @@ _REQUEST_TIMEOUT = 30
 class DirectEngine(BaseEngine):
     """Downloads an arbitrary HTTP(S) URL to disk via a streaming GET."""
 
+    name: str = "direct"
+    supported_platforms: tuple[str, ...] = ("direct",)
+
     def __init__(self, *, max_download_size: int | None = None) -> None:
         self._max_download_size = max_download_size
 
     def matches(self, url: str) -> bool:
-        return bool(_URL_RE.match(url))
+        if not _URL_RE.match(url):
+            return False
+        lowered = url.lower()
+        return not any(h in lowered for h in _KNOWN_PLATFORM_HOSTS)
 
     async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+        if not self.matches(url):
+            raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
         filename = _filename_from_url(url)
         dest_path = dest_dir / filename
-        await asyncio.to_thread(_stream_to_file, url, dest_path, self._max_download_size)
+        await asyncio.to_thread(_preflight_and_stream_to_file, url, dest_path, self._max_download_size)
         return DownloadResult(file_paths=[str(dest_path)], title=filename)
 
 
 def _filename_from_url(url: str) -> str:
     name = Path(urlparse(url).path).name
     return unquote(name) or "download.bin"
+
+
+def _preflight_and_stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
+    if max_size is not None:
+        try:
+            with requests.head(url, allow_redirects=True, timeout=10) as head_resp:
+                if head_resp.status_code < 400:
+                    _reject_if_declared_size_too_large(head_resp, url, max_size)
+        except DownloadTooLargeError:
+            raise
+        except Exception as exc:  # noqa: BLE001
+            logger.debug("Preflight HEAD request failed for %s: %s; proceeding to GET", url, exc)
+
+    _stream_to_file(url, dest_path, max_size)
 
 
 def _stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
@@ -62,7 +94,10 @@ def _stream_to_file(url: str, dest_path: Path, max_size: int | None) -> None:
                     total += len(chunk)
                     if max_size is not None and total > max_size:
                         raise DownloadTooLargeError(
-                            f"Download exceeded the {max_size} byte limit for {url}"
+                            texts.format_download_too_large(total, max_size),
+                            file_size=total,
+                            max_size=max_size,
+                            url=url,
                         )
                     f.write(chunk)
         except DownloadTooLargeError:
@@ -86,5 +121,8 @@ def _reject_if_declared_size_too_large(response, url: str, max_size: int | None)
         return
     if declared_size > max_size:
         raise DownloadTooLargeError(
-            f"Declared Content-Length {declared_size} exceeds the {max_size} byte limit for {url}"
+            texts.format_download_too_large(declared_size, max_size),
+            file_size=declared_size,
+            max_size=max_size,
+            url=url,
         )

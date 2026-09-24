@@ -23,7 +23,7 @@ from media_bot_v2.credits.exceptions import (
 )
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.session import session_scope
-from media_bot_v2.engines.base import DownloadTooLargeError
+from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
 from media_bot_v2.engines.direct import DirectEngine
 from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import (
@@ -236,8 +236,10 @@ def register_handlers(
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
             await progress.update(str(exc))
-        except (YouTubeDownloadError, DownloadTooLargeError) as exc:
+        except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
             await progress.update(str(exc))
+        except TimeoutError:
+            pass
         except Exception:
             logger.exception("YouTube download failed for url=%s", url)
 
@@ -245,6 +247,10 @@ def register_handlers(
     async def url_handler(event: events.NewMessage.Event) -> None:
         raw_text = event.raw_text or ""
         if raw_text.startswith("/"):
+            return
+        scheme_match = re.match(r"^([a-zA-Z0-9+.-]+)://", raw_text.strip())
+        if scheme_match and scheme_match.group(1).lower() not in ("http", "https"):
+            await event.respond(texts.UNSUPPORTED_URL)
             return
         match = URL_RE.search(raw_text)
         if not match:
@@ -294,13 +300,19 @@ def register_handlers(
                     )
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 await progress.update(str(exc))
-            except (TikTokDownloadError, DownloadTooLargeError) as exc:
+            except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
                 await progress.update(str(exc))
+            except TimeoutError:
+                pass
             except Exception:
                 logger.exception("TikTok download failed for url=%s", url)
             return
         if _host_matches(url, INSTAGRAM_HOSTS):
             await event.respond(texts.INSTAGRAM_NOT_YET_IMPLEMENTED)
+            return
+
+        if not direct_engine.matches(url):
+            await event.respond(texts.UNSUPPORTED_URL)
             return
 
         message = await event.respond(texts.DOWNLOAD_STARTED)
@@ -324,7 +336,9 @@ def register_handlers(
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
             await progress.update(str(exc))
-        except DownloadTooLargeError as exc:
+        except (DownloadTooLargeError, UnsupportedUrlError) as exc:
             await progress.update(str(exc))
+        except TimeoutError:
+            pass
         except Exception:
             logger.exception("Direct download failed for url=%s", url)

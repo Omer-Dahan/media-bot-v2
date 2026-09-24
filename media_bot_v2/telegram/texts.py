@@ -105,3 +105,38 @@ YOUTUBE_JS_RUNTIME_MISSING = (
 
 PING_MESSAGE = "בודק פינג..."
 PING_RESULT = "פינג: {ms} מילישניות"
+
+DIRECT_FILE_TOO_LARGE = "❌ הקובץ גדול מדי ({size}). מגבלת ההורדה המרבית היא {max_size}. טלגרם אינה תומכת בהעברת קבצים בגודל כזה."
+UNSUPPORTED_URL = "❌ סוג הקישור אינו נתמך. הבוט תומך ביוטיוב, טיקטוק, אינסטגרם וקישורי הורדה ישירה לקבצים."
+REQUEST_TIMEOUT_EXCEEDED = "⏱️ הבקשה בוטלה עקב חריגה ממגבלת הזמן (timeout). נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
+
+
+def human_size(num_bytes: float | None) -> str:
+    if not num_bytes:
+        return "0B"
+    value = float(num_bytes)
+    for unit in ("B", "KB", "MB", "GB"):
+        if value < 1024:
+            return f"{value:.1f}{unit}"
+        value /= 1024
+    return f"{value:.1f}TB"
+
+
+def format_download_too_large(file_size: float, max_size: float) -> str:
+    return DIRECT_FILE_TOO_LARGE.format(
+        size=human_size(file_size),
+        max_size=human_size(max_size),
+    )
+
+
+def format_playlist_trimmed(downloaded: int, total: int) -> str:
+    return f"הושלם ✅\nהורדו {downloaded} מתוך {total} פריטים בפלייליסט (ההורדה הוגבלה לפי יתרת הקרדיטים)."
+
+
+def format_failure_summary(attempts: list[tuple[str, str]]) -> str:
+    if not attempts:
+        return DOWNLOAD_FAILED
+    lines = [DOWNLOAD_FAILED, "פירוט הניסיונות:"]
+    for route_name, reason in attempts:
+        lines.append(f"• {route_name}: {reason}")
+    return "\n".join(lines)

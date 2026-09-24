@@ -9,8 +9,18 @@ from pathlib import Path
 
 import yt_dlp
 
-from media_bot_v2.engines.base import BaseEngine, DownloadResult, DownloadTooLargeError
-from media_bot_v2.engines.youtube import _result_from_info
+from media_bot_v2.engines.base import (
+    BaseEngine,
+    DownloadResult,
+    DownloadTooLargeError,
+    RouteAttemptTracker,
+    UnsupportedUrlError,
+)
+from media_bot_v2.engines.youtube import (
+    _result_from_info,
+    summarize_provider_failure,
+    summarize_ytdlp_failure,
+)
 from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
@@ -26,6 +36,9 @@ class TikTokDownloadError(Exception):
 
 class TikTokEngine(BaseEngine):
     """TikTok engine trying configured external providers first, falling back to local yt-dlp."""
+
+    name: str = "tiktok"
+    supported_platforms: tuple[str, ...] = ("tiktok",)
 
     def __init__(
         self,
@@ -46,12 +59,24 @@ class TikTokEngine(BaseEngine):
         return matches_tiktok_url(url)
 
     async def download(self, url: str, *, dest_dir: Path) -> DownloadResult:
+        if not self.matches(url):
+            raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
 
         candidates = self._registry.get_providers_for_platform("tiktok")
         ordered_providers = self._health_tracker.order_for("tiktok", candidates)
 
+        tracker = RouteAttemptTracker()
+        attempted_providers: set[str] = set()
+
         for provider in ordered_providers:
+            if not provider.matches(url):
+                logger.info("Skipping TikTok provider %s for %s: URL capability not supported", provider.name, url)
+                continue
+            if provider.name.lower() in attempted_providers:
+                continue
+            attempted_providers.add(provider.name.lower())
+
             start_time = time.monotonic()
             try:
                 logger.info("Attempting TikTok provider %s for %s", provider.name, url)
@@ -82,6 +107,7 @@ class TikTokEngine(BaseEngine):
                     exc,
                 )
                 self._health_tracker.record_failure(provider.name, "tiktok", str(exc))
+                tracker.record(provider.name, summarize_provider_failure(exc))
 
         # All providers failed or were suppressed; try local yt-dlp engine
         logger.info("All TikTok providers failed for %s, falling back to local yt-dlp", url)
@@ -91,7 +117,8 @@ class TikTokEngine(BaseEngine):
             raise
         except Exception as exc:
             logger.warning("Local TikTok engine failed for %s: %s", url, exc)
-            raise TikTokDownloadError(texts.DOWNLOAD_FAILED) from exc
+            tracker.record("מנוע מקומי (yt-dlp)", summarize_ytdlp_failure(exc))
+            raise TikTokDownloadError(tracker.format_summary()) from exc
 
     def _download_local_sync(self, url: str, dest_dir: Path) -> DownloadResult:
         ydl_opts = {

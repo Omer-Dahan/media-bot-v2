@@ -11,6 +11,7 @@ import requests
 
 from media_bot_v2.engines.base import DownloadResult, DownloadTooLargeError
 from media_bot_v2.providers.base import ProviderResult
+from media_bot_v2.telegram import texts
 
 _CHUNK_SIZE = 1024 * 1024
 _DEFAULT_TIMEOUT = 30
@@ -88,11 +89,13 @@ def _stream_url_to_file(
             declared = response.headers.get("Content-Length")
             if declared is not None:
                 try:
-                    if downloaded_so_far + int(declared) > max_size:
+                    decl_size = int(declared)
+                    if downloaded_so_far + decl_size > max_size:
                         raise DownloadTooLargeError(
-                            f"Declared Content-Length {declared} for {url} would bring the "
-                            f"task's cumulative size past the {max_size} byte limit "
-                            f"(already downloaded {downloaded_so_far} bytes)"
+                            texts.format_download_too_large(downloaded_so_far + decl_size, max_size),
+                            file_size=downloaded_so_far + decl_size,
+                            max_size=max_size,
+                            url=url,
                         )
                 except ValueError:
                     pass
@@ -106,8 +109,10 @@ def _stream_url_to_file(
                     total_bytes += len(chunk)
                     if max_size is not None and downloaded_so_far + total_bytes > max_size:
                         raise DownloadTooLargeError(
-                            f"Task's cumulative download size exceeded the {max_size} byte "
-                            f"limit while downloading {url}"
+                            texts.format_download_too_large(downloaded_so_far + total_bytes, max_size),
+                            file_size=downloaded_so_far + total_bytes,
+                            max_size=max_size,
+                            url=url,
                         )
                     f.write(chunk)
         except Exception:
