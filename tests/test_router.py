@@ -445,3 +445,36 @@ def test_register_handlers_with_registry_does_not_warn(caplog):
     assert not any("external extraction providers" in record.message for record in caplog.records)
 
 
+def test_about_text_has_no_upstream_attribution_or_handles():
+    """Verify ABOUT contains a neutral bot description with no creator names,
+    handles, external repo URLs, or em dashes, and covers primary capabilities."""
+    assert "BennyThink" not in texts.ABOUT
+    assert "tgbot-collection" not in texts.ABOUT
+    assert "ytdlbot" not in texts.ABOUT
+    assert "YD_IL" not in texts.ABOUT
+    assert "@" not in texts.ABOUT
+    assert "http" not in texts.ABOUT
+    assert "נבנה על ידי" not in texts.ABOUT
+    assert "—" not in texts.ABOUT
+
+    # Describes core capabilities
+    assert "יוטיוב" in texts.ABOUT
+    assert "טיקטוק" in texts.ABOUT
+    assert "אינסטגרם" in texts.ABOUT
+    assert "הורדה ישירה" in texts.ABOUT
+    assert "איכות" in texts.ABOUT
+    assert "מכסת הורדות" in texts.ABOUT
+
+
+async def test_about_handler_responds_with_clean_about_text():
+    client = _make_router()
+    about_callback = None
+    for callback, _event in client.list_event_handlers():
+        if getattr(callback, "__name__", "") == "about_handler":
+            about_callback = callback
+            break
+    assert about_callback is not None, "about_handler not found"
+
+    event = AsyncMock()
+    await about_callback(event)
+    event.respond.assert_awaited_once_with(texts.ABOUT)

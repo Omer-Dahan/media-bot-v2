@@ -6,9 +6,9 @@ out-of-v1-scope commands (/buy, /spdl, /torrent, /adminpanel) and the
 JDownloader fallback mention - advertising commands or fallbacks that don't
 exist in this bot would just confuse users (spec/SPEC.md locked decision 4).
 
-ABOUT is kept verbatim, including the @BennyThink/@YD_IL attribution -
-spec/SPEC.md open question 3 (keep/update/drop) is still unanswered by the
-user as of this milestone.
+ABOUT has been updated to a neutral description of the bot and its capabilities,
+with all upstream attribution and repository links removed per the project owner's
+request (spec/SPEC.md question 3 closed).
 """
 
 from __future__ import annotations
@@ -57,11 +57,17 @@ HELP = """
 • לכל משתמש יש מכסת הורדות כדי שהבוט יישאר מהיר וזמין לכולם
 """
 
-ABOUT = (
-    "בוט הורדות יוטיוב נבנה על ידי @BennyThink.\n"
-    "שופר רבות ומופעל על ידי @YD_IL\n\n"
-    "קוד פתוח ב-GitHub: https://github.com/tgbot-collection/ytdlbot"
-)
+ABOUT = """
+🤖 בוט הורדות מדיה
+
+הבוט מאפשר הורדת וידאו ואודיו מיוטיוב, טיקטוק, אינסטגרם וקישורי הורדה ישירה.
+
+🔹 מה הבוט מציע?
+• הורדת וידאו ואודיו מיוטיוב, טיקטוק, אינסטגרם וקישורים ישירים.
+• בחירת איכות הורדה מותאמת אישית.
+• שליחת הקבצים במהירות ישירות לטלגרם.
+• ניהול מכסת הורדות לשמירה על שירות מהיר וזמין לכולם.
+"""
 
 SETTINGS = """
 ⚙️ **הגדרות הורדה (YouTube)**

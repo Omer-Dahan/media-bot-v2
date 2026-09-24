@@ -222,9 +222,11 @@ schema is identical by construction (§1 decision 2, enforced by
    (e.g. manually crediting a user, blocking a bad actor, clearing the
    cache), or is direct DB access acceptable as the stopgap until a real
    admin panel is designed later?
-3. **`about` text attribution.** The old bot's `/about` credits
-   `@BennyThink` (upstream open-source project) and `@YD_IL` (operator).
-   Keep, update, or remove this in the new bot?
+3. **`about` text attribution (CLOSED).** Resolved per project owner request:
+   all upstream attribution and repository links were removed from `ABOUT`. The
+   bot displays a neutral Hebrew description of its capabilities. This project
+   is an independent codebase, not to be called or considered a fork or version
+   of the original project.
 4. **Resume-on-failure UX.** The old bot has a "resume download" button
    backed by in-process partial-download state (`INVENTORY.md` §4,
    `network_errors.py`). This is real complexity for a v1 rewrite — is a

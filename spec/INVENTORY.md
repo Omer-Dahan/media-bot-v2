@@ -77,9 +77,10 @@ v1. `/spdl`, `/torrent`, `/ytdl`, `/adminpanel` are ❌ out of v1 scope as-is.
 ### `BotText` (`config/constant.py:6-84`) — ✅ keep content, 🔧 rebuild as a proper text module
 - `start` (line 8-22), `help` (24-62), `about` (64), `settings` (66-74),
   `youtube_quality_select` (76-83, takes `{title}`/`{duration}`).
-- `about` credits `@BennyThink` (upstream `tgbot-collection/ytdlbot`) and
-  `@YD_IL` (current operator) — flagged as an **open question**: keep,
-  update, or drop this attribution in the new bot.
+- `about`: decision closed — all upstream attribution and repository links
+  removed per owner request. The text is now a neutral description of the bot
+  and its capabilities. This project is an independent codebase and not a fork
+  or version of the original project.
 
 ### Settings menu (`_build_settings_markup`, `main.py:850-896`) — ✅ keep UX, 🔧 rebuild for Telethon
 Toggle-style buttons cycling in place (not a full menu tree):
