@@ -25,6 +25,7 @@ is deleted.
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import shutil
 import uuid
@@ -32,8 +33,20 @@ from pathlib import Path
 from typing import Any, Protocol
 
 from media_bot_v2.cache.video_cache import CacheEntry, VideoCacheStore
+from media_bot_v2.credits.exceptions import (
+    BandwidthExhaustedException,
+    CreditsExhaustedException,
+    UserBlockedException,
+)
 from media_bot_v2.credits.service import CreditsService
-from media_bot_v2.engines.base import BaseEngine, DownloadResult
+from media_bot_v2.engines.base import (
+    BaseEngine,
+    DownloadResult,
+    DownloadTooLargeError,
+    UnsupportedUrlError,
+)
+from media_bot_v2.engines.tiktok import TikTokDownloadError
+from media_bot_v2.engines.youtube import YouTubeDownloadError
 from media_bot_v2.telegram import texts
 from media_bot_v2.upload import splitter
 
@@ -51,9 +64,16 @@ class Uploader(Protocol):
 
 
 class DownloadPipeline:
-    def __init__(self, *, credits_service: CreditsService, download_dir: Path) -> None:
+    def __init__(
+        self,
+        *,
+        credits_service: CreditsService,
+        download_dir: Path,
+        request_timeout: float = 600.0,
+    ) -> None:
         self._credits = credits_service
         self._download_dir = download_dir
+        self._request_timeout = request_timeout
 
     async def run(
         self,
@@ -88,56 +108,101 @@ class DownloadPipeline:
         # cleanup could delete the other's still-in-flight files.
         task_dir = self._download_dir / str(user_id) / uuid.uuid4().hex
         try:
-            await progress.update(texts.DOWNLOADING)
-            result: DownloadResult = await engine.download(url, dest_dir=task_dir)
+            timeout_ctx = (
+                asyncio.timeout(self._request_timeout)
+                if self._request_timeout and self._request_timeout > 0
+                else asyncio.nullcontext()
+            )
+            async with timeout_ctx:
+                self._credits.check_quota(user_id)
 
-            await progress.update(texts.PROCESSING)
-            parts: list[Path] = []
-            for raw_path in result.file_paths:
-                parts.extend(splitter.split_file(Path(raw_path)))
+                if cache is not None and cache_key is not None:
+                    cached = cache.get(cache_key)
+                    if cached is not None and await self._try_serve_from_cache(
+                        user_id=user_id, uploader=uploader, cached=cached, progress=progress
+                    ):
+                        return
+                    if cached is not None:
+                        # Entry looked valid but couldn't actually be resent (the
+                        # archive message was deleted, the channel access changed,
+                        # etc.) - drop it so we don't keep retrying a dead reference,
+                        # then fall through to a normal fresh download below.
+                        cache.delete(cache_key)
 
-            await progress.update(texts.UPLOADING)
-            total_size = 0
-            archived_message_ids: list[int] = []
-            for index, part in enumerate(parts, start=1):
-                caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
-                message = await uploader.send_file(part, caption=caption)
-                total_size += part.stat().st_size
-                try:
-                    forwarded = await uploader.forward_to_archive(message)
-                except Exception:
-                    # The file already reached the user and its bytes count
-                    # toward their charge - an archive-channel hiccup is not
-                    # their problem and must not undo either.
-                    logger.warning(
-                        "Archive forward failed for user=%s url=%s part=%s",
-                        user_id,
-                        url,
-                        part,
-                        exc_info=True,
+                await progress.update(texts.DOWNLOADING)
+                result: DownloadResult = await engine.download(url, dest_dir=task_dir)
+
+                await progress.update(texts.PROCESSING)
+                parts: list[Path] = []
+                for raw_path in result.file_paths:
+                    parts.extend(splitter.split_file(Path(raw_path)))
+
+                await progress.update(texts.UPLOADING)
+                total_size = 0
+                archived_message_ids: list[int] = []
+                for index, part in enumerate(parts, start=1):
+                    caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
+                    message = await uploader.send_file(part, caption=caption)
+                    total_size += part.stat().st_size
+                    try:
+                        forwarded = await uploader.forward_to_archive(message)
+                    except Exception:
+                        # The file already reached the user and its bytes count
+                        # toward their charge - an archive-channel hiccup is not
+                        # their problem and must not undo either.
+                        logger.warning(
+                            "Archive forward failed for user=%s url=%s part=%s",
+                            user_id,
+                            url,
+                            part,
+                            exc_info=True,
+                        )
+                        forwarded = None
+                    if forwarded is not None:
+                        archived_message_ids.append(forwarded.id)
+
+                self._credits.use_quota_dynamic(user_id, total_size)
+                self._credits.add_bandwidth_used(user_id, total_size)
+
+                if (
+                    cache is not None
+                    and cache_key is not None
+                    and archive_channel is not None
+                    and parts
+                    and len(archived_message_ids) == len(parts)
+                ):
+                    cache.put(
+                        cache_key,
+                        archive_chat=archive_channel,
+                        message_ids=archived_message_ids,
+                        title=result.title,
                     )
-                    forwarded = None
-                if forwarded is not None:
-                    archived_message_ids.append(forwarded.id)
 
-            self._credits.use_quota_dynamic(user_id, total_size)
-            self._credits.add_bandwidth_used(user_id, total_size)
-
-            if (
-                cache is not None
-                and cache_key is not None
-                and archive_channel is not None
-                and parts
-                and len(archived_message_ids) == len(parts)
-            ):
-                cache.put(
-                    cache_key,
-                    archive_chat=archive_channel,
-                    message_ids=archived_message_ids,
-                    title=result.title,
-                )
-
-            await progress.update(texts.DOWNLOAD_DONE)
+                if (
+                    result.playlist_total is not None
+                    and result.playlist_downloaded is not None
+                    and result.playlist_downloaded < result.playlist_total
+                ):
+                    await progress.update(
+                        texts.format_playlist_trimmed(result.playlist_downloaded, result.playlist_total)
+                    )
+                else:
+                    await progress.update(texts.DOWNLOAD_DONE)
+        except TimeoutError:
+            logger.warning(
+                "Download pipeline timed out after %ss for user=%s url=%s",
+                self._request_timeout,
+                user_id,
+                url,
+            )
+            await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED)
+            raise
+        except (DownloadTooLargeError, UnsupportedUrlError, YouTubeDownloadError, TikTokDownloadError) as exc:
+            logger.warning("Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
+            await progress.update(str(exc))
+            raise
+        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException):
+            raise
         except Exception:
             logger.exception("Download pipeline failed for user=%s url=%s", user_id, url)
             await progress.update(texts.DOWNLOAD_FAILED)

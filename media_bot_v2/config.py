@@ -98,6 +98,9 @@ class Settings(BaseSettings):
     workers: int = Field(default=100, validation_alias="WORKERS")
     user_workers: int = Field(default=2, validation_alias="USER_WORKERS")
 
+    # --- Request timeout budget ---
+    request_timeout: float = Field(default=600.0, validation_alias="REQUEST_TIMEOUT")
+
     # --- Download limits (not user-configurable, kept as constants for clarity) ---
     tg_normal_max_size: int = 2000 * 1024 * 1024
     max_download_size: int = 4 * 1024 * 1024 * 1024

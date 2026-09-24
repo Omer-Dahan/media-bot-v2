@@ -41,6 +41,7 @@ def main() -> None:
     pipeline = DownloadPipeline(
         credits_service=credits_service,
         download_dir=Path(settings.download_dir),
+        request_timeout=settings.request_timeout,
     )
     limiter = ConcurrencyLimiter(
         global_limit=settings.workers,
