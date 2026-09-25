@@ -746,7 +746,7 @@ async def test_m4_1_finding7_multipart_upload_failure_charges_delivered_part_onl
             archive_channel="@archive",
         )
 
-    # User received part 1, so they were charged for 1 credit and 1000 bytes
+    # User received part 1 only: charged by the delivered volume (1000 bytes -> 1 credit)
     with session_factory() as session:
         user = session.query(User).filter(User.user_id == 1).one()
         assert user.free == 4  # 5 - 1 = 4

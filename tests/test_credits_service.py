@@ -77,19 +77,19 @@ def test_owner_bypasses_all_checks(session_factory, service):
 def test_use_quota_dynamic_deducts_free_before_paid(session_factory, service):
     _add_user(session_factory, free=1, paid=5)
     # 250MB -> ceil(250/200) = 2 credits: 1 from free, 1 from paid
-    remaining = service.use_quota_dynamic(1, 250 * 1024 * 1024)
+    remaining = service.use_quota_dynamic(1, [250 * 1024 * 1024])
     assert remaining == 4  # 0 free + 4 paid
 
 
 def test_use_quota_dynamic_minimum_one_credit_for_small_file(session_factory, service):
     _add_user(session_factory, free=3, paid=0)
-    remaining = service.use_quota_dynamic(1, 1024)  # 1KB, still costs 1 credit
+    remaining = service.use_quota_dynamic(1, [1024])  # 1KB, still costs 1 credit
     assert remaining == 2
 
 
 def test_use_quota_dynamic_zero_bytes_deducts_nothing(session_factory, service):
     _add_user(session_factory, free=3, paid=0)
-    remaining = service.use_quota_dynamic(1, 0)
+    remaining = service.use_quota_dynamic(1, [])
     assert remaining == 3
 
 
@@ -103,7 +103,7 @@ def test_check_quota_raises_loudly_for_unknown_user_instead_of_skipping(session_
 
 def test_use_quota_dynamic_raises_loudly_for_unknown_user(session_factory, service):
     with pytest.raises(RuntimeError):
-        service.use_quota_dynamic(999999, 1024)
+        service.use_quota_dynamic(999999, [1024])
 
 
 def test_add_bandwidth_used_raises_loudly_for_unknown_user(session_factory, service):

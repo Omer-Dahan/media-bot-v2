@@ -38,6 +38,9 @@ class Settings(BaseSettings):
     enable_vip: bool = Field(default=False, validation_alias="ENABLE_VIP")
     free_download: int = Field(default=3, validation_alias="FREE_DOWNLOAD")
     free_bandwidth: int = Field(default=2_147_483_648, validation_alias="FREE_BANDWIDTH")
+    # One credit per this many MB delivered in a request (rounded up, min 1).
+    # 200 matches the old bot.
+    mb_per_credit: int = Field(default=200, gt=0, validation_alias="MB_PER_CREDIT")
 
     # --- Archive channel ---
     archive_channel: str | None = Field(default=None, validation_alias="ARCHIVE_CHANNEL")

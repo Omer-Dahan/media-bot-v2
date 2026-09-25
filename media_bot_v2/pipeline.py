@@ -1,19 +1,20 @@
 """End-to-end download pipeline: check quota -> download -> split -> upload
 -> archive forward -> charge credits -> delete local files.
 
-Credit charging (this describes what the code does today; the pricing model
-itself is an owner decision and was NOT touched in M4.2):
+Credit charging (volume model, restored from the old bot): a credit is a unit
+of *volume*, not of requests or parts. One request costs
+`max(1, ceil(total_delivered_MB / MB_PER_CREDIT))` credits, computed by
+`credits.service.credits_for_sizes` over the summed size of every part that
+was delivered (default 200MB per credit: 200MB -> 1, 400MB -> 2, 5GB -> 26,
+three 100MB parts -> 2). Splitting a file never changes its price.
 
-* Credits are charged per *delivered part*, not per request. Right after each
-  part is uploaded successfully, `use_quota_dynamic(user, part_size)` deducts
-  `max(1, ceil(part_MB / 200))` credits and bandwidth is recorded. A file
-  that gets split into 3 parts therefore costs at least 3 credits, and every
-  file of a playlist is charged the same way. The old bot charged one credit
-  per request, so this is a pricing change from the legacy behaviour.
-* Nothing is charged up front, and nothing is charged for a part that was not
-  delivered. If part 2 of 3 fails to upload, part 1 stays charged (the user
-  received it), parts 2-3 are not, and the request errors out.
-* A cache hit re-forwards the archived messages and charges 0 credits.
+* Nothing is charged up front. The size of each part is recorded once it is
+  uploaded successfully, and the request is charged exactly once, after the
+  upload loop, for the parts that were actually delivered. If part 2 of 3
+  fails, the user pays for part 1 only (the charge still happens on the error
+  path) and the request errors out. Nothing delivered means nothing charged.
+* Bandwidth is recorded per delivered part.
+* A cache hit re-forwards the archived messages and charges nothing.
 
 Cache writes are all-or-nothing: an archive-cache entry is stored only after
 every part of the result was uploaded and forwarded to the archive, and only
@@ -122,6 +123,8 @@ class DownloadPipeline:
         cancel_token = CancellationToken()
         dl_cm = None
         up_cm = None
+        delivered_sizes: list[int] = []
+        charged = False
 
         try:
             # 1. Download phase under download_timeout
@@ -150,7 +153,7 @@ class DownloadPipeline:
             for raw_path in result.file_paths:
                 parts.extend(splitter.split_file(Path(raw_path)))
 
-            # 3. Upload phase under upload_timeout, charging per delivered part; cache only a complete result
+            # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
             await progress.update(texts.UPLOADING)
             archived_message_ids: list[int] = []
             all_parts_archived = True
@@ -166,7 +169,7 @@ class DownloadPipeline:
                     message = await uploader.send_file(part, caption=caption)
 
                 part_size = part.stat().st_size
-                self._credits.use_quota_dynamic(user_id, part_size)
+                delivered_sizes.append(part_size)
                 self._credits.add_bandwidth_used(user_id, part_size)
 
                 try:
@@ -185,6 +188,9 @@ class DownloadPipeline:
                     archived_message_ids.append(forwarded.id)
                 else:
                     all_parts_archived = False
+
+            charged = True
+            self._credits.use_quota_dynamic(user_id, delivered_sizes)
 
             trimmed = (
                 result.playlist_total is not None
@@ -261,6 +267,13 @@ class DownloadPipeline:
             raise
         finally:
             cancel_token.set()
+            if delivered_sizes and not charged:
+                # Error/cancel after at least one part reached the user:
+                # charge for exactly what was delivered.
+                try:
+                    self._credits.use_quota_dynamic(user_id, delivered_sizes)
+                except Exception:
+                    logger.exception("Failed to charge delivered parts for user=%s url=%s", user_id, url)
             self._cleanup(task_dir)
 
     async def _try_serve_from_cache(
@@ -277,8 +290,6 @@ class DownloadPipeline:
         except Exception:
             logger.warning("Cache resend failed for user=%s, falling back to a fresh download", user_id, exc_info=True)
             return False
-        self._credits.use_quota_dynamic(user_id, 0)
-        self._credits.add_bandwidth_used(user_id, 0)
         await progress.update(texts.DOWNLOAD_DONE)
         return True
 

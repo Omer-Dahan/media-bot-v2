@@ -59,7 +59,7 @@ Matches the skeleton already written under `media_bot_v2/`:
 | `telegram/router.py` | Maps commands/messages to engine dispatch; owns the settings/quality-select menus | skeleton stub, real handlers land in M1/M2 |
 | `db/models.py` | SQLAlchemy 2.0 models, byte-for-byte schema parity with the old bot | done, tested against expected column sets |
 | `db/session.py` | Engine/session factory for the shared `DB_DSN` | done |
-| `credits/service.py` | Ported quota/credit logic (free-then-paid deduction, 200MB/credit, bandwidth cap, owner bypass), with the pre-charge-before-split bug fixed | done, unit tested |
+| `credits/service.py` | Ported quota/credit logic (free-then-paid deduction, volume-based `max(1, ceil(delivered_MB / MB_PER_CREDIT))` with `MB_PER_CREDIT` default 200, bandwidth cap, owner bypass), with the pre-charge-before-split bug fixed | done, unit tested |
 | `engines/base.py` | Shared engine contract (`matches()`, `download()`) | skeleton interface only; real base class (cache check → download → split → upload → archive → credit) lands in M2, ported from the old `engine/base.py` flow |
 | `engines/{youtube,tiktok,instagram,direct}.py` | Per-platform engines | done — all four engines implemented (Instagram backed by local yt-dlp with curl-cffi impersonation as default without cookies, optional `INSTAGRAM_COOKIES_FILE`) |
 | `queue/limiter.py` | Per-user + global concurrency caps via `asyncio.Semaphore` | skeleton done, wired up in M2 |
@@ -131,7 +131,11 @@ not just claimed.
   against the same DSN the old bot uses; schema-parity tests pass (already
   in the skeleton).
 - Credit checks (`check_quota`, `use_quota_dynamic`, bandwidth cap, owner
-  bypass) enforced identically to the old bot; `tests/test_credits_service.py`
+  bypass) enforced identically to the old bot. Credits are volume, not
+  requests or parts: `max(1, ceil(total_delivered_MB / MB_PER_CREDIT))` per
+  request over all delivered parts (200MB -> 1, 400MB -> 2, 5GB -> 26;
+  `MB_PER_CREDIT` env, default 200); the remaining balance is shown on
+  `/settings`, never in the file caption; `tests/test_credits_service.py`
   passes.
 - **Acceptance:** a fresh clone with `uv sync && uv run pytest` is green with
   zero network/Telegram access; manual `/start` round-trip against a test

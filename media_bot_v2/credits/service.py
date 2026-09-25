@@ -5,8 +5,11 @@ same rounding, same bandwidth gate) since users' existing free/paid balances
 must keep meaning the same thing after cutover:
 
 - Deduction order is always free credits first, then paid credits.
-- 1 credit per 200 MB of actual file size, rounded up, minimum 1 credit if
-  any bytes were transferred (see use_quota_dynamic in the old model.py).
+- Credits are a unit of *volume*, not of requests or parts: one credit per
+  MB_PER_CREDIT (default 200) MB of everything delivered in a request,
+  rounded up, minimum 1 credit for any request that delivered a file (see
+  use_quota_dynamic in the old model.py). `credits_for_sizes` is the single
+  place this is computed.
 - Owners (config.owner_ids) are exempt from all quota/bandwidth checks.
 - When ENABLE_VIP is false, quota checks are a no-op (unlimited downloads).
 """
@@ -25,6 +28,24 @@ from media_bot_v2.credits.exceptions import (
 from media_bot_v2.db.models import User
 from media_bot_v2.db.session import session_scope
 
+BYTES_PER_MB = 1024 * 1024
+DEFAULT_MB_PER_CREDIT = 200
+
+
+def credits_for_sizes(file_sizes: list[int], mb_per_credit: int = DEFAULT_MB_PER_CREDIT) -> int:
+    """Credits owed for one request that delivered files of `file_sizes` bytes.
+
+    `max(1, ceil(total_MB / mb_per_credit))` over the summed size of every
+    delivered file; 0 only when nothing was delivered. Sizes are summed
+    before rounding, so splitting a file into parts never changes the price.
+    """
+    if mb_per_credit <= 0:
+        raise ValueError(f"mb_per_credit must be positive, got {mb_per_credit}")
+    if not file_sizes:
+        return 0
+    total_mb = sum(file_sizes) / BYTES_PER_MB
+    return max(1, math.ceil(total_mb / mb_per_credit))
+
 
 class CreditsService:
     def __init__(
@@ -34,7 +55,11 @@ class CreditsService:
         enable_vip: bool,
         owner_ids: list[int],
         free_bandwidth: int,
+        mb_per_credit: int = DEFAULT_MB_PER_CREDIT,
     ) -> None:
+        if mb_per_credit <= 0:
+            raise ValueError(f"mb_per_credit must be positive, got {mb_per_credit}")
+        self._mb_per_credit = mb_per_credit
         self._sessions = session_factory
         self._enable_vip = enable_vip
         self._owner_ids = set(owner_ids)
@@ -60,16 +85,12 @@ class CreditsService:
                     "הגעת למגבלת 2GB יומית למשתמשים חינמיים.\nלרכישת חבילה ללא הגבלה שלח /buy"
                 )
 
-    def use_quota_dynamic(self, user_id: int, file_sizes: list[int] | int) -> int:
-        """Deduct credits for a completed transfer, return remaining credits."""
+    def use_quota_dynamic(self, user_id: int, file_sizes: list[int]) -> int:
+        """Deduct credits for everything one request delivered, return remaining credits."""
         if not self._enable_vip:
             return math.inf  # type: ignore[return-value]
 
-        if isinstance(file_sizes, int):
-            file_sizes = [file_sizes] if file_sizes > 0 else []
-
-        total_mb = sum(file_sizes) / (1024 * 1024)
-        credits_to_deduct = max(1, math.ceil(total_mb / 200)) if file_sizes else 0
+        credits_to_deduct = credits_for_sizes(file_sizes, self._mb_per_credit)
 
         with session_scope(self._sessions) as session:
             user = session.query(User).filter(User.user_id == user_id).first()

@@ -117,6 +117,15 @@ def register_handlers(
         )
         registry = ProviderRegistry()
 
+    def settings_text(user_id: int) -> str:
+        # Read the balance from the DB on every render (the service keeps no
+        # cache), so it reflects the latest charge. Hidden when credits do not
+        # apply to this user (ENABLE_VIP off, or an owner): the balance is inf.
+        remaining = credits_service.get_total_credits(user_id)
+        if not math.isfinite(remaining):
+            return texts.SETTINGS
+        return texts.SETTINGS + texts.SETTINGS_CREDITS.format(credits=int(remaining))
+
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
         first_name, username = _sender_info(event)
@@ -153,7 +162,7 @@ def register_handlers(
                 session, event.sender_id, first_name=first_name, username=username, free_download=free_download
             )
             buttons = settings_menu.build_settings_buttons(user.settings)
-        await event.respond(texts.SETTINGS, buttons=buttons)
+        await event.respond(settings_text(event.sender_id), buttons=buttons)
 
     @client.on(events.CallbackQuery(pattern=rb"^toggle_"))
     async def toggle_handler(event: events.CallbackQuery.Event) -> None:
@@ -170,7 +179,7 @@ def register_handlers(
         alert = toggle_key == settings_menu.TOGGLE_TITLE_LEN
         await event.answer(answer, alert=alert)
         try:
-            await event.edit(texts.SETTINGS, buttons=buttons)
+            await event.edit(settings_text(event.sender_id), buttons=buttons)
         except MessageNotModifiedError:
             pass  # content unchanged (e.g. same toggle value) - nothing to surface
 

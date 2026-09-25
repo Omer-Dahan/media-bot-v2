@@ -146,6 +146,10 @@ first deployment:
   at startup; `Settings` raises if you set it to `main`).
 - `DB_DSN`: the production MySQL DSN, e.g.
   `mysql+pymysql://user:password@host/dbname`.
+- `MB_PER_CREDIT` (default `200`, same as the old bot): credits are charged
+  by volume, `max(1, ceil(total_delivered_MB / MB_PER_CREDIT))` per request.
+  200MB -> 1, 400MB -> 2, 5GB -> 26. Change it (e.g. `100`) here, no code
+  change needed; restart the service to apply. Must be a positive integer.
 - `YOUTUBE_COOKIES_FILE` / `TIKTOK_COOKIES_FILE`: paths to cookie files, if
   you use them (never commit these files).
 - `TIKTOK_PROVIDERS` / `YOUTUBE_PROVIDERS` / `DISABLED_PROVIDERS`: provider

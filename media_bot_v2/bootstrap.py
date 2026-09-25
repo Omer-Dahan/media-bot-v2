@@ -42,6 +42,7 @@ def main() -> None:
         enable_vip=settings.enable_vip,
         owner_ids=settings.owner_ids,
         free_bandwidth=settings.free_bandwidth,
+        mb_per_credit=settings.mb_per_credit,
     )
     pipeline = DownloadPipeline(
         credits_service=credits_service,
