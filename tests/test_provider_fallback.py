@@ -49,15 +49,15 @@ class _FakeUploader:
         self.sent: list[Path] = []
         self.archived: list[object] = []
 
-    async def send_file(self, path: Path, *, caption=None):
+    async def send_file(self, path: Path, *, caption=None, **kwargs):
         self.sent.append(path)
         return MagicMock(id=len(self.sent))
 
-    async def forward_to_archive(self, message):
+    async def copy_to_archive(self, message, **kwargs):
         self.archived.append(message)
         return MagicMock(id=999)
 
-    async def send_cached(self, archive_chat: str, message_ids: list[int]):
+    async def send_cached(self, archive_chat: str, message_ids: list[int], **kwargs):
         return MagicMock()
 
 

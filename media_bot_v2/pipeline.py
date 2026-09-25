@@ -1,5 +1,5 @@
 """End-to-end download pipeline: check quota -> download -> split -> upload
--> archive forward -> charge credits -> delete local files.
+-> archive copy -> charge credits -> delete local files.
 
 Credit charging (volume model, restored from the old bot): a credit is a unit
 of *volume*, not of requests or parts. One request costs
@@ -14,10 +14,21 @@ three 100MB parts -> 2). Splitting a file never changes its price.
   fails, the user pays for part 1 only (the charge still happens on the error
   path) and the request errors out. Nothing delivered means nothing charged.
 * Bandwidth is recorded per delivered part.
-* A cache hit re-forwards the archived messages and charges nothing.
+* A cache hit re-sends the archived media (never a forward: no "Forwarded
+  from" header) with a caption rebuilt for the requesting user, and charges
+  nothing.
+
+Delivery style (restored from the old bot, see spec/DESIGN-PARITY.md): every
+file is probed (duration/resolution) and given a thumbnail *before* any
+splitting, videos go out as streamable videos or - per the user's setting - as
+documents, captions are the old bot's HTML signatures, a split file's parts
+are labelled "📎 חלק i/N" with the full signature moving to the latest part
+sent, subtitles follow as separate uncharged documents when the user enabled
+them, and the "full description" message follows when the description length
+is set to 4000. The signature never contains a credits line.
 
 Cache writes are all-or-nothing: an archive-cache entry is stored only after
-every part of the result was uploaded and forwarded to the archive, and only
+every part of the result was uploaded and copied to the archive, and only
 if the result is not a trimmed playlist. A partial delivery is never cached,
 because a later identical request would otherwise be served the partial set
 from cache and told "done" without the download ever running again.
@@ -36,10 +47,11 @@ import inspect
 import logging
 import shutil
 import uuid
+from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
 
-from media_bot_v2.cache.video_cache import CacheEntry, VideoCacheStore
+from media_bot_v2.cache.video_cache import CachedItem, CacheEntry, VideoCacheStore
 from media_bot_v2.credits.exceptions import (
     BandwidthExhaustedException,
     CreditsExhaustedException,
@@ -56,8 +68,10 @@ from media_bot_v2.engines.base import (
 from media_bot_v2.engines.instagram import InstagramDownloadError
 from media_bot_v2.engines.tiktok import TikTokDownloadError
 from media_bot_v2.engines.youtube import YouTubeDownloadError
-from media_bot_v2.telegram import texts
+from media_bot_v2.telegram import captions, texts
+from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.upload import splitter
+from media_bot_v2.upload.media_probe import KIND_VIDEO, MediaInfo, probe, probe_with_thumb
 
 logger = logging.getLogger(__name__)
 
@@ -67,9 +81,30 @@ class ProgressReporter(Protocol):
 
 
 class Uploader(Protocol):
-    async def send_file(self, path: Path, *, caption: str | None = None) -> Any: ...
-    async def forward_to_archive(self, message: Any) -> Any | None: ...
-    async def send_cached(self, archive_chat: str, message_ids: list[int]) -> Any: ...
+    async def send_file(
+        self,
+        path: Path,
+        *,
+        caption: str | None = None,
+        media: MediaInfo | None = None,
+        as_document: bool = False,
+        title: str | None = None,
+    ) -> Any: ...
+    async def copy_to_archive(self, message: Any, *, caption: str) -> Any | None: ...
+    async def edit_caption(self, message: Any, caption: str) -> None: ...
+    async def send_subtitle(self, path: Path) -> Any: ...
+    async def send_description(self, text: str, *, reply_to: Any) -> Any: ...
+    async def send_cached(
+        self, archive_chat: str, message_ids: list[int], *, captions: list[str] | None = None
+    ) -> Any: ...
+
+
+@dataclass
+class _FileGroup:
+    """One downloaded file and the on-disk parts it was split into (or itself)."""
+
+    info: MediaInfo  # probed on the whole file, before splitting
+    parts: list[Path]
 
 
 class DownloadPipeline:
@@ -99,13 +134,20 @@ class DownloadPipeline:
         cache: VideoCacheStore | None = None,
         cache_key: str | None = None,
         archive_channel: str | None = None,
+        delivery: DeliveryOptions | None = None,
     ) -> None:
         self._credits.check_quota(user_id)
+        delivery = delivery or DeliveryOptions()
 
         if cache is not None and cache_key is not None:
             cached = cache.get(cache_key)
             if cached is not None and await self._try_serve_from_cache(
-                user_id=user_id, uploader=uploader, cached=cached, progress=progress
+                user_id=user_id,
+                url=url,
+                uploader=uploader,
+                cached=cached,
+                progress=progress,
+                delivery=delivery,
             ):
                 return
             if cached is not None:
@@ -147,50 +189,121 @@ class DownloadPipeline:
                 else:
                     result = await engine.download(url, dest_dir=task_dir)
 
-            # 2. Processing & splitting phase
+            # 2. Processing phase: probe + thumbnail every file while it is still
+            # whole (splitting deletes the source), then split oversized ones.
             await progress.update(texts.PROCESSING)
-            parts: list[Path] = []
+            groups: list[_FileGroup] = []
             for raw_path in result.file_paths:
-                parts.extend(splitter.split_file(Path(raw_path)))
+                source = Path(raw_path)
+                async with self._upload_budget() as cm:
+                    up_cm = cm
+                    info = await asyncio.to_thread(probe_with_thumb, source)
+                parts = await asyncio.to_thread(splitter.split_file, source)
+                groups.append(_FileGroup(info=info, parts=parts))
 
             # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
             await progress.update(texts.UPLOADING)
             archived_message_ids: list[int] = []
+            cached_items: list[CachedItem] = []
             all_parts_archived = True
-            for index, part in enumerate(parts, start=1):
-                caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
-                up_timeout_ctx = (
-                    asyncio.timeout(self._upload_timeout)
-                    if self._upload_timeout and self._upload_timeout > 0
-                    else asyncio.nullcontext()
-                )
-                async with up_timeout_ctx as cm:
-                    up_cm = cm
-                    message = await uploader.send_file(part, caption=caption)
+            last_media_message: Any = None
+            any_parts = False
+            for group in groups:
+                total_parts = len(group.parts)
+                previous: tuple[Any, str] | None = None
+                for index, part in enumerate(group.parts, start=1):
+                    any_parts = True
+                    async with self._upload_budget() as cm:
+                        up_cm = cm
+                        send_info, label, playable = await self._prepare_part(
+                            group, part, index, total_parts, as_document=delivery.as_document
+                        )
+                        full_caption = captions.build_user_caption(
+                            kind=group.info.kind,
+                            title=result.title,
+                            url=url,
+                            width=group.info.width,
+                            height=group.info.height,
+                            duration=group.info.duration,
+                            title_length=delivery.title_length,
+                            reserved_units=captions.utf16_units(label) + 2 if label else 0,
+                        )
+                        caption = captions.with_part_label(label, full_caption) if label else full_caption
+                        message = await uploader.send_file(
+                            part,
+                            caption=caption,
+                            media=send_info,
+                            as_document=delivery.as_document or not playable,
+                            title=result.title,
+                        )
+                        last_media_message = message
 
-                part_size = part.stat().st_size
-                delivered_sizes.append(part_size)
-                self._credits.add_bandwidth_used(user_id, part_size)
+                        part_size = part.stat().st_size
+                        delivered_sizes.append(part_size)
+                        self._credits.add_bandwidth_used(user_id, part_size)
 
-                try:
-                    forwarded = await uploader.forward_to_archive(message)
-                except Exception:
-                    logger.warning(
-                        "Archive forward failed for user=%s url=%s part=%s",
-                        user_id,
-                        url,
-                        part,
-                        exc_info=True,
-                    )
-                    forwarded = None
+                        archive_id = await self._archive_copy(
+                            uploader, message, part.name, user_id=user_id, url=url, delivery=delivery
+                        )
+                        if archive_id is not None:
+                            archived_message_ids.append(archive_id)
+                        else:
+                            all_parts_archived = False
+                        cached_items.append(
+                            CachedItem(
+                                kind=group.info.kind,
+                                duration=group.info.duration,
+                                width=group.info.width,
+                                height=group.info.height,
+                                part_index=index if label else 0,
+                                part_total=total_parts if label else 0,
+                                part_label=label or None,
+                            )
+                        )
 
-                if forwarded is not None:
-                    archived_message_ids.append(forwarded.id)
-                else:
-                    all_parts_archived = False
+                        # The full signature lives on the newest part; the one
+                        # before it drops to its bare label. Doing it only after
+                        # the next part arrived means a failed part leaves the
+                        # last delivered one still carrying the full signature.
+                        if previous is not None:
+                            await self._edit_caption_quietly(uploader, previous[0], previous[1])
+                        if label:
+                            previous = (message, label)
 
             charged = True
             self._credits.use_quota_dynamic(user_id, delivered_sizes)
+
+            # 4. Extras after the media: subtitles (never charged) and the
+            # "full description" message. Neither may fail the download.
+            subtitle_ids: list[int] = []
+            subtitle_names: list[str] = []
+            subtitles_archived = True
+            if delivery.subtitles:
+                for sub_path in result.subtitle_paths:
+                    sub = Path(sub_path)
+                    try:
+                        async with self._upload_budget():
+                            sub_message = await uploader.send_subtitle(sub)
+                            sub_archive_id = await self._archive_copy(
+                                uploader, sub_message, sub.name, user_id=user_id, url=url, delivery=delivery
+                            )
+                    except Exception:
+                        logger.warning("Failed to send subtitle %s for url=%s", sub, url, exc_info=True)
+                        subtitles_archived = False
+                        continue
+                    if sub_archive_id is None:
+                        subtitles_archived = False
+                    else:
+                        subtitle_ids.append(sub_archive_id)
+                        subtitle_names.append(sub.name)
+
+            await self._send_description_quietly(
+                uploader,
+                title=result.title,
+                description=result.description,
+                delivery=delivery,
+                reply_to=last_media_message,
+            )
 
             trimmed = (
                 result.playlist_total is not None
@@ -201,8 +314,9 @@ class DownloadPipeline:
                 cache is not None
                 and cache_key is not None
                 and archive_channel is not None
-                and parts
+                and any_parts
                 and all_parts_archived
+                and subtitles_archived
                 and not trimmed
             ):
                 cache.put(
@@ -210,8 +324,11 @@ class DownloadPipeline:
                     archive_chat=archive_channel,
                     message_ids=archived_message_ids,
                     title=result.title,
+                    items=cached_items,
+                    description=result.description[: captions.DESCRIPTION_LIMIT] if result.description else None,
+                    subtitle_ids=subtitle_ids,
+                    subtitle_names=subtitle_names,
                 )
-
             if trimmed:
                 await progress.update(
                     texts.format_playlist_trimmed(
@@ -276,20 +393,158 @@ class DownloadPipeline:
                     logger.exception("Failed to charge delivered parts for user=%s url=%s", user_id, url)
             self._cleanup(task_dir)
 
+    def _upload_budget(self):
+        if self._upload_timeout and self._upload_timeout > 0:
+            return asyncio.timeout(self._upload_timeout)
+        return asyncio.nullcontext()
+
+    async def _prepare_part(
+        self, group: _FileGroup, part: Path, index: int, total: int, *, as_document: bool
+    ) -> tuple[MediaInfo, str, bool]:
+        """(media info to send with, caption label, is the part playable media).
+
+        A whole file uses the info probed before splitting. A split part is
+        probed on its own so it gets its real duration (ffmpeg's segments are
+        not equal length), while resolution and the thumbnail come from the
+        source. A part that is not playable on its own - a raw byte chunk, the
+        splitter's fallback - is sent as a document with a file-name label.
+        """
+        if total == 1:
+            return group.info, "", True
+        part_info = await asyncio.to_thread(probe, part)
+        playable = part_info.kind == group.info.kind and group.info.kind in (KIND_VIDEO, "audio")
+        if not playable:
+            return MediaInfo(), captions.doc_part_label(index, total, part.name), False
+        send_info = replace(
+            part_info,
+            width=group.info.width,
+            height=group.info.height,
+            thumb_path=group.info.thumb_path,
+        )
+        if as_document:
+            return send_info, captions.doc_part_label(index, total, part.name), True
+        return send_info, captions.part_label(index, total), True
+
+    async def _archive_copy(
+        self,
+        uploader: Uploader,
+        message: Any,
+        filename: str,
+        *,
+        user_id: int,
+        url: str,
+        delivery: DeliveryOptions,
+    ) -> int | None:
+        """Archive one delivered message; a failure only means "not cached"."""
+        try:
+            copied = await uploader.copy_to_archive(
+                message,
+                caption=captions.build_archive_caption(
+                    user_display=delivery.user_display or str(user_id),
+                    user_id=user_id,
+                    filename=filename,
+                    url=url,
+                ),
+            )
+        except Exception:
+            logger.warning("Archive copy failed for user=%s url=%s file=%s", user_id, url, filename, exc_info=True)
+            return None
+        return copied.id if copied is not None else None
+
+    async def _edit_caption_quietly(self, uploader: Uploader, message: Any, caption: str) -> None:
+        try:
+            await uploader.edit_caption(message, caption)
+        except Exception:
+            logger.warning("Failed to edit a part's caption to %r", caption, exc_info=True)
+
+    async def _send_description_quietly(
+        self,
+        uploader: Uploader,
+        *,
+        title: str | None,
+        description: str | None,
+        delivery: DeliveryOptions,
+        reply_to: Any,
+    ) -> None:
+        """The "full description" message of description-length 4000: sent only
+        when there is something the caption could not hold."""
+        if delivery.title_length != captions.DESCRIPTION_LIMIT:
+            return
+        if not description and len(title or "") <= captions.title_limit(delivery.title_length):
+            return
+        text = captions.build_description_message(title, description)
+        if text is None:
+            return
+        try:
+            async with self._upload_budget():
+                await uploader.send_description(text, reply_to=reply_to)
+        except Exception:
+            logger.warning("Failed to send the full description message", exc_info=True)
+
+    def _cached_caption(self, cached: CacheEntry, index: int, *, url: str, title_length: int) -> str:
+        """Caption for an archived message being re-sent to a user, rebuilt
+        for that user (never the archive's operator caption). Rows written
+        before per-message metadata existed get a basic video caption."""
+        item = cached.items[index] if index < len(cached.items) else CachedItem()
+        label = item.part_label or ""
+        full = captions.build_user_caption(
+            kind=item.kind,
+            title=cached.title,
+            url=url,
+            width=item.width,
+            height=item.height,
+            duration=item.duration,
+            title_length=title_length,
+            reserved_units=captions.utf16_units(label) + 2 if label else 0,
+        )
+        if not label:
+            return full
+        if item.part_index < item.part_total:
+            return label
+        return captions.with_part_label(label, full)
+
     async def _try_serve_from_cache(
         self,
         *,
         user_id: int,
+        url: str,
         uploader: Uploader,
         cached: CacheEntry,
         progress: ProgressReporter,
+        delivery: DeliveryOptions,
     ) -> bool:
         try:
             await progress.update(texts.DOWNLOAD_FROM_CACHE)
-            await uploader.send_cached(cached.archive_chat, cached.message_ids)
+            sent = await uploader.send_cached(
+                cached.archive_chat,
+                cached.message_ids,
+                captions=[
+                    self._cached_caption(cached, i, url=url, title_length=delivery.title_length)
+                    for i in range(len(cached.message_ids))
+                ],
+            )
         except Exception:
             logger.warning("Cache resend failed for user=%s, falling back to a fresh download", user_id, exc_info=True)
             return False
+
+        # The media is delivered; from here on nothing may report a failure.
+        if delivery.subtitles and cached.subtitle_ids:
+            try:
+                await uploader.send_cached(
+                    cached.archive_chat,
+                    cached.subtitle_ids,
+                    captions=[captions.subtitle_caption(name) for name in cached.subtitle_names],
+                )
+            except Exception:
+                logger.warning("Cached subtitles could not be re-sent for user=%s", user_id, exc_info=True)
+        reply_to = sent[-1] if isinstance(sent, list) and sent else None
+        await self._send_description_quietly(
+            uploader,
+            title=cached.title,
+            description=cached.description,
+            delivery=delivery,
+            reply_to=reply_to,
+        )
         await progress.update(texts.DOWNLOAD_DONE)
         return True
 

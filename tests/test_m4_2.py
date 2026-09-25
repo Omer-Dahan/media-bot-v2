@@ -220,13 +220,13 @@ class _FlakyUploader(_MockUploader):
         self.cached_sends: list[tuple[str, list[int]]] = []
         self._n = 0
 
-    async def send_file(self, path: Path, *, caption: str | None = None) -> MagicMock:
+    async def send_file(self, path: Path, *, caption: str | None = None, **kwargs) -> MagicMock:
         self._n += 1
         if self.fail_part_two and path.name == "part2.bin":
             raise RuntimeError("Upload network dropped on part 2")
         return await super().send_file(path, caption=caption)
 
-    async def send_cached(self, archive_chat: str, message_ids: list[int]) -> MagicMock:
+    async def send_cached(self, archive_chat: str, message_ids: list[int], **kwargs) -> MagicMock:
         self.cached_sends.append((archive_chat, list(message_ids)))
         return MagicMock()
 
@@ -285,10 +285,10 @@ async def test_result_with_a_failed_archive_forward_is_not_cached(tmp_path):
     pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
 
     class _ForwardFailsOnSecond(_FlakyUploader):
-        async def forward_to_archive(self, message):
+        async def copy_to_archive(self, message, **kwargs):
             if message.id == 2:
                 raise RuntimeError("archive down")
-            return await super().forward_to_archive(message)
+            return await super().copy_to_archive(message, **kwargs)
 
     uploader = _ForwardFailsOnSecond()
     uploader.fail_part_two = False

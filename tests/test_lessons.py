@@ -82,15 +82,15 @@ class _MockUploader:
         self.sent: list[Path] = []
         self.archived: list[object] = []
 
-    async def send_file(self, path: Path, *, caption: str | None = None) -> MagicMock:
+    async def send_file(self, path: Path, *, caption: str | None = None, **kwargs) -> MagicMock:
         self.sent.append(path)
         return MagicMock(id=len(self.sent))
 
-    async def forward_to_archive(self, message: object) -> MagicMock:
+    async def copy_to_archive(self, message: object, **kwargs) -> MagicMock:
         self.archived.append(message)
         return MagicMock(id=len(self.archived) + 100)
 
-    async def send_cached(self, archive_chat: str, message_ids: list[int]) -> MagicMock:
+    async def send_cached(self, archive_chat: str, message_ids: list[int], **kwargs) -> MagicMock:
         return MagicMock()
 
 
@@ -724,7 +724,7 @@ async def test_m4_1_finding7_multipart_upload_failure_charges_delivered_part_onl
             super().__init__()
             self.calls = 0
 
-        async def send_file(self, path: Path, *, caption: str | None = None) -> MagicMock:
+        async def send_file(self, path: Path, *, caption: str | None = None, **kwargs) -> MagicMock:
             self.calls += 1
             if self.calls > 1:
                 raise RuntimeError("Upload network dropped on part 2")

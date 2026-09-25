@@ -117,16 +117,16 @@ class _Uploader:
         self.calls = 0
         self._fail_on_call = fail_on_call
 
-    async def send_file(self, path: Path, *, caption=None):
+    async def send_file(self, path: Path, *, caption=None, **kwargs):
         self.calls += 1
         if self._fail_on_call == self.calls:
             raise RuntimeError("upload dropped")
         return object()
 
-    async def forward_to_archive(self, message):
+    async def copy_to_archive(self, message, **kwargs):
         return None
 
-    async def send_cached(self, archive_chat, message_ids):
+    async def send_cached(self, archive_chat, message_ids, **kwargs):
         return None
 
 

@@ -11,7 +11,7 @@ import logging
 import threading
 from abc import ABC, abstractmethod
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 from media_bot_v2.telegram import texts
@@ -118,6 +118,9 @@ class DownloadResult:
     playlist_total: int | None = None
     playlist_downloaded: int | None = None
     playlist_trimmed_reason: str | None = None
+    # Subtitle files written next to the media (never part of `file_paths`,
+    # never charged); delivered only if the user enabled subtitles.
+    subtitle_paths: list[str] = field(default_factory=list)
 
 
 class BaseEngine(ABC):

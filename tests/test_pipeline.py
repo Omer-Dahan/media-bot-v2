@@ -78,20 +78,20 @@ class _FakeUploader:
         self._fail_cached_send = fail_cached_send
         self._next_archive_id = 1000
 
-    async def send_file(self, path: Path, *, caption=None):
+    async def send_file(self, path: Path, *, caption=None, **kwargs):
         if self._fail_on_part is not None and len(self.sent) == self._fail_on_part:
             raise RuntimeError("boom: upload failed")
         self.sent.append(path)
         return _FakeMessage(len(self.sent), f"message-for-{path.name}")
 
-    async def forward_to_archive(self, message):
+    async def copy_to_archive(self, message, **kwargs):
         if self._fail_archive:
             raise RuntimeError("boom: archive channel unreachable")
         self.archived.append(message)
         self._next_archive_id += 1
         return _FakeMessage(self._next_archive_id, f"archived-{message}")
 
-    async def send_cached(self, archive_chat: str, message_ids: list[int]):
+    async def send_cached(self, archive_chat: str, message_ids: list[int], **kwargs):
         if self._fail_cached_send:
             raise RuntimeError("boom: cached message no longer exists")
         self.cached_sends.append((archive_chat, message_ids))
