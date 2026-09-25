@@ -176,12 +176,12 @@ async def test_deleted_message_creates_single_backup_and_subsequent_updates_edit
 
 
 # -----------------------------------------------------------------------------
-# 4. Fallback delivery failure retains stale message without deleting
+# 4. Fallback delivery failure deletes stale message to prevent misleading status (M10.5)
 # -----------------------------------------------------------------------------
-async def test_fallback_delivery_failure_does_not_delete_stale_message():
-    """Finding 4 / Requirement 4: If edit fails AND fallback respond fails
-    (e.g. flood wait exceeding max_wait_seconds), the previous message is NOT deleted
-    so the user is not left with no message."""
+async def test_fallback_delivery_failure_deletes_stale_message():
+    """M10.5 Item 2: If edit fails AND fallback respond fails (e.g. flood wait
+    exceeding max_wait_seconds), the stale progress message IS deleted so the user
+    is not left permanently staring at a misleading 'מעלה לטלגרם... 95%'."""
     msg = MagicMock()
     msg.edit = AsyncMock(side_effect=RPCError(None, message="MESSAGE_ID_INVALID"))
     msg.respond = AsyncMock(side_effect=FloodWaitError(None, capture=150))
@@ -192,10 +192,10 @@ async def test_fallback_delivery_failure_does_not_delete_stale_message():
 
     await reporter.update(texts.DOWNLOAD_FAILED, is_terminal=True)
 
-    # Respond was attempted but failed
+    # Respond was attempted and failed
     assert msg.respond.call_count >= 1
-    # Critical requirement: delete was NOT called!
-    msg.delete.assert_not_called()
+    # In M10.5: delete IS called to eliminate misleading stale progress!
+    msg.delete.assert_awaited_once()
     assert reporter._message is msg
 
 

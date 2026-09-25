@@ -6,10 +6,12 @@ engine implemented end-to-end in M1 (spec/SPEC.md M1 item 7).
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import math
 import re
 import time
+from collections.abc import Awaitable, Callable
 from typing import Any
 from urllib.parse import urlparse
 
@@ -100,17 +102,34 @@ async def _safe_answer_callback(
     event: events.CallbackQuery.Event,
     *args: Any,
     max_wait_seconds: float = 10.0,
+    sleep_func: Callable[[float], Awaitable[None]] | None = None,
     **kwargs: Any,
 ) -> None:
-    try:
-        await call_with_flood_retry(
-            event.answer,
-            *args,
-            max_wait_seconds=max_wait_seconds,
-            **kwargs,
-        )
-    except Exception:
-        logger.debug("Failed to answer callback query (ignored so flow continues)", exc_info=True)
+    deadline = time.monotonic() + max_wait_seconds
+    remaining = max_wait_seconds
+    sleeper = sleep_func or asyncio.sleep
+    attempts = 0
+    while True:
+        try:
+            await event.answer(*args, **kwargs)
+            return
+        except FLOOD_WAIT_ERRORS as exc:
+            attempts += 1
+            wait_seconds = get_flood_wait_seconds(exc)
+            remaining = min(remaining, deadline - time.monotonic())
+            if attempts > 5 or wait_seconds > remaining or remaining <= 0:
+                logger.debug(
+                    "Telegram flood wait on event.answer (%s: %ss) exceeded total limit (remaining: %.1fs); proceeding",
+                    type(exc).__name__,
+                    wait_seconds,
+                    remaining,
+                )
+                return
+            await sleeper(wait_seconds)
+            remaining -= wait_seconds
+        except Exception:
+            logger.debug("Failed to answer callback query (ignored so flow continues)", exc_info=True)
+            return
 
 
 async def _report_quota_error(progress: MessageProgressReporter, exc: Exception) -> None:
@@ -302,7 +321,11 @@ def register_handlers(
         except (RPCError, ConnectionError, TimeoutError, OSError):
             logger.debug("Failed to edit the quality menu message", exc_info=True)
         if message is None:
-            message = await call_with_flood_retry(event.respond, status_text)
+            try:
+                message = await call_with_flood_retry(event.respond, status_text)
+            except Exception:
+                logger.debug("Failed to send new status message after edit failure", exc_info=True)
+                message = getattr(event, "message", None) or event
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(
             client, chat_id=event.chat_id, archive_channel=archive_channel,
@@ -356,9 +379,13 @@ def register_handlers(
             logger.warning("YouTube download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
             await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
         except TimeoutError:
-            pass
+            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
         except Exception:
             logger.exception("YouTube download failed for url=%s", url)
+            try:
+                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+            except Exception:
+                logger.debug("Failed to update progress on general failure", exc_info=True)
 
     # Private chats only, like the old bot: a link posted in a group is ignored.
     @client.on(events.NewMessage(func=lambda e: bool(getattr(e, "is_private", False))))
@@ -436,9 +463,13 @@ def register_handlers(
                 logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
                 await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
             except TimeoutError:
-                pass
+                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
             except Exception:
                 logger.exception("TikTok download failed for url=%s", url)
+                try:
+                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on general failure", exc_info=True)
             return
         if _host_matches(url, INSTAGRAM_HOSTS):
             if not matches_instagram_url(url):
@@ -486,9 +517,13 @@ def register_handlers(
                 logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
                 await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
             except TimeoutError:
-                pass
+                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
             except Exception:
                 logger.exception("Instagram download failed for url=%s", url)
+                try:
+                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on general failure", exc_info=True)
             return
 
         if not direct_engine.matches(url):
@@ -529,6 +564,10 @@ def register_handlers(
             logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
             await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
         except TimeoutError:
-            pass
+            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
         except Exception:
             logger.exception("Direct download failed for url=%s", url)
+            try:
+                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+            except Exception:
+                logger.debug("Failed to update progress on general failure", exc_info=True)

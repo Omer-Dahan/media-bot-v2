@@ -82,7 +82,7 @@ def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None =
 class MessageProgressReporter:
     def __init__(
         self,
-        message,
+        message: Any = None,
         *,
         max_retries: int = 5,
         max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
@@ -96,6 +96,8 @@ class MessageProgressReporter:
         self._seq: int = 0
         self._last_applied_seq: int = 0
         self._is_terminal_completed: bool = False
+        self._uneditable: bool = message is None
+        self._logged_uneditable: bool = False
         self._async_lock: asyncio.Lock | None = None
 
     @property
@@ -119,14 +121,18 @@ class MessageProgressReporter:
         Non-terminal updates drop long flood waits to avoid blocking the pipeline/upload.
         `_last_text` is only updated on a successful edit. If all edit attempts fail for a
         critical terminal message (finish/error/quota), attempts fallback delivery
-        via a new message, updates `self._message` to the new message, and only deletes
-        the stale message if fallback succeeded."""
+        via a new message, updates `self._message` to the new message, and deletes
+        the stale message so the user never stays looking at false progress."""
         terminal = _is_terminal_text(text, buttons, is_terminal)
         self._seq += 1
         seq = self._seq
 
         if not terminal and self._is_terminal_completed:
             logger.debug("Discarding non-terminal progress %r (seq %d): terminal already reached", text, seq)
+            return
+
+        if not terminal and self._uneditable:
+            logger.debug("Discarding non-terminal progress %r (seq %d): message is uneditable", text, seq)
             return
 
         if terminal:
@@ -147,23 +153,41 @@ class MessageProgressReporter:
                 if not terminal and (self._is_terminal_completed or seq < self._last_applied_seq):
                     break
                 try:
-                    if buttons is not None:
-                        await self._message.edit(text, buttons=buttons)
+                    if self._message is not None and hasattr(self._message, "edit") and callable(self._message.edit):
+                        if buttons is not None:
+                            await self._message.edit(text, buttons=buttons)
+                        else:
+                            await self._message.edit(text)
+                        success = True
+                        self._last_text = text
+                        self._last_applied_seq = seq
+                        self._uneditable = False
+                        self._logged_uneditable = False
+                        break
                     else:
-                        await self._message.edit(text)
-                    success = True
-                    self._last_text = text
-                    self._last_applied_seq = seq
-                    break
+                        self._uneditable = True
+                        break
                 except MessageNotModifiedError:
                     success = True
                     self._last_text = text
                     self._last_applied_seq = seq
+                    self._uneditable = False
+                    self._logged_uneditable = False
                     break
                 except FLOOD_WAIT_ERRORS as exc:
                     flood_exc = exc
-                except (RPCError, ConnectionError, TimeoutError, OSError):
-                    logger.warning("Failed to edit progress message to %r", text, exc_info=True)
+                except RPCError as exc:
+                    self._uneditable = True
+                    if not self._logged_uneditable:
+                        self._logged_uneditable = True
+                        logger.warning(
+                            "Progress message is not editable (%s: %s); dropping further non-terminal edits",
+                            type(exc).__name__,
+                            exc,
+                        )
+                    break
+                except (ConnectionError, TimeoutError, OSError) as exc:
+                    logger.debug("Transient error while editing progress message to %r: %s", text, exc)
                     break
 
             if flood_exc is not None:
@@ -228,6 +252,8 @@ class MessageProgressReporter:
                             self._message = new_message
                             self._last_text = text
                             self._last_applied_seq = seq
+                            self._uneditable = False
+                            self._logged_uneditable = False
                             logger.info("Delivered terminal progress message via new message after edit failure: %r", text)
                     except Exception:
                         logger.warning("Failed to deliver fallback terminal message %r", text, exc_info=True)
@@ -239,10 +265,21 @@ class MessageProgressReporter:
                     except Exception:
                         logger.debug("Failed to delete stale progress message", exc_info=True)
                 elif new_message is None:
-                    logger.warning(
-                        "Fallback delivery was not successful; retaining previous progress message without deleting: %r",
+                    logger.error(
+                        "Terminal message %r could not be delivered (both edit and fallback failed); "
+                        "deleting stale progress message to prevent misleading status",
                         text,
                     )
+                    if hasattr(old_message, "delete") and callable(old_message.delete):
+                        try:
+                            await old_message.delete()
+                            logger.info("Deleted stale progress message after complete terminal delivery failure")
+                        except Exception:
+                            logger.warning(
+                                "Failed to delete stale progress message after terminal delivery failure: %r",
+                                text,
+                                exc_info=True,
+                            )
 
 
 class UploadProgress:
@@ -315,10 +352,10 @@ class UploadProgress:
             and (percent - self._shown < self._min_step or now - self._shown_at < self._min_interval)
         ):
             return
-        self._shown = max(self._shown, percent)
-        self._shown_at = now
-        self._in_flood = False
         try:
             await self._reporter.update(f"{self._label} {percent}%", is_terminal=False)
         except TypeError:
             await self._reporter.update(f"{self._label} {percent}%")
+        self._shown = max(self._shown, percent)
+        self._shown_at = now
+        self._in_flood = False
