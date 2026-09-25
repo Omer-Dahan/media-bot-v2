@@ -8,7 +8,11 @@ never at import time, so this file is safe to import from tests.
 from __future__ import annotations
 
 import logging
+import time
+from collections.abc import Callable
 from pathlib import Path
+
+from telethon import TelegramClient
 
 from media_bot_v2.cache.video_cache import VideoCacheStore
 from media_bot_v2.config import load_settings
@@ -21,9 +25,47 @@ from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import build_provider_registry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram.client import build_client
+from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
 from media_bot_v2.telegram.router import register_handlers
 
 logger = logging.getLogger(__name__)
+
+
+def start_client_with_flood_retry(
+    client: TelegramClient,
+    *,
+    bot_token: str,
+    max_retries: int = 3,
+    max_wait_seconds: float = 60.0,
+    sleeper: Callable[[float], None] = time.sleep,
+) -> None:
+    """Start the Telethon client, retrying gracefully if Telegram returns a flood wait on startup."""
+    attempts = 0
+    while True:
+        try:
+            client.start(bot_token=bot_token)
+            return
+        except FLOOD_WAIT_ERRORS as exc:
+            attempts += 1
+            wait_seconds = get_flood_wait_seconds(exc)
+            if attempts > max_retries or wait_seconds > max_wait_seconds:
+                logger.error(
+                    "Telegram flood wait on startup (%s: %ss, attempt %d/%d) exceeded limits; aborting",
+                    type(exc).__name__,
+                    wait_seconds,
+                    attempts,
+                    max_retries,
+                )
+                raise
+            logger.warning(
+                "Telegram flood wait on startup (%s: %ss, attempt %d/%d); sleeping %ss before retry",
+                type(exc).__name__,
+                wait_seconds,
+                attempts,
+                max_retries,
+                wait_seconds,
+            )
+            sleeper(wait_seconds)
 
 
 def main() -> None:
@@ -90,7 +132,7 @@ def main() -> None:
     )
 
     logger.info("Starting media-bot-v2")
-    client.start(bot_token=settings.bot_token)
+    start_client_with_flood_retry(client, bot_token=settings.bot_token)
     client.run_until_disconnected()
 
 

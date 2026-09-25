@@ -74,11 +74,19 @@ async def _sleep(seconds: float) -> None:
 
 
 class _State:
-    def __init__(self, workers: int, total: int) -> None:
+    def __init__(
+        self,
+        workers: int,
+        total: int,
+        on_flood: Callable[..., Awaitable[None] | None] | None = None,
+        on_flood_cleared: Callable[[], Awaitable[None] | None] | None = None,
+    ) -> None:
         self.limit = workers
         self.total = total
         self.uploaded = 0
         self.floods = 0
+        self.on_flood = on_flood
+        self.on_flood_cleared = on_flood_cleared
 
     def note_flood(self) -> None:
         self.floods += 1
@@ -170,6 +178,8 @@ async def upload_file_parallel(
     connections: int = 1,
     progress: ProgressCallback | None = None,
     file_name: str | None = None,
+    on_flood: Callable[..., Awaitable[None] | None] | None = None,
+    on_flood_cleared: Callable[[], Awaitable[None] | None] | None = None,
 ) -> types.InputFile | types.InputFileBig:
     workers = max(1, min(MAX_WORKERS, workers))
     connections = max(1, min(MAX_WORKERS, connections, workers))
@@ -187,7 +197,9 @@ async def upload_file_parallel(
     # keeps parts independent of each other (and is cheap below 10MB).
     md5 = None if is_big else await asyncio.to_thread(_md5_of, path)
 
-    state = _State(workers, file_size)
+    flood_cb = on_flood or getattr(progress, "handle_flood_wait", None)
+    flood_cleared_cb = on_flood_cleared or getattr(progress, "handle_flood_cleared", None)
+    state = _State(workers, file_size, on_flood=flood_cb, on_flood_cleared=flood_cleared_cb)
     pending: asyncio.Queue[int] = asyncio.Queue()
     for index in range(part_count):
         pending.put_nowait(index)
@@ -293,7 +305,24 @@ async def _send_part(client, link: _Link, request, index: int, state: _State) ->
                 attempts,
                 MAX_FLOOD_RETRIES_PER_PART,
             )
+            if state.on_flood is not None:
+                try:
+                    try:
+                        res = state.on_flood(wait_seconds, attempts)
+                    except TypeError:
+                        res = state.on_flood(wait_seconds)
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    logger.debug("on_flood callback failed", exc_info=True)
             await _sleep(wait_seconds)
+            if state.on_flood_cleared is not None:
+                try:
+                    res = state.on_flood_cleared()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    logger.debug("on_flood_cleared callback failed", exc_info=True)
             continue
         if not ok:
             raise RuntimeError(f"Failed to upload file part {index}.")

@@ -61,7 +61,9 @@ async def call_with_flood_retry[T](
     *args: Any,
     max_retries: int = 5,
     max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
-    on_flood: Callable[[int, int], Awaitable[None] | None] | None = None,
+    on_flood: Callable[..., Awaitable[None] | None] | None = None,
+    on_flood_cleared: Callable[[], Awaitable[None] | None] | None = None,
+    sleep_func: Callable[[float], Awaitable[None]] | None = None,
     **kwargs: Any,
 ) -> T:
     """Execute an async Telegram API call, waiting and retrying if a flood wait occurs.
@@ -69,6 +71,7 @@ async def call_with_flood_retry[T](
     Catches both `FloodWaitError` and `FloodPremiumWaitError`.
     """
     attempts = 0
+    sleeper = sleep_func or asyncio.sleep
     while True:
         try:
             return await func(*args, **kwargs)
@@ -97,12 +100,22 @@ async def call_with_flood_retry[T](
             )
             if on_flood is not None:
                 try:
-                    res = on_flood(wait_seconds, attempts)
+                    try:
+                        res = on_flood(wait_seconds, attempts)
+                    except TypeError:
+                        res = on_flood(wait_seconds)
                     if asyncio.iscoroutine(res):
                         await res
                 except Exception:
                     logger.debug("on_flood callback failed", exc_info=True)
-            await asyncio.sleep(wait_seconds)
+            await sleeper(wait_seconds)
+            if on_flood_cleared is not None:
+                try:
+                    res = on_flood_cleared()
+                    if asyncio.iscoroutine(res):
+                        await res
+                except Exception:
+                    logger.debug("on_flood_cleared callback failed", exc_info=True)
 
 
 # Alias for readability

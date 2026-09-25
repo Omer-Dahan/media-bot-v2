@@ -275,7 +275,11 @@ def register_handlers(
         try:
             message = await call_with_flood_retry(event.edit, status_text, buttons=None)
         except MessageNotModifiedError:
-            message = await event.get_message()
+            try:
+                message = await call_with_flood_retry(event.get_message)
+            except (RPCError, ConnectionError, TimeoutError, OSError):
+                logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
+                message = getattr(event, "message", None)
         except (RPCError, ConnectionError, TimeoutError, OSError):
             logger.debug("Failed to edit the quality menu message", exc_info=True)
         if message is None:
@@ -285,6 +289,7 @@ def register_handlers(
             client, chat_id=event.chat_id, archive_channel=archive_channel,
             workers=upload_workers, connections=upload_connections,
             adaptive=True,
+            on_flood=progress.handle_flood_wait,
         )
 
         try:
@@ -376,6 +381,7 @@ def register_handlers(
                 client, chat_id=event.chat_id, archive_channel=archive_channel,
                 workers=upload_workers, connections=upload_connections,
                 adaptive=True,
+                on_flood=progress.handle_flood_wait,
             )
 
             async def on_wait() -> None:
@@ -426,6 +432,7 @@ def register_handlers(
                 client, chat_id=event.chat_id, archive_channel=archive_channel,
                 workers=upload_workers, connections=upload_connections,
                 adaptive=True,
+                on_flood=progress.handle_flood_wait,
             )
 
             async def on_wait() -> None:
@@ -475,6 +482,7 @@ def register_handlers(
             client, chat_id=event.chat_id, archive_channel=archive_channel,
             workers=upload_workers, connections=upload_connections,
             adaptive=True,
+            on_flood=progress.handle_flood_wait,
         )
 
         async def on_wait() -> None:
