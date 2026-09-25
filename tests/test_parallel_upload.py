@@ -19,7 +19,7 @@ import pytest
 from pydantic import ValidationError
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
-from telethon.errors import FloodWaitError, MediaInvalidError
+from telethon.errors import FloodPremiumWaitError, FloodWaitError, MediaInvalidError
 from telethon.tl import functions, types
 
 from media_bot_v2.config import Settings
@@ -48,6 +48,8 @@ class PartServer(FakeTelegramClient):
         self.max_in_flight = 0
         self.timeline: list[tuple[float, float, int]] = []  # (start, end, part index)
         self.flood_plan: dict[int, int] = {}  # part index -> floods still to raise
+        self.flood_premium_plan: dict[int, int] = {}
+        self.flood_premium_seconds: int = 5
         self.flood_times: list[float] = []
         self.uploaded_ok: list[int] = []
         self.big_flags: set[bool] = set()
@@ -57,6 +59,10 @@ class PartServer(FakeTelegramClient):
         self.big_flags.add(isinstance(request, functions.upload.SaveBigFilePartRequest))
         self.attempts[index] = self.attempts.get(index, 0) + 1
         start = time.monotonic()
+        if self.flood_premium_plan.get(index, 0) > 0:
+            self.flood_premium_plan[index] -= 1
+            self.flood_times.append(start)
+            raise FloodPremiumWaitError(request, capture=self.flood_premium_seconds)
         if self.flood_plan.get(index, 0) > 0:
             self.flood_plan[index] -= 1
             self.flood_times.append(start)

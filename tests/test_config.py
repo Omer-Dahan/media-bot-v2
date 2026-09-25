@@ -171,3 +171,16 @@ def test_instagram_cookies_file_setting(monkeypatch):
     assert settings_with_cookies.instagram_cookies_file == "/path/to/ig_cookies.txt"
 
 
+def test_flood_sleep_threshold_defaults_to_zero_and_accepts_custom(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    settings = Settings(_env_file=None)
+    assert settings.flood_sleep_threshold == 0
+
+    monkeypatch.setenv("FLOOD_SLEEP_THRESHOLD", "60")
+    settings_custom = Settings(_env_file=None)
+    assert settings_custom.flood_sleep_threshold == 60
+
+
+

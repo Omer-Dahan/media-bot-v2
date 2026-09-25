@@ -31,6 +31,14 @@ class Settings(BaseSettings):
     # session while it's running in production against the same bot token.
     session_name: str = Field(default="v2", validation_alias="SESSION_NAME")
 
+    # Flood wait handling: seconds Telethon will automatically sleep internally
+    # when Telegram returns FLOOD_WAIT / FLOOD_PREMIUM_WAIT. Kraken sets this to 0
+    # so flood wait errors surface immediately to our custom retry/lane-reduction
+    # logic rather than silently sleeping in Telethon for up to 60s. Default is 0
+    # (Kraken parity), but configurable via FLOOD_SLEEP_THRESHOLD so it can be
+    # reverted to Telethon's default (60) without code changes if ever desired.
+    flood_sleep_threshold: int = Field(default=0, ge=0, validation_alias="FLOOD_SLEEP_THRESHOLD")
+
     # --- Database (same DSN/schema as the old bot) ---
     db_dsn: str = Field(default="sqlite:///database.sqlite3", validation_alias="DB_DSN")
 

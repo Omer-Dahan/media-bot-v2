@@ -35,6 +35,7 @@ from telethon.errors import (
 from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
 
 from media_bot_v2.telegram.captions import subtitle_caption
+from media_bot_v2.telegram.flood_wait import calculate_connections, call_with_flood_retry
 from media_bot_v2.telegram.parallel_upload import ProgressCallback, upload_file_parallel
 from media_bot_v2.upload.media_probe import KIND_AUDIO, KIND_PHOTO, KIND_VIDEO, MediaInfo
 
@@ -48,13 +49,21 @@ _MEDIA_REJECTED = (MediaInvalidError, VideoContentTypeInvalidError, MediaEmptyEr
 
 class TelethonUploader:
     def __init__(
-        self, client: TelegramClient, *, chat_id: int, archive_channel: str | None, workers: int = 1, connections: int = 1
+        self,
+        client: TelegramClient,
+        *,
+        chat_id: int,
+        archive_channel: str | None,
+        workers: int = 1,
+        connections: int = 1,
+        adaptive: bool = False,
     ) -> None:
         self._client = client
         self._workers = workers
         self._connections = connections
         self._chat_id = chat_id
         self._archive_channel = archive_channel
+        self._adaptive = adaptive
 
     async def send_file(
         self,
@@ -72,13 +81,13 @@ class TelethonUploader:
         kwargs = self._send_kwargs(info, caption=caption, as_document=as_document, title=title)
         source = await self._source(path, info, progress)
         try:
-            return await self._client.send_file(self._chat_id, source, **kwargs)
+            return await call_with_flood_retry(self._client.send_file, self._chat_id, source, **kwargs)
         except _MEDIA_REJECTED:
             if as_document:
                 raise
             logger.warning("Telegram rejected %s as %s, retrying once as a document", path.name, info.kind)
             fallback = self._send_kwargs(info, caption=caption, as_document=True, title=title)
-            return await self._client.send_file(self._chat_id, source, **fallback)
+            return await call_with_flood_retry(self._client.send_file, self._chat_id, source, **fallback)
 
     async def _source(self, path: Path, info: MediaInfo, progress: ProgressCallback | None) -> Any:
         """What to hand to `client.send_file`: the plain path (Telethon uploads it
@@ -88,8 +97,14 @@ class TelethonUploader:
         oversized photos itself, and they are far too small to gain anything."""
         if self._workers <= 1 or info.kind == KIND_PHOTO:
             return str(path)
+        file_size = path.stat().st_size
+        connections = (
+            calculate_connections(file_size, self._connections)
+            if self._adaptive
+            else self._connections
+        )
         return await upload_file_parallel(
-            self._client, path, workers=self._workers, connections=self._connections, progress=progress
+            self._client, path, workers=self._workers, connections=connections, progress=progress
         )
 
     @staticmethod
@@ -121,10 +136,13 @@ class TelethonUploader:
         return kwargs
 
     async def edit_caption(self, message: Any, caption: str) -> None:
-        await self._client.edit_message(self._chat_id, message, caption, parse_mode="html")
+        await call_with_flood_retry(
+            self._client.edit_message, self._chat_id, message, caption, parse_mode="html"
+        )
 
     async def send_subtitle(self, path: Path) -> Any:
-        return await self._client.send_file(
+        return await call_with_flood_retry(
+            self._client.send_file,
             self._chat_id,
             str(path),
             caption=subtitle_caption(path.name),
@@ -133,8 +151,13 @@ class TelethonUploader:
         )
 
     async def send_description(self, text: str, *, reply_to: Any) -> Any:
-        return await self._client.send_message(
-            self._chat_id, text, parse_mode="html", reply_to=reply_to, link_preview=False
+        return await call_with_flood_retry(
+            self._client.send_message,
+            self._chat_id,
+            text,
+            parse_mode="html",
+            reply_to=reply_to,
+            link_preview=False,
         )
 
     async def copy_to_archive(self, message: Any, *, caption: str) -> Any | None:
@@ -144,8 +167,12 @@ class TelethonUploader:
         from" header), captioned for the operator."""
         if not self._archive_channel:
             return None
-        return await self._client.send_file(
-            self._archive_channel, message.media, caption=caption, parse_mode="html"
+        return await call_with_flood_retry(
+            self._client.send_file,
+            self._archive_channel,
+            message.media,
+            caption=caption,
+            parse_mode="html",
         )
 
     async def send_cached(
@@ -154,7 +181,7 @@ class TelethonUploader:
         """Re-send archived messages to the requesting chat, one per id, with
         the caption built for this user. Raises if any archived message is
         gone, so the caller falls back to a fresh download."""
-        archived = await self._client.get_messages(archive_chat, ids=message_ids)
+        archived = await call_with_flood_retry(self._client.get_messages, archive_chat, ids=message_ids)
         if not isinstance(archived, list):
             archived = [archived]
         if len(archived) != len(message_ids) or any(m is None or not getattr(m, "media", None) for m in archived):
@@ -164,6 +191,8 @@ class TelethonUploader:
         for index, message in enumerate(archived):
             caption = captions[index] if captions and index < len(captions) else ""
             sent.append(
-                await self._client.send_file(self._chat_id, message.media, caption=caption, parse_mode="html")
+                await call_with_flood_retry(
+                    self._client.send_file, self._chat_id, message.media, caption=caption, parse_mode="html"
+                )
             )
         return sent

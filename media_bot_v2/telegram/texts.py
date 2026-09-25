@@ -107,6 +107,8 @@ UPLOADING = "מעלה לטלגרם..."
 DOWNLOAD_FROM_CACHE = "נמצא במטמון, שולח..."
 DOWNLOAD_DONE = "הושלם ✅"
 DOWNLOAD_FAILED = "❌ ההורדה נכשלה. נסה שוב או שלח קישור אחר."
+FLOOD_WAIT_FAILED = "❌ טלגרם הגבילה את הפעילות עקב עומס (Flood Wait). אנא נסה שוב מאוחר יותר."
+FLOOD_WAIT_MESSAGE = "⏳ עומס זמני בשרתי טלגרם, אנא המתן {seconds} שניות..."
 
 CONTACT_URL = "https://t.me/YD_IL"
 CONTACT_BUTTON = "לצ'אט איתי 💬"

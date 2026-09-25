@@ -71,6 +71,7 @@ from media_bot_v2.engines.tiktok import TikTokDownloadError
 from media_bot_v2.engines.youtube import YouTubeDownloadError
 from media_bot_v2.telegram import captions, texts
 from media_bot_v2.telegram.delivery import DeliveryOptions
+from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
 from media_bot_v2.telegram.progress import UploadProgress
 from media_bot_v2.upload import splitter
 from media_bot_v2.upload.media_probe import KIND_VIDEO, MediaInfo, probe, probe_with_thumb
@@ -396,6 +397,18 @@ class DownloadPipeline:
             await progress.update(str(exc))
             raise
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException):
+            raise
+        except FLOOD_WAIT_ERRORS as exc:
+            cancel_token.set()
+            wait_seconds = get_flood_wait_seconds(exc)
+            logger.warning(
+                "Download pipeline aborted due to %s (%ss) for user=%s url=%s",
+                type(exc).__name__,
+                wait_seconds,
+                user_id,
+                url,
+            )
+            await progress.update(texts.FLOOD_WAIT_FAILED)
             raise
         except Exception:
             logger.exception("Download pipeline failed for user=%s url=%s", user_id, url)

@@ -23,8 +23,10 @@ the main connection: the upload still succeeds.
 
 Failure handling:
 
-* `FloodWaitError` on a part: sleep what the server asked and retry *that
-  part only*; every part already uploaded stays uploaded.
+* `FloodWaitError` / `FloodPremiumWaitError` on a part: sleep what the server asked
+  and retry *that part only*; every part already uploaded stays uploaded.
+  FloodPremiumWaitError (inheriting from FloodError, not FloodWaitError) is handled
+  identically and never triggers fail-open or marks connections dead.
 * Repeated flood waits shrink the number of lanes (5 -> 2 -> 1) instead of
   failing, and the upload carries on.
 * Any other error cancels the remaining lanes and propagates, so the caller
@@ -45,10 +47,15 @@ from collections.abc import Awaitable, Callable
 from pathlib import Path
 
 from telethon import custom, helpers, utils
-from telethon.errors import FloodWaitError
 from telethon.network import MTProtoSender
 from telethon.tl import functions, types
 from telethon.tl.alltlobjects import LAYER
+
+from media_bot_v2.telegram.flood_wait import (
+    FLOOD_WAIT_ERRORS,
+    MAX_FLOOD_WAIT_SECONDS,
+    get_flood_wait_seconds,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -248,7 +255,7 @@ async def _send_via(client, link: _Link, main: _Link, request, index: int, state
     try:
         await _send_part(client, link, request, index, state)
         return link
-    except FloodWaitError:
+    except FLOOD_WAIT_ERRORS:
         raise
     except Exception as exc:
         if link is main:
@@ -264,13 +271,29 @@ async def _send_part(client, link: _Link, request, index: int, state: _State) ->
     while True:
         try:
             ok = await link.call(client, request)
-        except FloodWaitError as exc:
+        except FLOOD_WAIT_ERRORS as exc:
             attempts += 1
             state.note_flood()
-            if attempts > MAX_FLOOD_RETRIES_PER_PART:
+            wait_seconds = get_flood_wait_seconds(exc)
+            if attempts > MAX_FLOOD_RETRIES_PER_PART or wait_seconds > MAX_FLOOD_WAIT_SECONDS:
+                logger.warning(
+                    "Flood wait (%s: %ss) on upload part %d (attempt %d/%d) exceeded limits; aborting",
+                    type(exc).__name__,
+                    wait_seconds,
+                    index,
+                    attempts,
+                    MAX_FLOOD_RETRIES_PER_PART,
+                )
                 raise
-            logger.warning("Flood wait %ss on upload part %d (attempt %d)", exc.seconds, index, attempts)
-            await _sleep(exc.seconds)
+            logger.warning(
+                "Flood wait (%s: %ss) on upload part %d (attempt %d/%d)",
+                type(exc).__name__,
+                wait_seconds,
+                index,
+                attempts,
+                MAX_FLOOD_RETRIES_PER_PART,
+            )
+            await _sleep(wait_seconds)
             continue
         if not ok:
             raise RuntimeError(f"Failed to upload file part {index}.")

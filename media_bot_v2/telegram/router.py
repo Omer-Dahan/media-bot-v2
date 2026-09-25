@@ -47,6 +47,11 @@ from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import settings_menu, texts
 from media_bot_v2.telegram.callback_data import decode
 from media_bot_v2.telegram.delivery import DeliveryOptions
+from media_bot_v2.telegram.flood_wait import (
+    FLOOD_WAIT_ERRORS,
+    call_with_flood_retry,
+    get_flood_wait_seconds,
+)
 from media_bot_v2.telegram.progress import MessageProgressReporter
 from media_bot_v2.telegram.quality_menu import QualitySelectionStore, build_quality_markup
 from media_bot_v2.telegram.uploader import TelethonUploader
@@ -190,11 +195,12 @@ def register_handlers(
             settings_menu.get_or_create_user(
                 session, event.sender_id, first_name=first_name, username=username, free_download=free_download
             )
-        await event.respond(texts.START, link_preview=False)
+        await call_with_flood_retry(event.respond, texts.START, link_preview=False)
 
     @client.on(events.NewMessage(pattern="/help"))
     async def help_handler(event: events.NewMessage.Event) -> None:
-        await event.respond(
+        await call_with_flood_retry(
+            event.respond,
             texts.HELP,
             link_preview=False,
             buttons=[[Button.url(texts.CONTACT_BUTTON, texts.CONTACT_URL)]],
@@ -202,14 +208,14 @@ def register_handlers(
 
     @client.on(events.NewMessage(pattern="/about"))
     async def about_handler(event: events.NewMessage.Event) -> None:
-        await event.respond(texts.ABOUT)
+        await call_with_flood_retry(event.respond, texts.ABOUT)
 
     @client.on(events.NewMessage(pattern="/ping"))
     async def ping_handler(event: events.NewMessage.Event) -> None:
         start = time.monotonic()
-        message = await event.respond(texts.PING_MESSAGE)
+        message = await call_with_flood_retry(event.respond, texts.PING_MESSAGE)
         elapsed_ms = round((time.monotonic() - start) * 1000, 2)
-        await message.edit(texts.PING_RESULT.format(ms=elapsed_ms))
+        await call_with_flood_retry(message.edit, texts.PING_RESULT.format(ms=elapsed_ms))
 
     @client.on(events.NewMessage(pattern="/settings"))
     async def settings_handler(event: events.NewMessage.Event) -> None:
@@ -219,7 +225,7 @@ def register_handlers(
                 session, event.sender_id, first_name=first_name, username=username, free_download=free_download
             )
             buttons = settings_menu.build_settings_buttons(user.settings)
-        await event.respond(settings_text(event.sender_id), buttons=buttons)
+        await call_with_flood_retry(event.respond, settings_text(event.sender_id), buttons=buttons)
 
     @client.on(events.CallbackQuery(pattern=rb"^toggle_"))
     async def toggle_handler(event: events.CallbackQuery.Event) -> None:
@@ -234,9 +240,9 @@ def register_handlers(
         # answer text explains a behavior change (separate message/Telegraph
         # link), not just a value flip - a toast is easy to miss for that.
         alert = toggle_key == settings_menu.TOGGLE_TITLE_LEN
-        await event.answer(answer, alert=alert)
+        await call_with_flood_retry(event.answer, answer, alert=alert)
         try:
-            await event.edit(settings_text(event.sender_id), buttons=buttons)
+            await call_with_flood_retry(event.edit, settings_text(event.sender_id), buttons=buttons)
         except MessageNotModifiedError:
             pass  # content unchanged (e.g. same toggle value) - nothing to surface
 
@@ -244,14 +250,14 @@ def register_handlers(
     async def quality_pick_handler(event: events.CallbackQuery.Event) -> None:
         parts = decode(event.data)
         if len(parts) != 3 or parts[0] != "ytq":
-            await event.answer()
+            await call_with_flood_retry(event.answer)
             return
 
         quality = parts[1]
         url_hash = parts[2]
         url = quality_store.get(url_hash)
         if not url:
-            await event.answer(texts.YOUTUBE_LINK_EXPIRED, alert=True)
+            await call_with_flood_retry(event.answer, texts.YOUTUBE_LINK_EXPIRED, alert=True)
             return
 
         delivery = load_delivery(event.sender_id, first_name=None, username=None)
@@ -260,24 +266,25 @@ def register_handlers(
         # per download, no new one), and confirm with a short toast.
         quality_name = texts.QUALITY_NAMES.get(quality, quality)
         if quality == "audio":
-            await event.answer(texts.QUALITY_TOAST_AUDIO)
+            await call_with_flood_retry(event.answer, texts.QUALITY_TOAST_AUDIO)
             status_text = texts.DOWNLOADING_AUDIO
         else:
-            await event.answer(texts.QUALITY_TOAST.format(name=quality_name))
+            await call_with_flood_retry(event.answer, texts.QUALITY_TOAST.format(name=quality_name))
             status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
         message = None
         try:
-            message = await event.edit(status_text, buttons=None)
+            message = await call_with_flood_retry(event.edit, status_text, buttons=None)
         except MessageNotModifiedError:
             message = await event.get_message()
         except (RPCError, ConnectionError, TimeoutError, OSError):
             logger.debug("Failed to edit the quality menu message", exc_info=True)
         if message is None:
-            message = await event.respond(status_text)
+            message = await call_with_flood_retry(event.respond, status_text)
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(
             client, chat_id=event.chat_id, archive_channel=archive_channel,
-            workers=upload_workers, connections=upload_connections
+            workers=upload_workers, connections=upload_connections,
+            adaptive=True,
         )
 
         try:
@@ -320,6 +327,10 @@ def register_handlers(
             await _report_quota_error(progress, exc)
         except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
             await progress.update(str(exc))
+        except FLOOD_WAIT_ERRORS as exc:
+            wait_seconds = get_flood_wait_seconds(exc)
+            logger.warning("YouTube download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+            await progress.update(texts.FLOOD_WAIT_FAILED)
         except TimeoutError:
             pass
         except Exception:
@@ -333,7 +344,7 @@ def register_handlers(
             return
         scheme_match = re.match(r"^([a-zA-Z0-9+.-]+)://", raw_text.strip())
         if scheme_match and scheme_match.group(1).lower() not in ("http", "https"):
-            await event.respond(texts.UNSUPPORTED_URL)
+            await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
             return
         match = URL_RE.search(raw_text)
         if not match:
@@ -349,7 +360,8 @@ def register_handlers(
             title, duration = await fetch_title_duration(
                 url, opts=probe_engine.info_opts(url), timeout=MENU_LOOKUP_TIMEOUT_SECONDS
             )
-            await event.respond(
+            await call_with_flood_retry(
+                event.respond,
                 texts.YOUTUBE_QUALITY_SELECT.format(
                     title=(title or "סרטון יוטיוב").translate(_MARKDOWN_SPECIALS),
                     duration=duration or "לא ידוע",
@@ -358,12 +370,13 @@ def register_handlers(
             )
             return
         if _host_matches(url, TIKTOK_HOSTS):
-            message = await event.respond(texts.DOWNLOAD_STARTED)
+            message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
             progress = MessageProgressReporter(message)
             uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel,
-            workers=upload_workers, connections=upload_connections
-        )
+                client, chat_id=event.chat_id, archive_channel=archive_channel,
+                workers=upload_workers, connections=upload_connections,
+                adaptive=True,
+            )
 
             async def on_wait() -> None:
                 await progress.update(texts.YOUTUBE_QUEUE_WAIT)
@@ -393,6 +406,10 @@ def register_handlers(
                 await _report_quota_error(progress, exc)
             except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
                 await progress.update(str(exc))
+            except FLOOD_WAIT_ERRORS as exc:
+                wait_seconds = get_flood_wait_seconds(exc)
+                logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+                await progress.update(texts.FLOOD_WAIT_FAILED)
             except TimeoutError:
                 pass
             except Exception:
@@ -400,15 +417,16 @@ def register_handlers(
             return
         if _host_matches(url, INSTAGRAM_HOSTS):
             if not matches_instagram_url(url):
-                await event.respond(texts.UNSUPPORTED_URL)
+                await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
                 return
 
-            message = await event.respond(texts.DOWNLOAD_STARTED)
+            message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
             progress = MessageProgressReporter(message)
             uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel,
-            workers=upload_workers, connections=upload_connections
-        )
+                client, chat_id=event.chat_id, archive_channel=archive_channel,
+                workers=upload_workers, connections=upload_connections,
+                adaptive=True,
+            )
 
             async def on_wait() -> None:
                 await progress.update(texts.YOUTUBE_QUEUE_WAIT)
@@ -437,6 +455,10 @@ def register_handlers(
                 await _report_quota_error(progress, exc)
             except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
                 await progress.update(str(exc))
+            except FLOOD_WAIT_ERRORS as exc:
+                wait_seconds = get_flood_wait_seconds(exc)
+                logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+                await progress.update(texts.FLOOD_WAIT_FAILED)
             except TimeoutError:
                 pass
             except Exception:
@@ -444,14 +466,15 @@ def register_handlers(
             return
 
         if not direct_engine.matches(url):
-            await event.respond(texts.UNSUPPORTED_URL)
+            await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
             return
 
-        message = await event.respond(texts.DOWNLOAD_STARTED)
+        message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(
             client, chat_id=event.chat_id, archive_channel=archive_channel,
-            workers=upload_workers, connections=upload_connections
+            workers=upload_workers, connections=upload_connections,
+            adaptive=True,
         )
 
         async def on_wait() -> None:
@@ -474,6 +497,10 @@ def register_handlers(
             await _report_quota_error(progress, exc)
         except (DownloadTooLargeError, UnsupportedUrlError) as exc:
             await progress.update(str(exc))
+        except FLOOD_WAIT_ERRORS as exc:
+            wait_seconds = get_flood_wait_seconds(exc)
+            logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+            await progress.update(texts.FLOOD_WAIT_FAILED)
         except TimeoutError:
             pass
         except Exception:

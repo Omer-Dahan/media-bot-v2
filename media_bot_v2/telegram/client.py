@@ -13,4 +13,9 @@ from media_bot_v2.config import Settings
 
 
 def build_client(settings: Settings, *, session_name: str = "media_bot_v2") -> TelegramClient:
-    return TelegramClient(session_name, settings.app_id, settings.app_hash)
+    return TelegramClient(
+        session_name,
+        settings.app_id,
+        settings.app_hash,
+        flood_sleep_threshold=settings.flood_sleep_threshold,
+    )
