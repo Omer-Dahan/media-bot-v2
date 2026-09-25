@@ -368,7 +368,11 @@ class InstagramEngine(BaseEngine):
             now = time.monotonic()
             if d.get("status") != "downloading" or now - state["last_forward"] >= _PROGRESS_THROTTLE_SECONDS:
                 state["last_forward"] = now
-                asyncio.run_coroutine_threadsafe(self._progress.update(text), loop)
+                try:
+                    coro = self._progress.update(text, is_terminal=False)
+                except TypeError:
+                    coro = self._progress.update(text)
+                asyncio.run_coroutine_threadsafe(coro, loop)
 
         return hook
 

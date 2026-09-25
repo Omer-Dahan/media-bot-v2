@@ -72,7 +72,7 @@ from media_bot_v2.engines.youtube import YouTubeDownloadError
 from media_bot_v2.telegram import captions, texts
 from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
-from media_bot_v2.telegram.progress import UploadProgress
+from media_bot_v2.telegram.progress import MessageProgressReporter, UploadProgress
 from media_bot_v2.upload import splitter
 from media_bot_v2.upload.media_probe import KIND_VIDEO, MediaInfo, probe, probe_with_thumb
 from media_bot_v2.upload.streamable import DEFAULT_FIX_TIMEOUT_SECONDS, ensure_streamable
@@ -82,6 +82,30 @@ logger = logging.getLogger(__name__)
 
 class ProgressReporter(Protocol):
     async def update(self, text: str) -> None: ...
+
+
+async def _update_progress(
+    progress: ProgressReporter | None,
+    text: str,
+    *,
+    buttons: Any = None,
+    is_terminal: bool = False,
+) -> None:
+    if progress is None:
+        return
+    if isinstance(progress, MessageProgressReporter):
+        await progress.update(text, buttons=buttons, is_terminal=is_terminal)
+        return
+    if buttons is not None:
+        try:
+            await progress.update(text, buttons=buttons)
+        except TypeError:
+            await progress.update(text)
+    else:
+        try:
+            await progress.update(text)
+        except TypeError:
+            await progress.update(text, is_terminal=is_terminal)
 
 
 class Uploader(Protocol):
@@ -177,7 +201,7 @@ class DownloadPipeline:
 
         try:
             # 1. Download phase under download_timeout
-            await progress.update(texts.DOWNLOADING)
+            await _update_progress(progress, texts.DOWNLOADING, is_terminal=False)
             dl_timeout_ctx = (
                 asyncio.timeout(self._download_timeout)
                 if self._download_timeout and self._download_timeout > 0
@@ -198,7 +222,7 @@ class DownloadPipeline:
 
             # 2. Processing phase: probe + thumbnail every file while it is still
             # whole (splitting deletes the source), then split oversized ones.
-            await progress.update(texts.PROCESSING)
+            await _update_progress(progress, texts.PROCESSING, is_terminal=False)
             groups: list[_FileGroup] = []
             for raw_path in result.file_paths:
                 source = Path(raw_path)
@@ -217,7 +241,7 @@ class DownloadPipeline:
                 groups.append(_FileGroup(info=info, parts=parts))
 
             # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
-            await progress.update(texts.UPLOADING)
+            await _update_progress(progress, texts.UPLOADING, is_terminal=False)
             upload_progress = UploadProgress(
                 progress, texts.UPLOADING, sum(p.stat().st_size for g in groups for p in g.parts)
             )
@@ -350,15 +374,17 @@ class DownloadPipeline:
                     subtitle_names=subtitle_names,
                 )
             if trimmed:
-                await progress.update(
+                await _update_progress(
+                    progress,
                     texts.format_playlist_trimmed(
                         result.playlist_downloaded,
                         result.playlist_total,
                         reason=result.playlist_trimmed_reason,
-                    )
+                    ),
+                    is_terminal=True,
                 )
             else:
-                await progress.update(texts.DOWNLOAD_DONE)
+                await _update_progress(progress, texts.DOWNLOAD_DONE, is_terminal=True)
         except TimeoutError as exc:
             cancel_token.set()
             dl_expired = bool(dl_cm and callable(getattr(dl_cm, "expired", None)) and dl_cm.expired())
@@ -373,7 +399,7 @@ class DownloadPipeline:
                     self._upload_timeout,
                     up_expired,
                 )
-                await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED)
+                await _update_progress(progress, texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
                 raise
             logger.warning(
                 "Foreign TimeoutError in pipeline for user=%s url=%s: %s",
@@ -381,7 +407,7 @@ class DownloadPipeline:
                 url,
                 exc,
             )
-            await progress.update(texts.DOWNLOAD_FAILED)
+            await _update_progress(progress, texts.DOWNLOAD_FAILED, is_terminal=True)
             raise
         except asyncio.CancelledError:
             cancel_token.set()
@@ -394,7 +420,7 @@ class DownloadPipeline:
             InstagramDownloadError,
         ) as exc:
             logger.warning("Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
-            await progress.update(str(exc))
+            await _update_progress(progress, str(exc), is_terminal=True)
             raise
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException):
             raise
@@ -408,11 +434,11 @@ class DownloadPipeline:
                 user_id,
                 url,
             )
-            await progress.update(texts.FLOOD_WAIT_FAILED)
+            await _update_progress(progress, texts.FLOOD_WAIT_FAILED, is_terminal=True)
             raise
         except Exception:
             logger.exception("Download pipeline failed for user=%s url=%s", user_id, url)
-            await progress.update(texts.DOWNLOAD_FAILED)
+            await _update_progress(progress, texts.DOWNLOAD_FAILED, is_terminal=True)
             raise
         finally:
             cancel_token.set()
@@ -564,7 +590,7 @@ class DownloadPipeline:
         delivery: DeliveryOptions,
     ) -> bool:
         try:
-            await progress.update(texts.DOWNLOAD_FROM_CACHE)
+            await _update_progress(progress, texts.DOWNLOAD_FROM_CACHE, is_terminal=False)
             sent = await uploader.send_cached(
                 cached.archive_chat,
                 cached.message_ids,
@@ -595,7 +621,7 @@ class DownloadPipeline:
             delivery=delivery,
             reply_to=reply_to,
         )
-        await progress.update(texts.DOWNLOAD_DONE)
+        await _update_progress(progress, texts.DOWNLOAD_DONE, is_terminal=True)
         return True
 
     def _cleanup(self, task_dir: Path) -> None:

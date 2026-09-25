@@ -10,6 +10,7 @@ import logging
 import math
 import re
 import time
+from typing import Any
 from urllib.parse import urlparse
 
 from sqlalchemy.orm import sessionmaker
@@ -95,15 +96,32 @@ def _contact_buttons() -> list[list[Button]]:
     return [[Button.url(texts.CREDITS_BUTTON, texts.CONTACT_URL)]]
 
 
+async def _safe_answer_callback(
+    event: events.CallbackQuery.Event,
+    *args: Any,
+    max_wait_seconds: float = 10.0,
+    **kwargs: Any,
+) -> None:
+    try:
+        await call_with_flood_retry(
+            event.answer,
+            *args,
+            max_wait_seconds=max_wait_seconds,
+            **kwargs,
+        )
+    except Exception:
+        logger.debug("Failed to answer callback query (ignored so flow continues)", exc_info=True)
+
+
 async def _report_quota_error(progress: MessageProgressReporter, exc: Exception) -> None:
     """Out of credits / out of daily bandwidth get the contact button; a
     blocked user just gets the message."""
     if isinstance(exc, CreditsExhaustedException):
-        await progress.update(texts.CREDITS_EXHAUSTED, buttons=_contact_buttons())
+        await progress.update(texts.CREDITS_EXHAUSTED, buttons=_contact_buttons(), is_terminal=True)
     elif isinstance(exc, BandwidthExhaustedException):
-        await progress.update(str(exc), buttons=_contact_buttons())
+        await progress.update(str(exc), buttons=_contact_buttons(), is_terminal=True)
     else:
-        await progress.update(str(exc))
+        await progress.update(str(exc), is_terminal=True)
 
 
 def register_handlers(
@@ -240,7 +258,7 @@ def register_handlers(
         # answer text explains a behavior change (separate message/Telegraph
         # link), not just a value flip - a toast is easy to miss for that.
         alert = toggle_key == settings_menu.TOGGLE_TITLE_LEN
-        await call_with_flood_retry(event.answer, answer, alert=alert)
+        await _safe_answer_callback(event, answer, alert=alert)
         try:
             await call_with_flood_retry(event.edit, settings_text(event.sender_id), buttons=buttons)
         except MessageNotModifiedError:
@@ -250,14 +268,14 @@ def register_handlers(
     async def quality_pick_handler(event: events.CallbackQuery.Event) -> None:
         parts = decode(event.data)
         if len(parts) != 3 or parts[0] != "ytq":
-            await call_with_flood_retry(event.answer)
+            await _safe_answer_callback(event)
             return
 
         quality = parts[1]
         url_hash = parts[2]
         url = quality_store.get(url_hash)
         if not url:
-            await call_with_flood_retry(event.answer, texts.YOUTUBE_LINK_EXPIRED, alert=True)
+            await _safe_answer_callback(event, texts.YOUTUBE_LINK_EXPIRED, alert=True)
             return
 
         delivery = load_delivery(event.sender_id, first_name=None, username=None)
@@ -266,11 +284,12 @@ def register_handlers(
         # per download, no new one), and confirm with a short toast.
         quality_name = texts.QUALITY_NAMES.get(quality, quality)
         if quality == "audio":
-            await call_with_flood_retry(event.answer, texts.QUALITY_TOAST_AUDIO)
+            toast = texts.QUALITY_TOAST_AUDIO
             status_text = texts.DOWNLOADING_AUDIO
         else:
-            await call_with_flood_retry(event.answer, texts.QUALITY_TOAST.format(name=quality_name))
+            toast = texts.QUALITY_TOAST.format(name=quality_name)
             status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
+        await _safe_answer_callback(event, toast)
         message = None
         try:
             message = await call_with_flood_retry(event.edit, status_text, buttons=None)
@@ -314,7 +333,7 @@ def register_handlers(
             cache_key = compute_cache_key(media_ref, quality, delivery.send_as, delivery.subtitles)
 
             async def on_wait() -> None:
-                await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+                await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
             async with limiter.slot(event.sender_id, on_wait=on_wait):
                 await pipeline.run(
@@ -331,11 +350,11 @@ def register_handlers(
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
             await _report_quota_error(progress, exc)
         except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-            await progress.update(str(exc))
+            await progress.update(str(exc), is_terminal=True)
         except FLOOD_WAIT_ERRORS as exc:
             wait_seconds = get_flood_wait_seconds(exc)
             logger.warning("YouTube download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-            await progress.update(texts.FLOOD_WAIT_FAILED)
+            await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
         except TimeoutError:
             pass
         except Exception:
@@ -385,7 +404,7 @@ def register_handlers(
             )
 
             async def on_wait() -> None:
-                await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+                await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
             tiktok_engine = TikTokEngine(
                 registry=registry,
@@ -411,11 +430,11 @@ def register_handlers(
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 await _report_quota_error(progress, exc)
             except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                await progress.update(str(exc))
+                await progress.update(str(exc), is_terminal=True)
             except FLOOD_WAIT_ERRORS as exc:
                 wait_seconds = get_flood_wait_seconds(exc)
                 logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                await progress.update(texts.FLOOD_WAIT_FAILED)
+                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
             except TimeoutError:
                 pass
             except Exception:
@@ -436,7 +455,7 @@ def register_handlers(
             )
 
             async def on_wait() -> None:
-                await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+                await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
             instagram_engine = InstagramEngine(
                 max_download_size=max_download_size,
@@ -461,11 +480,11 @@ def register_handlers(
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 await _report_quota_error(progress, exc)
             except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                await progress.update(str(exc))
+                await progress.update(str(exc), is_terminal=True)
             except FLOOD_WAIT_ERRORS as exc:
                 wait_seconds = get_flood_wait_seconds(exc)
                 logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                await progress.update(texts.FLOOD_WAIT_FAILED)
+                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
             except TimeoutError:
                 pass
             except Exception:
@@ -486,7 +505,7 @@ def register_handlers(
         )
 
         async def on_wait() -> None:
-            await progress.update(texts.YOUTUBE_QUEUE_WAIT)
+            await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
         try:
             async with limiter.slot(event.sender_id, on_wait=on_wait):
@@ -504,11 +523,11 @@ def register_handlers(
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
             await _report_quota_error(progress, exc)
         except (DownloadTooLargeError, UnsupportedUrlError) as exc:
-            await progress.update(str(exc))
+            await progress.update(str(exc), is_terminal=True)
         except FLOOD_WAIT_ERRORS as exc:
             wait_seconds = get_flood_wait_seconds(exc)
             logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-            await progress.update(texts.FLOOD_WAIT_FAILED)
+            await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
         except TimeoutError:
             pass
         except Exception:

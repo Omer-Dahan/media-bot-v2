@@ -255,9 +255,14 @@ async def _lane(client, lane, links, fd, file_id, part_count, part_size, is_big,
         link = await _send_via(client, link, links[0], request, index, state)
         state.uploaded += len(data)
         if progress is not None:
-            result = progress(state.uploaded, state.total)
-            if asyncio.iscoroutine(result):
-                await result
+            try:
+                result = progress(state.uploaded, state.total)
+                if asyncio.iscoroutine(result):
+                    await asyncio.wait_for(result, timeout=1.0)
+            except (TimeoutError, FLOOD_WAIT_ERRORS):
+                pass
+            except Exception:
+                logger.debug("Progress callback error during upload", exc_info=True)
 
 
 async def _send_via(client, link: _Link, main: _Link, request, index: int, state: _State) -> _Link:

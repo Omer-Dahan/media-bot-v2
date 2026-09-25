@@ -45,27 +45,38 @@ def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None =
         return is_terminal
     if buttons is not None:
         return True
+    if text.startswith((
+        texts.DOWNLOAD_STARTED,
+        texts.DOWNLOADING,
+        "מוריד",
+        "🔄 מוריד",
+        texts.PROCESSING,
+        "מעבד",
+        texts.UPLOADING,
+        "מעלה",
+        texts.DOWNLOAD_FROM_CACHE,
+        "נמצא במטמון",
+        texts.YOUTUBE_QUEUE_WAIT,
+        "⏳ עומס זמני בשרתי טלגרם",
+        texts.PING_MESSAGE,
+    )):
+        return False
+    if "מוריד..." in text or "מעלה לטלגרם..." in text:
+        return False
     if text.startswith((texts.DOWNLOAD_DONE, "הושלם")):
         return True
     if text.startswith(("❌", "⏱️")):
         return True
-    if text in (
+    if "נכשלה" in text or "בוטלה" in text:
+        return True
+    return text in (
         texts.DOWNLOAD_FAILED,
         texts.FLOOD_WAIT_FAILED,
         texts.CREDITS_EXHAUSTED,
         texts.BANDWIDTH_EXHAUSTED,
         texts.REQUEST_TIMEOUT_EXCEEDED,
-    ):
-        return True
-    return text not in (
-        texts.DOWNLOAD_STARTED,
-        texts.DOWNLOADING,
-        texts.PROCESSING,
-        texts.UPLOADING,
-        texts.DOWNLOAD_FROM_CACHE,
-        texts.YOUTUBE_QUEUE_WAIT,
-        texts.PING_MESSAGE,
-    ) and not text.startswith((f"{texts.UPLOADING} ", "⏳ עומס זמני בשרתי טלגרם"))
+        texts.UNSUPPORTED_URL,
+    )
 
 
 class MessageProgressReporter:
@@ -82,22 +93,45 @@ class MessageProgressReporter:
         self._max_retries = max_retries
         self._max_wait_seconds = max_wait_seconds
         self._sleep = sleep_func
+        self._seq: int = 0
+        self._last_applied_seq: int = 0
+        self._is_terminal_completed: bool = False
+        self._async_lock: asyncio.Lock | None = None
+
+    @property
+    def _lock(self) -> asyncio.Lock:
+        if self._async_lock is None:
+            self._async_lock = asyncio.Lock()
+        return self._async_lock
 
     async def handle_flood_wait(self, wait_seconds: int, attempts: int = 1) -> None:
         """When an operation hits a prolonged flood wait (>= 10s), update the progress
         message to inform the user rather than leaving frozen percentages."""
         if wait_seconds >= 10:
-            await self.update(texts.FLOOD_WAIT_MESSAGE.format(seconds=wait_seconds))
+            await self.update(texts.FLOOD_WAIT_MESSAGE.format(seconds=wait_seconds), is_terminal=False)
 
     async def update(self, text: str, *, buttons=None, is_terminal: bool | None = None) -> None:
         """Edit the message to `text`. `buttons` (e.g. the contact button under
         a "credits exhausted" message) is passed only when given, so plain
         status updates keep their exact `edit(text)` call.
 
-        Catches flood waits with automatic retry up to max_retries. `_last_text`
-        is only updated on a successful edit. If all edit attempts fail for a
+        Catches flood waits with automatic retry up to max_retries for terminal messages.
+        Non-terminal updates drop long flood waits to avoid blocking the pipeline/upload.
+        `_last_text` is only updated on a successful edit. If all edit attempts fail for a
         critical terminal message (finish/error/quota), attempts fallback delivery
-        via a new message and removes the stale progress message."""
+        via a new message, updates `self._message` to the new message, and only deletes
+        the stale message if fallback succeeded."""
+        terminal = _is_terminal_text(text, buttons, is_terminal)
+        self._seq += 1
+        seq = self._seq
+
+        if not terminal and self._is_terminal_completed:
+            logger.debug("Discarding non-terminal progress %r (seq %d): terminal already reached", text, seq)
+            return
+
+        if terminal:
+            self._is_terminal_completed = True
+
         if text == self._last_text and buttons is None:
             return
 
@@ -105,25 +139,47 @@ class MessageProgressReporter:
         success = False
         sleeper = self._sleep or asyncio.sleep
         while True:
-            try:
-                if buttons is not None:
-                    await self._message.edit(text, buttons=buttons)
-                else:
-                    await self._message.edit(text)
-                success = True
-                self._last_text = text
+            if not terminal and (self._is_terminal_completed or seq < self._last_applied_seq):
                 break
-            except MessageNotModifiedError:
-                success = True
-                self._last_text = text
-                break
-            except FLOOD_WAIT_ERRORS as exc:
+
+            flood_exc = None
+            async with self._lock:
+                if not terminal and (self._is_terminal_completed or seq < self._last_applied_seq):
+                    break
+                try:
+                    if buttons is not None:
+                        await self._message.edit(text, buttons=buttons)
+                    else:
+                        await self._message.edit(text)
+                    success = True
+                    self._last_text = text
+                    self._last_applied_seq = seq
+                    break
+                except MessageNotModifiedError:
+                    success = True
+                    self._last_text = text
+                    self._last_applied_seq = seq
+                    break
+                except FLOOD_WAIT_ERRORS as exc:
+                    flood_exc = exc
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    logger.warning("Failed to edit progress message to %r", text, exc_info=True)
+                    break
+
+            if flood_exc is not None:
                 attempts += 1
-                wait_seconds = get_flood_wait_seconds(exc)
+                wait_seconds = get_flood_wait_seconds(flood_exc)
+                if not terminal and (attempts > 1 or wait_seconds > 2.0):
+                    logger.warning(
+                        "Progress non-terminal edit hit flood wait (%s: %ss), skipping",
+                        type(flood_exc).__name__,
+                        wait_seconds,
+                    )
+                    break
                 if attempts > self._max_retries or wait_seconds > self._max_wait_seconds:
                     logger.warning(
                         "Progress message edit hit flood wait (%s: %ss, attempt %d/%d) exceeding limits",
-                        type(exc).__name__,
+                        type(flood_exc).__name__,
                         wait_seconds,
                         attempts,
                         self._max_retries,
@@ -131,57 +187,62 @@ class MessageProgressReporter:
                     break
                 logger.warning(
                     "Progress message edit hit flood wait (%s: %ss, attempt %d/%d); sleeping %ss before retry",
-                    type(exc).__name__,
+                    type(flood_exc).__name__,
                     wait_seconds,
                     attempts,
                     self._max_retries,
                     wait_seconds,
                 )
                 await sleeper(wait_seconds)
+                if not terminal and (self._is_terminal_completed or seq < self._last_applied_seq):
+                    break
                 continue
-            except (RPCError, ConnectionError, TimeoutError, OSError):
-                logger.warning("Failed to edit progress message to %r", text, exc_info=True)
-                break
 
-        if not success and _is_terminal_text(text, buttons, is_terminal):
+        if not success and terminal:
             # Terminal messages (finish/failure/quota) are critical:
             # try to deliver via new message and delete stale progress message
             # so the user never stays looking at "מעלה... 95%".
-            delivered = False
-            if hasattr(self._message, "respond") and callable(self._message.respond):
-                try:
-                    if buttons is not None:
-                        await call_with_flood_retry(
-                            self._message.respond,
-                            text,
-                            buttons=buttons,
-                            max_retries=self._max_retries,
-                            max_wait_seconds=self._max_wait_seconds,
-                            sleep_func=self._sleep,
-                        )
-                    else:
-                        await call_with_flood_retry(
-                            self._message.respond,
-                            text,
-                            max_retries=self._max_retries,
-                            max_wait_seconds=self._max_wait_seconds,
-                            sleep_func=self._sleep,
-                        )
-                    delivered = True
-                    self._last_text = text
-                    logger.info("Delivered terminal progress message via new message after edit failure: %r", text)
-                except Exception:
-                    logger.warning("Failed to deliver fallback terminal message %r", text, exc_info=True)
+            async with self._lock:
+                old_message = self._message
+                new_message = None
+                if hasattr(old_message, "respond") and callable(old_message.respond):
+                    try:
+                        if buttons is not None:
+                            new_message = await call_with_flood_retry(
+                                old_message.respond,
+                                text,
+                                buttons=buttons,
+                                max_retries=self._max_retries,
+                                max_wait_seconds=self._max_wait_seconds,
+                                sleep_func=self._sleep,
+                            )
+                        else:
+                            new_message = await call_with_flood_retry(
+                                old_message.respond,
+                                text,
+                                max_retries=self._max_retries,
+                                max_wait_seconds=self._max_wait_seconds,
+                                sleep_func=self._sleep,
+                            )
+                        if new_message is not None:
+                            self._message = new_message
+                            self._last_text = text
+                            self._last_applied_seq = seq
+                            logger.info("Delivered terminal progress message via new message after edit failure: %r", text)
+                    except Exception:
+                        logger.warning("Failed to deliver fallback terminal message %r", text, exc_info=True)
 
-            if hasattr(self._message, "delete") and callable(self._message.delete):
-                try:
-                    await self._message.delete()
-                    logger.info("Deleted stale progress message after edit failure")
-                except Exception:
-                    logger.debug("Failed to delete stale progress message", exc_info=True)
-
-            if not delivered and not hasattr(self._message, "respond"):
-                logger.warning("Terminal progress message could not be edited or delivered: %r", text)
+                if new_message is not None and hasattr(old_message, "delete") and callable(old_message.delete):
+                    try:
+                        await old_message.delete()
+                        logger.info("Deleted stale progress message after fallback delivery")
+                    except Exception:
+                        logger.debug("Failed to delete stale progress message", exc_info=True)
+                elif new_message is None:
+                    logger.warning(
+                        "Fallback delivery was not successful; retaining previous progress message without deleting: %r",
+                        text,
+                    )
 
 
 class UploadProgress:
@@ -224,16 +285,23 @@ class UploadProgress:
         update the user with an explanatory Hebrew message rather than freezing."""
         if wait_seconds >= 10:
             self._in_flood = True
-            await self._reporter.update(texts.FLOOD_WAIT_MESSAGE.format(seconds=wait_seconds))
+            try:
+                await self._reporter.update(
+                    texts.FLOOD_WAIT_MESSAGE.format(seconds=wait_seconds),
+                    is_terminal=False,
+                )
+            except TypeError:
+                await self._reporter.update(texts.FLOOD_WAIT_MESSAGE.format(seconds=wait_seconds))
 
     async def handle_flood_cleared(self) -> None:
         """When a flood wait finishes, restore the progress message to avoid frozen state."""
         if self._in_flood:
             self._in_flood = False
-            if self._shown > 0:
-                await self._reporter.update(f"{self._label} {self._shown}%")
-            else:
-                await self._reporter.update(self._label)
+            text = f"{self._label} {self._shown}%" if self._shown > 0 else self._label
+            try:
+                await self._reporter.update(text, is_terminal=False)
+            except TypeError:
+                await self._reporter.update(text)
 
     async def __call__(self, done: int, _part_total: int) -> None:
         percent = min(100, (self._base + done) * 100 // self._total)
@@ -250,4 +318,7 @@ class UploadProgress:
         self._shown = max(self._shown, percent)
         self._shown_at = now
         self._in_flood = False
-        await self._reporter.update(f"{self._label} {percent}%")
+        try:
+            await self._reporter.update(f"{self._label} {percent}%", is_terminal=False)
+        except TypeError:
+            await self._reporter.update(f"{self._label} {percent}%")
