@@ -42,6 +42,12 @@ from sqlalchemy.orm import Session, sessionmaker
 from media_bot_v2.db.models import VideoCache
 from media_bot_v2.db.session import session_scope
 
+# Bumped when what gets archived changes in a way old rows must not be served
+# for. v2: videos are now delivered as H.264/AAC MP4 with faststart; rows
+# archived before that may hold AV1/Opus files that do not play on some
+# clients. Old rows are not deleted - they are simply never looked up again.
+CACHE_KEY_VERSION = 2
+
 
 def compute_cache_key(
     media_ref: str, quality: str, send_as: str = "video", subtitles: bool = False
@@ -52,10 +58,15 @@ def compute_cache_key(
     `send_as` and `subtitles` are part of the key because they change what
     was delivered (and therefore archived): a user who switches from "video"
     to "file" must not be served the earlier video message. The defaults
-    (video, no subtitles) hash exactly as before this parameter existed, so
-    existing cache rows stay valid for them.
+    (video, no subtitles) add nothing to the key, so for the same version
+    they hash the same as before those parameters existed.
+
+    `CACHE_KEY_VERSION` is deliberately part of every key: it retires rows
+    written by older, non-conforming deliveries. A previously cached video is
+    therefore downloaded once more (and billed like any real download), then
+    cached under the new key.
     """
-    raw = f"{media_ref}:{quality}"
+    raw = f"{media_ref}:{quality}:v{CACHE_KEY_VERSION}"
     if send_as != "video":
         raw += f":{send_as}"
     if subtitles:

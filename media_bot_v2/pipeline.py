@@ -117,12 +117,14 @@ class DownloadPipeline:
         request_timeout: float = 600.0,
         download_timeout: float | None = None,
         upload_timeout: float | None = None,
+        convert_timeout: float | None = None,
     ) -> None:
         self._credits = credits_service
         self._download_dir = download_dir
         self._request_timeout = request_timeout
         self._download_timeout = download_timeout if download_timeout is not None else request_timeout
         self._upload_timeout = upload_timeout if upload_timeout is not None else request_timeout
+        self._convert_timeout = convert_timeout
 
     async def run(
         self,
@@ -196,15 +198,16 @@ class DownloadPipeline:
             groups: list[_FileGroup] = []
             for raw_path in result.file_paths:
                 source = Path(raw_path)
+                if not delivery.as_document:
+                    # "Send as file" delivers the bytes untouched; everything
+                    # sent as playable video must be H.264/AAC MP4 with the
+                    # moov up front or clients fail with IO_UNSPECIFIED. This
+                    # runs OUTSIDE the upload budget with its own smaller
+                    # one: a slow conversion is killed and the original is
+                    # sent, and it never eats the time the upload needs.
+                    source = await self._make_streamable(source)
                 async with self._upload_budget() as cm:
                     up_cm = cm
-                    if not delivery.as_document:
-                        # "Send as file" delivers the bytes untouched; everything
-                        # sent as playable video must be H.264/AAC MP4 with the
-                        # moov up front or clients fail with IO_UNSPECIFIED.
-                        source = await asyncio.to_thread(
-                            ensure_streamable, source, timeout=self._fix_timeout()
-                        )
                     info = await asyncio.to_thread(probe_with_thumb, source)
                 parts = await asyncio.to_thread(splitter.split_file, source)
                 groups.append(_FileGroup(info=info, parts=parts))
@@ -402,9 +405,22 @@ class DownloadPipeline:
             self._cleanup(task_dir)
 
     def _fix_timeout(self) -> float:
+        """Conversion budget: always smaller than the upload budget."""
+        if self._convert_timeout is not None and self._convert_timeout > 0:
+            return float(self._convert_timeout)
         if self._upload_timeout and self._upload_timeout > 0:
-            return float(self._upload_timeout)
+            return min(DEFAULT_FIX_TIMEOUT_SECONDS, self._upload_timeout / 3)
         return DEFAULT_FIX_TIMEOUT_SECONDS
+
+    async def _make_streamable(self, source: Path) -> Path:
+        """`ensure_streamable` in a worker thread. Its subprocess timeout kills
+        the ffmpeg child; any failure (timeout included) is logged and the
+        original file is returned - never an error for the user."""
+        try:
+            return await asyncio.to_thread(ensure_streamable, source, timeout=self._fix_timeout())
+        except Exception:
+            logger.warning("Streamable conversion failed for %s, sending it as-is", source, exc_info=True)
+            return source
 
     def _upload_budget(self):
         if self._upload_timeout and self._upload_timeout > 0:

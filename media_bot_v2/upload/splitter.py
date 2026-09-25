@@ -94,6 +94,12 @@ def _segment_video(file_path: Path, *, limit: int, margin: float) -> list[Path]:
     total_size = file_path.stat().st_size
     segment_time = max(duration * limit / total_size * margin, 1.0)
 
+    # Every part is its own MP4: put its moov up front so each one streams.
+    faststart = (
+        ["-segment_format_options", "movflags=+faststart"]
+        if ext.lower() in {".mp4", ".m4v", ".mov"}
+        else []
+    )
     try:
         subprocess.run(
             [
@@ -111,6 +117,7 @@ def _segment_video(file_path: Path, *, limit: int, margin: float) -> list[Path]:
                 str(segment_time),
                 "-reset_timestamps",
                 "1",
+                *faststart,
                 segment_template,
             ],
             check=True,

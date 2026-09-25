@@ -261,8 +261,9 @@ def test_cache_key_includes_the_delivery_format_and_subtitles():
     assert compute_cache_key("abc123", "720", "video", True) != video
     assert compute_cache_key("abc123", "720", "document", True) != compute_cache_key("abc123", "720", "document")
     assert compute_cache_key("abc123", "1080", "video") != video
-    # existing rows for the default (video, no subtitles) stay valid
-    assert video == hashlib.md5(b"abc123:720", usedforsecurity=False).hexdigest()
+    # defaults add nothing beyond the version component; pre-M9.1 rows
+    # (unversioned key) are deliberately retired - see test_m9_1.py
+    assert video == hashlib.md5(b"abc123:720:v2", usedforsecurity=False).hexdigest()
 
 
 async def test_switching_from_video_to_file_does_not_serve_the_cached_video(

@@ -50,6 +50,7 @@ def main() -> None:
         request_timeout=settings.request_timeout,
         download_timeout=settings.request_timeout,
         upload_timeout=settings.upload_timeout,
+        convert_timeout=settings.convert_timeout,
     )
     limiter = ConcurrencyLimiter(
         global_limit=settings.workers,

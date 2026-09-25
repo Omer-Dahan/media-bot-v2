@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # --- Request timeout budget ---
     request_timeout: float = Field(default=600.0, validation_alias="REQUEST_TIMEOUT")
     upload_timeout: float = Field(default=600.0, validation_alias="UPLOAD_TIMEOUT")
+    # Budget for making a video Telegram-playable (ffmpeg). Separate from, and
+    # smaller than, the upload budget; on expiry the original file is sent.
+    convert_timeout: float = Field(default=180.0, validation_alias="CONVERT_TIMEOUT")
 
     # --- Download limits (not user-configurable, kept as constants for clarity) ---
     tg_normal_max_size: int = 2000 * 1024 * 1024
