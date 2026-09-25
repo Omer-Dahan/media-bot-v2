@@ -35,6 +35,15 @@ ExecStart=/opt/media-bot-v2/.venv/bin/python -m media_bot_v2.bootstrap
 # as the service's user).
 Environment="PATH=/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin:/usr/local/deno/bin"
 
+# Logs: the bot writes JSON lines to logs/bot.log AND to stdout. Leaving
+# StandardOutput/StandardError at systemd's default (journal) is what makes
+# them show up in `journalctl -u download-bot-v2`; do not redirect them to
+# null or a file. PYTHONUNBUFFERED=1 stops Python from block-buffering
+# stdout when it is a pipe, so lines appear immediately instead of in bursts.
+Environment=PYTHONUNBUFFERED=1
+StandardOutput=journal
+StandardError=journal
+
 # Restart policy: come back after a crash, but don't hot-loop against a
 # persistent failure (bad token, DB unreachable).
 Restart=on-failure

@@ -247,3 +247,13 @@ schema is identical by construction (§1 decision 2, enforced by
    periodic task for the user, or should M2/M3 include tooling (e.g. an
    admin command or a scheduled check) to detect stale/expired cookies
    before they cause silent download failures?
+
+## 8. Roadmap (future milestones, not in current scope)
+
+- **`/adminpanel` restoration** — the owner asked for the admin panel to
+  return in a *future* milestone. It is **not** in the current scope (v1
+  ships without it, see `INVENTORY.md`). Reference for the previous
+  implementation (read-only, do not modify):
+  `/home/vm/projects/media-downloader-bot/src/admin.py`. Port selectively per
+  the notes in `INVENTORY.md` (drop the dead `admin:user_action` dispatcher and
+  the self-restart via `os._exit`).

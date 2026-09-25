@@ -165,6 +165,22 @@ sudo systemctl enable download-bot-v2.service
 
 Do not `systemctl start` it yet - see the cutover steps below.
 
+### 6.1 Reading the logs
+
+The bot logs to two places, with the same JSON-lines format and level (`INFO`):
+
+| Where | How to read | Notes |
+|-------|-------------|-------|
+| systemd journal (stdout) | `journalctl -u download-bot-v2 -f` | Live tail; survives file rotation; filter with `--since "1 hour ago"` or `-p warning`. Journal retention is governed by journald, not the bot. |
+| `logs/bot.log` | `tail -f logs/bot.log` | Rotates by `LOG_MAX_BYTES` / `LOG_BACKUP_COUNT` (`bot.log.1`, ...). Per-request logs are under `logs/requests/`. |
+
+Set `LOG_TO_CONSOLE=false` in `.env` to disable the stdout copy (the file is
+always written). The unit sets `PYTHONUNBUFFERED=1` so lines reach the journal
+immediately. Output contains no ANSI colour codes.
+
+`telethon`, `httpx`, `httpcore` and `urllib3` are held at `WARNING` and above
+to keep the journal readable; the bot's own loggers stay at `INFO`.
+
 ## 7. Cutover plan
 
 The goal: swap the running process without creating a second MTProto

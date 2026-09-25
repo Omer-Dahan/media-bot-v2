@@ -28,7 +28,12 @@ logger = logging.getLogger(__name__)
 
 def main() -> None:
     settings = load_settings()
-    configure_logging(settings.log_file, settings.log_max_bytes, settings.log_backup_count)
+    configure_logging(
+        settings.log_file,
+        settings.log_max_bytes,
+        settings.log_backup_count,
+        log_to_console=settings.log_to_console,
+    )
     check_js_runtime()
 
     session_factory = build_session_factory(settings.db_dsn)

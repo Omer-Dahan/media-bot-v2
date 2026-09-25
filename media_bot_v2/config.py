@@ -49,6 +49,8 @@ class Settings(BaseSettings):
     log_file: str = Field(default="logs/bot.log", validation_alias="LOG_FILE")
     log_max_bytes: int = Field(default=10 * 1024 * 1024, validation_alias="LOG_MAX_BYTES")
     log_backup_count: int = Field(default=5, validation_alias="LOG_BACKUP_COUNT")
+    # Mirror logs to stdout so `journalctl -u download-bot-v2` shows them.
+    log_to_console: bool = Field(default=True, validation_alias="LOG_TO_CONSOLE")
 
     # --- YouTube / Network options ---
     force_ipv4: bool = Field(default=False, validation_alias="FORCE_IPV4")
