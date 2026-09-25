@@ -118,31 +118,65 @@ async def _deferred_terminal_retry(
     text: str,
     buttons: Any,
     wait_seconds: float,
-    sleep_func: Callable[[float], Awaitable[None]] | None,
-    is_failure: bool,
-    needs_delete: bool,
+    sleep_func: Callable[[float], Awaitable[None]] | None = None,
+    is_failure: bool = True,
+    needs_delete: bool = True,
+    *,
+    already_deleted: bool | None = None,
+    reporter: MessageProgressReporter | None = None,
+    max_retries: int = 5,
+    max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
 ) -> None:
     """Deferred delivery or cleanup after a prolonged flood wait expires.
     Guarantees that on failure the user receives an error indication,
     and stale progress messages (e.g. 95%) are never left behind."""
+    if already_deleted is None:
+        already_deleted = not needs_delete
+
+    if reporter is not None and reporter.terminal_delivered:
+        logger.debug("Deferred terminal retry aborted: terminal already delivered")
+        return
+
     sleeper = sleep_func or asyncio.sleep
     try:
         if wait_seconds > 0:
             await sleeper(wait_seconds)
+    except asyncio.CancelledError:
+        logger.debug("Deferred terminal retry cancelled during sleep")
+        return
     except Exception:
         logger.debug("Deferred terminal sleep interrupted", exc_info=True)
+        return
+
+    if reporter is not None and reporter.terminal_delivered:
+        logger.debug("Deferred terminal retry aborted: terminal delivered during sleep")
         return
 
     delivered = False
     new_msg = None
     if is_failure:
-        if not needs_delete and hasattr(message, "edit") and callable(message.edit):
+        if not already_deleted and hasattr(message, "edit") and callable(message.edit):
             try:
                 if buttons is not None:
-                    await message.edit(text, buttons=buttons)
+                    await call_with_flood_retry(
+                        message.edit,
+                        text,
+                        buttons=buttons,
+                        max_retries=max_retries,
+                        max_wait_seconds=max_wait_seconds,
+                        sleep_func=sleeper,
+                    )
                 else:
-                    await message.edit(text)
+                    await call_with_flood_retry(
+                        message.edit,
+                        text,
+                        max_retries=max_retries,
+                        max_wait_seconds=max_wait_seconds,
+                        sleep_func=sleeper,
+                    )
                 delivered = True
+                if reporter is not None:
+                    reporter.mark_terminal_delivered()
                 logger.info("Deferred failure delivery succeeded via edit: %r", text)
             except Exception:
                 logger.debug("Deferred edit failed for failure message", exc_info=True)
@@ -150,20 +184,98 @@ async def _deferred_terminal_retry(
         if not delivered and hasattr(message, "respond") and callable(message.respond):
             try:
                 if buttons is not None:
-                    new_msg = await message.respond(text, buttons=buttons)
+                    new_msg = await call_with_flood_retry(
+                        message.respond,
+                        text,
+                        buttons=buttons,
+                        max_retries=max_retries,
+                        max_wait_seconds=max_wait_seconds,
+                        sleep_func=sleeper,
+                    )
                 else:
-                    new_msg = await message.respond(text)
+                    new_msg = await call_with_flood_retry(
+                        message.respond,
+                        text,
+                        max_retries=max_retries,
+                        max_wait_seconds=max_wait_seconds,
+                        sleep_func=sleeper,
+                    )
                 delivered = True
+                if reporter is not None:
+                    reporter.mark_terminal_delivered()
+                    if new_msg is not None:
+                        reporter._message = new_msg
                 logger.info("Deferred failure delivery succeeded via respond: %r", text)
             except Exception:
                 logger.warning("Deferred respond failed for failure message: %r", text, exc_info=True)
 
-    if (needs_delete or new_msg is not None) and hasattr(message, "delete") and callable(message.delete):
+    if not already_deleted and (delivered or not is_failure) and hasattr(message, "delete") and callable(message.delete):
         try:
-            await message.delete()
+            await call_with_flood_retry(
+                message.delete,
+                max_retries=max_retries,
+                max_wait_seconds=max_wait_seconds,
+                sleep_func=sleeper,
+            )
+            already_deleted = True
             logger.info("Deferred deletion of stale message succeeded")
         except Exception:
             logger.debug("Deferred delete failed", exc_info=True)
+
+    if is_failure and not delivered:
+        if not already_deleted and hasattr(message, "delete") and callable(message.delete):
+            try:
+                await call_with_flood_retry(
+                    message.delete,
+                    max_retries=max_retries,
+                    max_wait_seconds=max_wait_seconds,
+                    sleep_func=sleeper,
+                )
+                already_deleted = True
+                logger.info("Deleted misleading progress message after deferred delivery failure")
+            except Exception:
+                logger.warning("Failed to delete misleading progress message after deferred retry failure", exc_info=True)
+                if hasattr(message, "edit") and callable(message.edit):
+                    try:
+                        await message.edit(texts.DOWNLOAD_FAILED)
+                        already_deleted = True
+                    except Exception:
+                        logger.debug("Last-ditch edit to clear misleading progress failed", exc_info=True)
+
+        last_ditch_sent = False
+        client = getattr(message, "client", None)
+        chat_id = getattr(message, "chat_id", None)
+        if client is not None and chat_id is not None and hasattr(client, "send_message") and callable(client.send_message):
+            try:
+                await call_with_flood_retry(
+                    client.send_message,
+                    chat_id,
+                    text,
+                    max_retries=max_retries,
+                    max_wait_seconds=max_wait_seconds,
+                    sleep_func=sleeper,
+                )
+                last_ditch_sent = True
+                delivered = True
+                if reporter is not None:
+                    reporter.mark_terminal_delivered()
+            except Exception:
+                logger.warning("Last-ditch client.send_message failed for failure indication: %r", text, exc_info=True)
+
+        if not last_ditch_sent and hasattr(message, "respond") and callable(message.respond):
+            try:
+                await message.respond(text)
+                delivered = True
+                if reporter is not None:
+                    reporter.mark_terminal_delivered()
+            except Exception:
+                logger.warning("Last-ditch respond failed for failure indication: %r", text, exc_info=True)
+
+        if not delivered:
+            logger.error(
+                "All delivery and notification methods exhausted for terminal failure message: %r",
+                text,
+            )
 
 
 class MessageProgressReporter:
@@ -183,10 +295,33 @@ class MessageProgressReporter:
         self._seq: int = 0
         self._last_applied_seq: int = 0
         self._is_terminal_completed: bool = False
+        self._terminal_delivered: bool = False
         self._uneditable: bool = message is None
         self._logged_uneditable: bool = False
         self._async_lock: asyncio.Lock | None = None
         self._deferred_task: asyncio.Task[None] | None = None
+
+    @property
+    def is_terminal_completed(self) -> bool:
+        return self._is_terminal_completed
+
+    @property
+    def terminal_delivered(self) -> bool:
+        return self._terminal_delivered
+
+    def mark_terminal_delivered(self) -> None:
+        self._is_terminal_completed = True
+        self._terminal_delivered = True
+        self.cancel_deferred()
+
+    def cancel_deferred(self) -> None:
+        try:
+            current = asyncio.current_task()
+        except RuntimeError:
+            current = None
+        if self._deferred_task is not None and self._deferred_task is not current and not self._deferred_task.done():
+            self._deferred_task.cancel()
+            self._deferred_task = None
 
     @property
     def _lock(self) -> asyncio.Lock:
@@ -251,6 +386,8 @@ class MessageProgressReporter:
                         self._last_applied_seq = seq
                         self._uneditable = False
                         self._logged_uneditable = False
+                        if terminal:
+                            self.mark_terminal_delivered()
                         break
                     else:
                         self._uneditable = True
@@ -261,6 +398,8 @@ class MessageProgressReporter:
                     self._last_applied_seq = seq
                     self._uneditable = False
                     self._logged_uneditable = False
+                    if terminal:
+                        self.mark_terminal_delivered()
                     break
                 except FLOOD_WAIT_ERRORS as exc:
                     flood_exc = exc
@@ -346,6 +485,8 @@ class MessageProgressReporter:
                             self._last_applied_seq = seq
                             self._uneditable = False
                             self._logged_uneditable = False
+                            if terminal:
+                                self.mark_terminal_delivered()
                             logger.info("Delivered terminal progress message via new message after edit failure: %r", text)
                     except Exception as exc:
                         respond_exc = exc
@@ -405,6 +546,10 @@ class MessageProgressReporter:
                                 sleep_func=self._sleep,
                                 is_failure=is_failure,
                                 needs_delete=not deleted,
+                                already_deleted=deleted,
+                                reporter=self,
+                                max_retries=self._max_retries,
+                                max_wait_seconds=self._max_wait_seconds,
                             )
                         )
 

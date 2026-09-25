@@ -392,27 +392,32 @@ def register_handlers(
                 await _safe_answer_callback(event, str(exc), alert=True)
         except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
             if progress is not None:
-                await progress.update(str(exc), is_terminal=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    await progress.update(str(exc), is_terminal=True)
             else:
                 await _safe_answer_callback(event, str(exc), alert=True)
         except FLOOD_WAIT_ERRORS as exc:
             wait_seconds = get_flood_wait_seconds(exc)
             logger.warning("YouTube download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-            if progress is not None:
+            if progress is not None and not getattr(progress, "is_terminal_completed", False):
                 await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
         except TimeoutError:
             if progress is not None:
-                try:
-                    await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on timeout", exc_info=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on timeout", exc_info=True)
+            else:
+                await _safe_answer_callback(event, texts.REQUEST_TIMEOUT_EXCEEDED, alert=True)
         except Exception:
             logger.exception("YouTube download failed for url=%s", url)
             if progress is not None:
-                try:
-                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on general failure", exc_info=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on general failure", exc_info=True)
             else:
                 await _safe_answer_callback(event, texts.DOWNLOAD_FAILED, alert=True)
                 try:
@@ -496,22 +501,26 @@ def register_handlers(
                 except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                     await _report_quota_error(progress, exc)
                 except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                    await progress.update(str(exc), is_terminal=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        await progress.update(str(exc), is_terminal=True)
                 except FLOOD_WAIT_ERRORS as exc:
                     wait_seconds = get_flood_wait_seconds(exc)
                     logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
                 except TimeoutError:
-                    try:
-                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on timeout", exc_info=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        try:
+                            await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                        except Exception:
+                            logger.debug("Failed to update progress on timeout", exc_info=True)
                 except Exception:
                     logger.exception("TikTok download failed for url=%s", url)
-                    try:
-                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on general failure", exc_info=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        try:
+                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                        except Exception:
+                            logger.debug("Failed to update progress on general failure", exc_info=True)
                 return
             if _host_matches(url, INSTAGRAM_HOSTS):
                 if not matches_instagram_url(url):
@@ -554,22 +563,26 @@ def register_handlers(
                 except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                     await _report_quota_error(progress, exc)
                 except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                    await progress.update(str(exc), is_terminal=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        await progress.update(str(exc), is_terminal=True)
                 except FLOOD_WAIT_ERRORS as exc:
                     wait_seconds = get_flood_wait_seconds(exc)
                     logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
                 except TimeoutError:
-                    try:
-                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on timeout", exc_info=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        try:
+                            await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                        except Exception:
+                            logger.debug("Failed to update progress on timeout", exc_info=True)
                 except Exception:
                     logger.exception("Instagram download failed for url=%s", url)
-                    try:
-                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on general failure", exc_info=True)
+                    if not getattr(progress, "is_terminal_completed", False):
+                        try:
+                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                        except Exception:
+                            logger.debug("Failed to update progress on general failure", exc_info=True)
                 return
 
             if not direct_engine.matches(url):
@@ -605,29 +618,34 @@ def register_handlers(
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 await _report_quota_error(progress, exc)
             except (DownloadTooLargeError, UnsupportedUrlError) as exc:
-                await progress.update(str(exc), is_terminal=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    await progress.update(str(exc), is_terminal=True)
             except FLOOD_WAIT_ERRORS as exc:
                 wait_seconds = get_flood_wait_seconds(exc)
                 logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
             except TimeoutError:
-                try:
-                    await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on timeout", exc_info=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on timeout", exc_info=True)
             except Exception:
                 logger.exception("Direct download failed for url=%s", url)
-                try:
-                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on general failure", exc_info=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on general failure", exc_info=True)
         except Exception:
             logger.exception("Handler failed for url=%s", url)
             if progress is not None:
-                try:
-                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on general handler failure", exc_info=True)
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on general handler failure", exc_info=True)
             else:
                 try:
                     await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)

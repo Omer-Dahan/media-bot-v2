@@ -72,6 +72,7 @@ async def call_with_flood_retry[T](
     """
     attempts = 0
     sleeper = sleep_func or asyncio.sleep
+    total_slept: float = 0.0
     while True:
         try:
             return await func(*args, **kwargs)
@@ -79,14 +80,20 @@ async def call_with_flood_retry[T](
             attempts += 1
             wait_seconds = get_flood_wait_seconds(exc)
             func_name = getattr(func, "__qualname__", getattr(func, "__name__", str(func)))
-            if attempts > max_retries or wait_seconds > max_wait_seconds:
+            if (
+                attempts > max_retries
+                or wait_seconds > max_wait_seconds
+                or (total_slept + wait_seconds) > max_wait_seconds
+            ):
                 logger.warning(
-                    "Telegram flood wait (%s: %ss) on %s (attempt %d/%d) exceeded limits; raising",
+                    "Telegram flood wait (%s: %ss) on %s (attempt %d/%d, total slept %.1fs/%.1fs) exceeded limits; raising",
                     type(exc).__name__,
                     wait_seconds,
                     func_name,
                     attempts,
                     max_retries,
+                    total_slept,
+                    max_wait_seconds,
                 )
                 raise
             logger.warning(
@@ -109,6 +116,7 @@ async def call_with_flood_retry[T](
                 except Exception:
                     logger.debug("on_flood callback failed", exc_info=True)
             await sleeper(wait_seconds)
+            total_slept += wait_seconds
             if on_flood_cleared is not None:
                 try:
                     res = on_flood_cleared()
