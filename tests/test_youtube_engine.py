@@ -30,6 +30,7 @@ from media_bot_v2.engines.youtube import (
     parse_remote_components,
     resolve_player_client,
 )
+from media_bot_v2.telegram import texts
 
 # --- pure helpers -----------------------------------------------------
 
@@ -123,9 +124,11 @@ def test_classify_youtube_error_playlist_unavailable():
     assert "פלייליסט" in msg
 
 
-def test_classify_youtube_error_unknown_falls_back_to_truncated_message():
+def test_classify_youtube_error_unknown_falls_back_to_generic_message():
     msg = classify_youtube_error("some totally novel yt-dlp error the classifier has never seen")
-    assert "some totally novel" in msg
+    # Whitelist: unrecognised errors never echo their raw text to the user.
+    assert msg == texts.YOUTUBE_GENERIC_FAILURE
+    assert "some totally novel" not in msg
 
 
 def test_classify_youtube_error_no_message():

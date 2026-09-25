@@ -7,8 +7,9 @@ Designed after YouTubeEngine:
 - Strict error classification with Hebrew messages for private/login-required,
   not found/deleted, unsupported media/live streams, and network errors.
 - Progress reporting and mid-download size cap enforcement via progress hooks.
-- M4 compliance: single attempt for non-network errors, no misleading diagnostics,
-  clean aborts and file cleanup on errors.
+- One attempt per route (`max_retries=0`); transport retries happen inside yt-dlp only
+  (see engines/ytdlp_support.py). Whitelisted Hebrew error messages, clean aborts and
+  removal of partial files on every exit.
 """
 
 from __future__ import annotations
@@ -30,6 +31,14 @@ from media_bot_v2.engines.base import (
     DownloadTooLargeError,
     UnsupportedUrlError,
 )
+from media_bot_v2.engines.ytdlp_support import (
+    TRANSPORT_RETRIES,
+    DownloadCancelledSignal,
+    DownloadGuard,
+    DownloadTooLargeSignal,
+    remove_partial_files,
+    too_large_error,
+)
 from media_bot_v2.telegram import texts
 
 logger = logging.getLogger(__name__)
@@ -47,28 +56,8 @@ class InstagramDownloadError(Exception):
     """Raised with an already-classified, Hebrew, user-facing message."""
 
 
-class _DownloadTooLargeSignal(Exception):
-    """Raised from inside a yt-dlp progress hook to abort mid-download once
-    the reported total exceeds the configured cap - converted to
-    DownloadTooLargeError once it surfaces back in `_download_sync`."""
-
-    def __init__(self, file_size: float | str, max_size: float | None = None) -> None:
-        if isinstance(file_size, str):
-            match = re.search(r"(\d+)\s*bytes exceeds.*?(\d+)", file_size)
-            if match:
-                self.file_size = float(match.group(1))
-                self.max_size = float(match.group(2))
-            else:
-                self.file_size = 0.0
-                self.max_size = float(max_size) if max_size is not None else 0.0
-        else:
-            self.file_size = float(file_size)
-            self.max_size = float(max_size) if max_size is not None else 0.0
-        super().__init__(texts.format_download_too_large(self.file_size, self.max_size))
-
-
-class _DownloadCancelledSignal(Exception):
-    """Raised from inside a yt-dlp progress hook to abort download when cancelled."""
+_DownloadTooLargeSignal = DownloadTooLargeSignal
+_DownloadCancelledSignal = DownloadCancelledSignal
 
 
 def matches_instagram_url(url: str) -> bool:
@@ -176,7 +165,12 @@ _NETWORK_PATTERNS = (
 
 
 def classify_instagram_error(message: str | None) -> str:
-    """Translate yt-dlp / network error message to a precise Hebrew diagnostic."""
+    """Translate yt-dlp / network error message to a precise Hebrew diagnostic.
+
+    Whitelist only, like `classify_youtube_error`: the user sees a fixed message
+    and never any part of `message` (paths, hosts, IPs, tokens); the raw text
+    is logged instead.
+    """
     if not message:
         return "ההורדה נכשלה: לא התקבל קובץ מדיה מאינסטגרם."
     lowered = message.lower()
@@ -185,7 +179,8 @@ def classify_instagram_error(message: str | None) -> str:
             return hebrew
     if any(pattern in lowered for pattern in _NETWORK_PATTERNS):
         return texts.INSTAGRAM_NETWORK_ERROR
-    return f"ההורדה מאינסטגרם נכשלה: {message[:200]}"
+    logger.warning("Unclassified Instagram error (details withheld from user): %s", message)
+    return texts.INSTAGRAM_GENERIC_FAILURE
 
 
 def is_retryable_error(message: str | None) -> bool:
@@ -286,7 +281,7 @@ class InstagramEngine(BaseEngine):
         progress=None,
         cookies_file: str | None = None,
         force_ipv4: bool = False,
-        max_retries: int = 1,
+        max_retries: int = 0,
     ) -> None:
         self._max_download_size = max_download_size
         self._progress = progress
@@ -325,15 +320,18 @@ class InstagramEngine(BaseEngine):
         dest_dir: Path,
         loop: asyncio.AbstractEventLoop,
         cancel_token: CancellationToken | None = None,
+        guard: DownloadGuard | None = None,
     ) -> dict:
+        guard = guard or DownloadGuard(self._max_download_size, cancel_token)
         opts: dict = {
             "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
             "quiet": True,
             "no_warnings": True,
-            "progress_hooks": [self._make_progress_hook(loop, cancel_token)],
-            "max_filesize": self._max_download_size,
-            "retries": 2,
-            "fragment_retries": 2,
+            "noprogress": True,
+            "progress_hooks": [self._make_progress_hook(loop, cancel_token, guard)],
+            "match_filter": guard.match_filter(),
+            "retries": TRANSPORT_RETRIES,
+            "fragment_retries": TRANSPORT_RETRIES,
             "noplaylist": True,
         }
         if self._force_ipv4:
@@ -355,16 +353,13 @@ class InstagramEngine(BaseEngine):
         self,
         loop: asyncio.AbstractEventLoop,
         cancel_token: CancellationToken | None = None,
+        guard: DownloadGuard | None = None,
     ):
         state = {"last_forward": 0.0}
+        guard = guard or DownloadGuard(self._max_download_size, cancel_token)
 
         def hook(d: dict) -> None:
-            if cancel_token is not None and cancel_token.is_set():
-                raise _DownloadCancelledSignal("Download cancelled by timeout budget")
-            if d.get("status") == "downloading":
-                total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-                if total and total > self._max_download_size:
-                    raise _DownloadTooLargeSignal(total, self._max_download_size)
+            guard.check(d)
             if self._progress is None:
                 return
             text = format_progress_text(d)
@@ -384,63 +379,60 @@ class InstagramEngine(BaseEngine):
         loop: asyncio.AbstractEventLoop,
         cancel_token: CancellationToken | None = None,
     ) -> DownloadResult:
-        ydl_opts = self._build_ydl_opts(dest_dir, loop, cancel_token)
+        guard = DownloadGuard(self._max_download_size, cancel_token)
+        ydl_opts = self._build_ydl_opts(dest_dir, loop, cancel_token, guard)
         last_message: str | None = None
-        for attempt in range(self._max_retries + 1):
-            if cancel_token is not None and cancel_token.is_set():
-                return DownloadResult(file_paths=[])
-            try:
-                with yt_dlp.YoutubeDL(ydl_opts) as ydl:
-                    info = ydl.extract_info(url, download=True)
-                return _result_from_info(info, dest_dir)
-            except _DownloadCancelledSignal:
-                logger.info("Instagram download cancelled by timeout budget")
-                return DownloadResult(file_paths=[])
-            except _DownloadTooLargeSignal as exc:
-                raise DownloadTooLargeError(
-                    texts.format_download_too_large(exc.file_size, exc.max_size),
-                    file_size=exc.file_size,
-                    max_size=exc.max_size,
-                ) from exc
-            except yt_dlp.utils.DownloadError as exc:
-                if isinstance(exc.__cause__, _DownloadCancelledSignal):
+        try:
+            for attempt in range(self._max_retries + 1):
+                if cancel_token is not None and cancel_token.is_set():
+                    return DownloadResult(file_paths=[])
+                try:
+                    with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                        info = ydl.extract_info(url, download=True)
+                    remove_partial_files(dest_dir)
+                    try:
+                        return _result_from_info(info, dest_dir)
+                    except InstagramDownloadError:
+                        if guard.oversize:
+                            raise too_large_error(guard.oversize[0]) from None
+                        raise
+                except DownloadCancelledSignal:
                     logger.info("Instagram download cancelled by timeout budget")
                     return DownloadResult(file_paths=[])
-                if isinstance(exc.__cause__, _DownloadTooLargeSignal):
-                    sig = exc.__cause__
-                    raise DownloadTooLargeError(
-                        texts.format_download_too_large(sig.file_size, sig.max_size),
-                        file_size=sig.file_size,
-                        max_size=sig.max_size,
-                    ) from exc
-                last_message = str(exc)
-                if "larger than max-filesize" in last_message.lower():
-                    raise DownloadTooLargeError(
-                        texts.format_download_too_large(self._max_download_size, self._max_download_size),
-                        max_size=self._max_download_size,
-                    ) from exc
-                if attempt < self._max_retries and is_retryable_error(last_message):
-                    logger.warning(
-                        "Retrying Instagram download (attempt %s/%s) for %s: %s",
-                        attempt + 1,
-                        self._max_retries,
-                        url,
-                        last_message,
-                    )
-                    time.sleep(min(2**attempt, 4))
-                    continue
-                raise InstagramDownloadError(classify_instagram_error(last_message)) from exc
-            except Exception as exc:
-                last_message = str(exc)
-                if attempt < self._max_retries and is_retryable_error(last_message):
-                    logger.warning(
-                        "Retrying Instagram download on generic error (attempt %s/%s) for %s: %s",
-                        attempt + 1,
-                        self._max_retries,
-                        url,
-                        last_message,
-                    )
-                    time.sleep(min(2**attempt, 4))
-                    continue
-                raise InstagramDownloadError(classify_instagram_error(last_message)) from exc
-        raise InstagramDownloadError(classify_instagram_error(last_message))
+                except DownloadTooLargeSignal as exc:
+                    raise too_large_error(exc) from exc
+                except yt_dlp.utils.DownloadError as exc:
+                    if isinstance(exc.__cause__, DownloadCancelledSignal):
+                        logger.info("Instagram download cancelled by timeout budget")
+                        return DownloadResult(file_paths=[])
+                    if isinstance(exc.__cause__, DownloadTooLargeSignal):
+                        raise too_large_error(exc.__cause__) from exc
+                    if guard.oversize:
+                        raise too_large_error(guard.oversize[0]) from exc
+                    last_message = str(exc)
+                    if attempt < self._max_retries and is_retryable_error(last_message):
+                        self._log_retry(attempt, url, last_message)
+                        time.sleep(min(2**attempt, 4))
+                        continue
+                    raise InstagramDownloadError(classify_instagram_error(last_message)) from exc
+                except (InstagramDownloadError, DownloadTooLargeError):
+                    raise
+                except Exception as exc:
+                    last_message = str(exc)
+                    if attempt < self._max_retries and is_retryable_error(last_message):
+                        self._log_retry(attempt, url, last_message)
+                        time.sleep(min(2**attempt, 4))
+                        continue
+                    raise InstagramDownloadError(classify_instagram_error(last_message)) from exc
+            raise InstagramDownloadError(classify_instagram_error(last_message))
+        finally:
+            remove_partial_files(dest_dir)
+
+    def _log_retry(self, attempt: int, url: str, message: str) -> None:
+        logger.warning(
+            "Retrying Instagram download (attempt %s/%s) for %s: %s",
+            attempt + 1,
+            self._max_retries,
+            url,
+            message,
+        )

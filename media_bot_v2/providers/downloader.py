@@ -9,7 +9,17 @@ from urllib.parse import unquote, urlparse
 
 import requests
 
-from media_bot_v2.engines.base import CancellationToken, DownloadResult, DownloadTooLargeError
+from media_bot_v2.engines.base import (
+    CancellationToken,
+    DownloadResult,
+    DownloadTooLargeError,
+    NotMediaContentError,
+)
+from media_bot_v2.engines.content_check import (
+    SNIFF_BYTES,
+    reject_if_not_media_body,
+    reject_if_not_media_content_type,
+)
 from media_bot_v2.providers.base import ProviderResult
 from media_bot_v2.telegram import texts
 
@@ -84,6 +94,7 @@ def _stream_url_to_file(
 
     with requests.get(url, stream=True, timeout=timeout, headers=req_headers) as response:
         response.raise_for_status()
+        reject_if_not_media_content_type(response)
         if cancel_token is not None:
             if cancel_token.is_set():
                 response.close()
@@ -107,6 +118,7 @@ def _stream_url_to_file(
                     pass
 
         total_bytes = 0
+        head = b""
         try:
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
@@ -115,6 +127,10 @@ def _stream_url_to_file(
                         break
                     if not chunk:
                         continue
+                    if len(head) < SNIFF_BYTES:
+                        head += chunk[: SNIFF_BYTES - len(head)]
+                        if len(head) >= SNIFF_BYTES:
+                            reject_if_not_media_body(head)
                     total_bytes += len(chunk)
                     if max_size is not None and downloaded_so_far + total_bytes > max_size:
                         raise DownloadTooLargeError(
@@ -124,7 +140,13 @@ def _stream_url_to_file(
                             url=url,
                         )
                     f.write(chunk)
-        except DownloadTooLargeError:
+            if cancel_token is not None and cancel_token.is_set():
+                # Cancelled mid-stream: a truncated file must not survive as a result.
+                dest_path.unlink(missing_ok=True)
+                return 0
+            if 0 < len(head) < SNIFF_BYTES:
+                reject_if_not_media_body(head)
+        except (DownloadTooLargeError, NotMediaContentError):
             dest_path.unlink(missing_ok=True)
             raise
         except Exception:
@@ -164,6 +186,8 @@ async def download_provider_media(
             downloaded_so_far=total_downloaded,
             cancel_token=cancel_token,
         )
+        if cancel_token is not None and cancel_token.is_set():
+            break
         total_downloaded += bytes_written
         downloaded_paths.append(str(dest_path))
 

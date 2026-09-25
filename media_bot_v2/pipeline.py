@@ -1,26 +1,31 @@
 """End-to-end download pipeline: check quota -> download -> split -> upload
 -> archive forward -> charge credits -> delete local files.
 
-Credit-charging decision (fixes spec/INVENTORY.md section 2's flagged bug):
-credits are deducted only after every part of a download has been
-successfully uploaded. The old bot charged credits *before* the ffmpeg
-split+upload for large videos (src/engine/base.py:976), so a send that
-failed after a successful split still cost the user credits, with no refund
-path anywhere in that codebase.
+Credit charging (this describes what the code does today; the pricing model
+itself is an owner decision and was NOT touched in M4.2):
 
-Charge-after-success was chosen over charge-then-refund-on-failure because
-it needs exactly one accounting write, gated on total success - there is
-never a window where a user has been charged and no file was delivered. A
-refund-on-failure design needs a second write (the refund) to itself
-succeed for the accounting to stay correct, which is one more failure mode
-for no real benefit here.
+* Credits are charged per *delivered part*, not per request. Right after each
+  part is uploaded successfully, `use_quota_dynamic(user, part_size)` deducts
+  `max(1, ceil(part_MB / 200))` credits and bandwidth is recorded. A file
+  that gets split into 3 parts therefore costs at least 3 credits, and every
+  file of a playlist is charged the same way. The old bot charged one credit
+  per request, so this is a pricing change from the legacy behaviour.
+* Nothing is charged up front, and nothing is charged for a part that was not
+  delivered. If part 2 of 3 fails to upload, part 1 stays charged (the user
+  received it), parts 2-3 are not, and the request errors out.
+* A cache hit re-forwards the archived messages and charges 0 credits.
+
+Cache writes are all-or-nothing: an archive-cache entry is stored only after
+every part of the result was uploaded and forwarded to the archive, and only
+if the result is not a trimmed playlist. A partial delivery is never cached,
+because a later identical request would otherwise be served the partial set
+from cache and told "done" without the download ever running again.
 
 Every failure path (download error, split error, upload error, or the
 pipeline being interrupted) is caught by the single try/except/finally
-below: no credits are deducted, the user sees one error message (via the
-same progress message used for status updates), and every file this run
-wrote to disk - including split parts and the original pre-split download -
-is deleted.
+below: the user sees one error message (via the same progress message used
+for status updates), and every file this run wrote to disk - including split
+parts and the original pre-split download - is deleted.
 """
 
 from __future__ import annotations
@@ -145,9 +150,10 @@ class DownloadPipeline:
             for raw_path in result.file_paths:
                 parts.extend(splitter.split_file(Path(raw_path)))
 
-            # 3. Upload phase under upload_timeout, charging & caching per delivered part
+            # 3. Upload phase under upload_timeout, charging per delivered part; cache only a complete result
             await progress.update(texts.UPLOADING)
             archived_message_ids: list[int] = []
+            all_parts_archived = True
             for index, part in enumerate(parts, start=1):
                 caption = result.title if len(parts) == 1 else f"{result.title} ({index}/{len(parts)})"
                 up_timeout_ctx = (
@@ -177,23 +183,30 @@ class DownloadPipeline:
 
                 if forwarded is not None:
                     archived_message_ids.append(forwarded.id)
-                    if (
-                        cache is not None
-                        and cache_key is not None
-                        and archive_channel is not None
-                    ):
-                        cache.put(
-                            cache_key,
-                            archive_chat=archive_channel,
-                            message_ids=archived_message_ids,
-                            title=result.title,
-                        )
+                else:
+                    all_parts_archived = False
 
-            if (
+            trimmed = (
                 result.playlist_total is not None
                 and result.playlist_downloaded is not None
                 and result.playlist_downloaded < result.playlist_total
+            )
+            if (
+                cache is not None
+                and cache_key is not None
+                and archive_channel is not None
+                and parts
+                and all_parts_archived
+                and not trimmed
             ):
+                cache.put(
+                    cache_key,
+                    archive_chat=archive_channel,
+                    message_ids=archived_message_ids,
+                    title=result.title,
+                )
+
+            if trimmed:
                 await progress.update(
                     texts.format_playlist_trimmed(
                         result.playlist_downloaded,

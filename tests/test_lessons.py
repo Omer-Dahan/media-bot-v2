@@ -21,6 +21,7 @@ from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
+import yt_dlp
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
@@ -35,6 +36,7 @@ from media_bot_v2.engines.base import (
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.engines.instagram import InstagramDownloadError, InstagramEngine
 from media_bot_v2.engines.tiktok import (
     TikTokDownloadError,
     TikTokEngine,
@@ -44,7 +46,6 @@ from media_bot_v2.engines.youtube import (
     YouTubeDownloadError,
     YouTubeEngine,
     _DownloadCancelledSignal,
-    _DownloadTooLargeSignal,
     _result_from_info,
     classify_youtube_error,
     matches_youtube_url,
@@ -457,6 +458,7 @@ class _SlowStreamingSource:
         self.chunk_size = chunk_size
         self.bytes_sent = 0
         self.closed = False
+        self.exited = False
         self._lock = threading.Lock()
 
     def iter_content(self, chunk_size: int | None = None):
@@ -490,7 +492,10 @@ class _SlowStreamingSource:
         return self
 
     def __exit__(self, *args):
-        self.close()
+        # Unlike requests.Response, leaving the `with` block does NOT mark the
+        # source closed: `closed` only turns True if the cancellation path
+        # itself closed the connection.
+        self.exited = True
 
 
 async def test_lesson8_active_transfer_actually_stops_on_timeout_with_byte_counter(tmp_path):
@@ -510,6 +515,12 @@ async def test_lesson8_active_transfer_actually_stops_on_timeout_with_byte_count
     source = _SlowStreamingSource(total_bytes=20 * 1024 * 1024)
 
     with (
+        # No real network: the preflight HEAD is stubbed to fail (the engine
+        # then proceeds to the GET, as it does for servers that reject HEAD).
+        patch(
+            "media_bot_v2.engines.direct.requests.head",
+            side_effect=ConnectionError("offline"),
+        ) as mock_head,
         patch("media_bot_v2.engines.direct.requests.get", return_value=source),
         pytest.raises(TimeoutError),
     ):
@@ -521,9 +532,12 @@ async def test_lesson8_active_transfer_actually_stops_on_timeout_with_byte_count
             progress=progress,
         )
 
-    # Transfer was stopped far before transferring all 20MB
+    mock_head.assert_called_once()
+
+    # Transfer was stopped far before transferring all 20MB, and it was the
+    # cancellation path (not the context manager exiting) that closed the source.
     bytes_at_stop = source.bytes_sent
-    assert bytes_at_stop < 20 * 1024 * 1024
+    assert 0 < bytes_at_stop < 20 * 1024 * 1024
     assert source.closed is True
 
     # Confirm thread has actually stopped transferring: wait and verify byte counter is frozen
@@ -577,14 +591,35 @@ def test_m4_1_finding2_summarize_ytdlp_failure_preserves_english_and_handles_heb
     assert summarize_ytdlp_failure(err3) == "סרטון דורש התחברות או אימות"
 
 
-def test_m4_1_finding3_youtube_oversized_uses_exact_hebrew_and_real_limit():
-    """Finding 3: oversized file error in YouTube uses unified Hebrew message and real limit."""
-    sig = _DownloadTooLargeSignal(5368709120, 2147483648)
-    msg = str(sig)
-    assert "5.0GB" in msg
-    assert "2.0GB" in msg
+async def test_m4_1_finding3_youtube_oversized_uses_exact_hebrew_and_real_limit(tmp_path):
+    """Finding 3: a download that crosses the cap mid-stream (no declared total)
+    surfaces the unified Hebrew message with the detected size and real limit.
+    (tests/test_m4_2.py repeats this against real yt-dlp and a local server.)"""
+
+    class _StreamingYDL:
+        def __init__(self, opts):
+            self.opts = opts
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=True):
+            for downloaded in range(1_000_000, 6_000_000, 1_000_000):
+                for hook in self.opts["progress_hooks"]:
+                    hook({"status": "downloading", "downloaded_bytes": downloaded})
+            return {"id": "x", "requested_downloads": [{"filepath": str(tmp_path / "x.mp4")}]}
+
+    engine = YouTubeEngine(quality="720", max_download_size=2 * 1024 * 1024)
+    with patch("yt_dlp.YoutubeDL", _StreamingYDL), pytest.raises(DownloadTooLargeError) as exc_info:
+        await engine.download("https://youtu.be/abc12345678", dest_dir=tmp_path)
+    msg = str(exc_info.value)
     assert "הקובץ גדול מדי" in msg
-    assert "5368709120 bytes exceeds" not in msg
+    assert "2.0MB" in msg  # the configured limit
+    assert "2.9MB" in msg  # first hook call past the limit: 3,000,000 bytes
+    assert "bytes exceeds" not in msg
 
 
 def test_m4_1_finding4_no_internal_path_or_host_leak_in_error_messages():
@@ -629,14 +664,40 @@ def test_m4_1_finding5_host_only_matching_rejects_query_and_prefix_spoofs():
     assert matches_youtube_url("https://m.youtube.com/watch?v=123") is True
 
 
-def test_m4_1_finding6_local_route_default_max_retries_is_zero():
-    """Finding 6: local YouTube route is attempted at most once (max_retries=0)."""
-    engine = YouTubeEngine(quality="720", max_download_size=1000)
-    assert engine._max_retries == 0
+async def test_m4_1_finding6_local_route_is_attempted_once(tmp_path):
+    """Finding 6: a transient failure on the local route is attempted exactly once
+    by default, for both yt-dlp engines (checked by counting real calls)."""
+    class _FailingYDL:
+        calls = 0
+
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *a):
+            return False
+
+        def extract_info(self, url, download=True):
+            type(self).calls += 1
+            raise yt_dlp.utils.DownloadError("Connection reset by peer")
+
+    with patch("yt_dlp.YoutubeDL", _FailingYDL), pytest.raises(YouTubeDownloadError):
+        await YouTubeEngine(quality="720", max_download_size=1000).download(
+            "https://youtu.be/abc12345678", dest_dir=tmp_path
+        )
+    assert _FailingYDL.calls == 1
+
+    with patch("yt_dlp.YoutubeDL", _FailingYDL), pytest.raises(InstagramDownloadError):
+        await InstagramEngine(max_download_size=1000).download(
+            "https://www.instagram.com/reel/abc/", dest_dir=tmp_path
+        )
+    assert _FailingYDL.calls == 2  # exactly one more call, not two
 
 
-async def test_m4_1_finding7_multipart_upload_failure_charges_and_caches_delivered_part(tmp_path):
-    """Finding 7: multi-part upload failure charges and caches parts that were delivered."""
+async def test_m4_1_finding7_multipart_upload_failure_charges_delivered_part_only(tmp_path):
+    """Finding 7: multi-part upload failure charges the delivered part and caches nothing."""
     session_factory, credits_service, _ = _setup_test_db()
     cache_store = VideoCacheStore(session_factory)
     pipeline = DownloadPipeline(
@@ -691,10 +752,9 @@ async def test_m4_1_finding7_multipart_upload_failure_charges_and_caches_deliver
         assert user.free == 4  # 5 - 1 = 4
         assert user.bandwidth_used == 1000
 
-    # Part 1 was cached
-    cached = cache_store.get(cache_key)
-    assert cached is not None
-    assert len(cached.message_ids) == 1
+    # A partial delivery is never cached (M4.2): a repeat request must not be
+    # served the delivered subset from cache and told "done".
+    assert cache_store.get(cache_key) is None
 
 
 async def test_m4_1_finding8_foreign_timeout_error_reports_download_failed_not_budget(tmp_path):

@@ -28,6 +28,11 @@ from media_bot_v2.engines.base import (
     DownloadTooLargeError,
     UnsupportedUrlError,
 )
+from media_bot_v2.engines.content_check import (
+    SNIFF_BYTES,
+    reject_if_not_media_body,
+    reject_if_not_media_content_type,
+)
 from media_bot_v2.telegram import texts
 
 logger = logging.getLogger(__name__)
@@ -92,12 +97,6 @@ def _filename_from_url(url: str) -> str:
     return unquote(name) or "download.bin"
 
 
-def _reject_if_html(response: requests.Response, url: str) -> None:
-    content_type = response.headers.get("Content-Type", "").split(";")[0].strip().lower()
-    if content_type in ("text/html", "application/xhtml+xml"):
-        raise UnsupportedUrlError("קישור זה מפנה לדף אינטרנט (HTML) ולא לקובץ מדיה או הורדה ישירה.")
-
-
 def _preflight_and_stream_to_file(
     url: str,
     dest_path: Path,
@@ -107,7 +106,7 @@ def _preflight_and_stream_to_file(
     try:
         with requests.head(url, allow_redirects=True, timeout=10) as head_resp:
             if head_resp.status_code < 400:
-                _reject_if_html(head_resp, url)
+                reject_if_not_media_content_type(head_resp)
                 _reject_if_declared_size_too_large(head_resp, url, max_size)
     except (DownloadTooLargeError, UnsupportedUrlError):
         raise
@@ -125,7 +124,7 @@ def _stream_to_file(
 ) -> None:
     with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
-        _reject_if_html(response, url)
+        reject_if_not_media_content_type(response)
         _reject_if_declared_size_too_large(response, url, max_size)
         if cancel_token is not None:
             if cancel_token.is_set():
@@ -133,6 +132,7 @@ def _stream_to_file(
                 return
             cancel_token.on_cancel(response.close)
         total = 0
+        head = b""
         try:
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
@@ -141,8 +141,12 @@ def _stream_to_file(
                         break
                     if not chunk:
                         continue
-                    if total == 0 and chunk.lstrip().lower().startswith((b"<!doctype html", b"<html")):
-                        raise UnsupportedUrlError("קישור זה מפנה לדף אינטרנט (HTML) ולא לקובץ מדיה או הורדה ישירה.")
+                    # Sniff once enough bytes have arrived (a first chunk can be
+                    # tiny); the tail of a short body is checked after the loop.
+                    if len(head) < SNIFF_BYTES:
+                        head += chunk[: SNIFF_BYTES - len(head)]
+                        if len(head) >= SNIFF_BYTES:
+                            reject_if_not_media_body(head)
                     total += len(chunk)
                     if max_size is not None and total > max_size:
                         raise DownloadTooLargeError(
@@ -152,12 +156,18 @@ def _stream_to_file(
                             url=url,
                         )
                     f.write(chunk)
+            if cancel_token is not None and cancel_token.is_set():
+                # Cancelled mid-stream: what is on disk is a truncated file, not a result.
+                dest_path.unlink(missing_ok=True)
+                return
+            if 0 < len(head) < SNIFF_BYTES:
+                reject_if_not_media_body(head)
         except (DownloadTooLargeError, UnsupportedUrlError):
             dest_path.unlink(missing_ok=True)
             raise
         except Exception:
+            dest_path.unlink(missing_ok=True)
             if cancel_token is not None and cancel_token.is_set():
-                dest_path.unlink(missing_ok=True)
                 return
             raise
 

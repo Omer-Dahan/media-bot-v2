@@ -18,10 +18,17 @@ from media_bot_v2.engines.base import (
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.youtube import (
-    _DownloadCancelledSignal,
     _result_from_info,
     summarize_provider_failure,
     summarize_ytdlp_failure,
+)
+from media_bot_v2.engines.ytdlp_support import (
+    TRANSPORT_RETRIES,
+    DownloadCancelledSignal,
+    DownloadGuard,
+    DownloadTooLargeSignal,
+    remove_partial_files,
+    too_large_error,
 )
 from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.providers.health import ProviderHealthTracker
@@ -143,17 +150,17 @@ class TikTokEngine(BaseEngine):
         if cancel_token is not None and cancel_token.is_set():
             return DownloadResult(file_paths=[])
 
-        def hook(d: dict) -> None:
-            if cancel_token is not None and cancel_token.is_set():
-                raise _DownloadCancelledSignal("Download cancelled by timeout budget")
-
+        guard = DownloadGuard(self._max_download_size, cancel_token)
         ydl_opts = {
             "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
-            "max_filesize": self._max_download_size,
             "quiet": True,
             "no_warnings": True,
+            "noprogress": True,
             "noplaylist": True,
-            "progress_hooks": [hook],
+            "progress_hooks": [guard.check],
+            "match_filter": guard.match_filter(),
+            "retries": TRANSPORT_RETRIES,
+            "fragment_retries": TRANSPORT_RETRIES,
         }
         if self._cookies_file:
             ydl_opts["cookiefile"] = self._cookies_file
@@ -161,12 +168,25 @@ class TikTokEngine(BaseEngine):
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(url, download=True)
+            try:
                 return _result_from_info(info)
-        except _DownloadCancelledSignal:
+            except Exception:
+                if guard.oversize:
+                    raise too_large_error(guard.oversize[0]) from None
+                raise
+        except DownloadCancelledSignal:
             logger.info("TikTok download cancelled by timeout budget")
             return DownloadResult(file_paths=[])
+        except DownloadTooLargeSignal as exc:
+            raise too_large_error(exc) from exc
         except yt_dlp.utils.DownloadError as exc:
-            if isinstance(exc.__cause__, _DownloadCancelledSignal):
+            if isinstance(exc.__cause__, DownloadCancelledSignal):
                 logger.info("TikTok download cancelled by timeout budget")
                 return DownloadResult(file_paths=[])
+            if isinstance(exc.__cause__, DownloadTooLargeSignal):
+                raise too_large_error(exc.__cause__) from exc
+            if guard.oversize:
+                raise too_large_error(guard.oversize[0]) from exc
             raise
+        finally:
+            remove_partial_files(dest_dir)

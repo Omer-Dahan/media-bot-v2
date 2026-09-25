@@ -84,6 +84,13 @@ class UnsupportedUrlError(Exception):
         super().__init__(message or texts.UNSUPPORTED_URL)
 
 
+class NotMediaContentError(UnsupportedUrlError):
+    """Raised when a response is an HTML/JSON/XML/plain-text body rather than media."""
+
+    def __init__(self, message: str | None = None) -> None:
+        super().__init__(message or texts.NOT_MEDIA_CONTENT)
+
+
 @dataclass
 class RouteAttempt:
     route_name: str

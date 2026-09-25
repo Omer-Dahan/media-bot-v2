@@ -95,6 +95,8 @@ INSTAGRAM_UNSUPPORTED_MEDIA = (
     "❌ סוג המדיה באינסטגרם אינו נתמך (למשל שידור חי או תוכן ללא מדיה נתמכת)."
 )
 INSTAGRAM_NETWORK_ERROR = "❌ שגיאת רשת בהורדה מאינסטגרם. נסה שוב בעוד מספר רגעים."
+INSTAGRAM_GENERIC_FAILURE = "ההורדה מאינסטגרם נכשלה. נסה שוב או שלח קישור אחר."
+YOUTUBE_GENERIC_FAILURE = "ההורדה מיוטיוב נכשלה. נסה שוב או שלח קישור אחר."
 
 DOWNLOAD_STARTED = "בקשת ההורדה התקבלה..."
 DOWNLOADING = "מוריד..."
@@ -116,6 +118,9 @@ PING_RESULT = "פינג: {ms} מילישניות"
 
 DIRECT_FILE_TOO_LARGE = "❌ הקובץ גדול מדי ({size}). מגבלת ההורדה המרבית היא {max_size}. טלגרם אינה תומכת בהעברת קבצים בגודל כזה."
 UNSUPPORTED_URL = "❌ סוג הקישור אינו נתמך. הבוט תומך ביוטיוב, טיקטוק, אינסטגרם וקישורי הורדה ישירה לקבצים."
+NOT_MEDIA_CONTENT = (
+    "קישור זה מפנה לדף אינטרנט או לתוכן טקסטואלי (HTML/JSON/XML) ולא לקובץ מדיה או הורדה ישירה."
+)
 REQUEST_TIMEOUT_EXCEEDED = "⏱️ הבקשה בוטלה עקב חריגה ממגבלת הזמן (timeout). נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
 
 
@@ -135,6 +140,19 @@ def format_download_too_large(file_size: float, max_size: float) -> str:
         size=human_size(file_size),
         max_size=human_size(max_size),
     )
+
+
+def format_playlist_trim_reason(*, skipped_for_credits: int, too_large: int, failed: int) -> str | None:
+    """Itemised reason for a trimmed playlist: what was never attempted because
+    of the credit cap, what exceeded the size limit, and what failed outright."""
+    parts: list[str] = []
+    if skipped_for_credits > 0:
+        parts.append(f"{skipped_for_credits} לא הורדו עקב מגבלת יתרת הקרדיטים")
+    if too_large > 0:
+        parts.append(f"{too_large} חרגו ממגבלת הגודל")
+    if failed > 0:
+        parts.append(f"{failed} אינם זמינים או נכשלו")
+    return ", ".join(parts) if parts else None
 
 
 def format_playlist_trimmed(downloaded: int, total: int, reason: str | None = None) -> str:

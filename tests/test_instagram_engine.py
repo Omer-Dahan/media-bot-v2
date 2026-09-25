@@ -199,7 +199,9 @@ def test_classify_instagram_error_empty_and_unknown():
 
     unknown_msg = "some totally novel error happened with post 123"
     classified = classify_instagram_error(unknown_msg)
-    assert unknown_msg in classified
+    # Whitelist: an unrecognised error never echoes its raw text to the user.
+    assert classified == texts.INSTAGRAM_GENERIC_FAILURE
+    assert unknown_msg not in classified
     # Ensure no misleading suggestions like "update yt-dlp"
     assert "yt-dlp" not in classified
 
@@ -263,7 +265,9 @@ def test_instagram_engine_ydl_opts_defaults(tmp_path: Path):
         engine = InstagramEngine(max_download_size=100 * 1024 * 1024)
         opts = engine._build_ydl_opts(tmp_path, loop)
 
-        assert opts["max_filesize"] == 100 * 1024 * 1024
+        # The cap is enforced by our own progress hook, not yt-dlp's max_filesize
+        # (which skips silently with a Content-Length and is ignored without one).
+        assert "max_filesize" not in opts
         assert opts["noplaylist"] is True
         assert opts["quiet"] is True
         assert "impersonate" in opts
