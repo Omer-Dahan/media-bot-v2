@@ -9,7 +9,8 @@ though yt-dlp's default merger stream-copies (`-c copy`, no re-encode) when
 the codecs allow it, skipping the merge entirely is strictly faster than
 running it. `build_format_selector` encodes this as a yt-dlp format-selector
 fallback chain: progressive-at-height, then split-then-merge-at-height,
-then whatever `best` resolves to.
+then whatever `best` resolves to. Every step prefers H.264/AAC (see
+`build_format_selector`) because that is what Telegram clients can stream.
 
 Error classification (`classify_youtube_error`) is a Hebrew-language port of
 the old bot's `classify_download_error` (src/engine/generic.py) - same
@@ -141,13 +142,21 @@ SUBTITLE_LANGS = ["en", "en-orig", "en-US", "en-GB"]
 
 
 def build_format_selector(quality: str) -> str:
+    """H.264 + AAC first. YouTube's unrestricted `bestvideo+bestaudio` resolves
+    to AV1/VP9 + Opus, which yt-dlp muxes into an `.mp4` that Telegram accepts
+    but Telegram clients (notably Plus Messenger) cannot play. The old bot
+    excluded those codecs for the same reason. The trailing unrestricted
+    fallbacks only matter when a video has no H.264 rendition at all; the
+    pipeline's `ensure_streamable` converts that result."""
     if quality == "audio":
         return "bestaudio/best"
     height = _QUALITY_HEIGHTS.get(quality)
     if height is None:
         raise ValueError(f"Unknown YouTube quality: {quality!r}")
     return (
-        f"best[vcodec!=none][acodec!=none][height<={height}]/"
+        f"best[vcodec^=avc][acodec^=mp4a][height<={height}]/"
+        f"bestvideo[vcodec^=avc][height<={height}]+bestaudio[acodec^=mp4a]/"
+        f"bestvideo[vcodec^=avc][height<={height}]+bestaudio/"
         f"bestvideo[height<={height}]+bestaudio/"
         "best"
     )

@@ -60,7 +60,7 @@ def probe(path: Path) -> MediaInfo:
                 "-v",
                 "error",
                 "-show_entries",
-                "format=duration:stream=codec_type,width,height:stream_disposition=attached_pic",
+                "format=duration:stream=codec_type,width,height:stream_tags=rotate:stream_side_data=rotation:stream_disposition=attached_pic",
                 "-of",
                 "json",
                 str(path),
@@ -85,12 +85,12 @@ def probe(path: Path) -> MediaInfo:
     duration = _to_int((data.get("format") or {}).get("duration"))
 
     if video is not None:
-        return MediaInfo(
-            kind=KIND_VIDEO,
-            duration=duration,
-            width=_to_int(video.get("width")),
-            height=_to_int(video.get("height")),
-        )
+        width, height = _to_int(video.get("width")), _to_int(video.get("height"))
+        if _quarter_turned(video):
+            # Phone footage is stored sideways with a rotation flag; the player
+            # (and Telegram's aspect ratio) use the displayed dimensions.
+            width, height = height, width
+        return MediaInfo(kind=KIND_VIDEO, duration=duration, width=width, height=height)
     if has_audio:
         return MediaInfo(kind=KIND_AUDIO, duration=duration)
     return MediaInfo()
@@ -144,6 +144,18 @@ def probe_with_thumb(path: Path) -> MediaInfo:
     if info.kind == KIND_VIDEO:
         return info.with_thumb(make_thumb(path, info.duration))
     return info
+
+
+def _quarter_turned(video: dict) -> bool:
+    rotations = [(video.get("tags") or {}).get("rotate")]
+    rotations += [side.get("rotation") for side in video.get("side_data_list") or []]
+    for value in rotations:
+        try:
+            if int(float(value)) % 180 == 90:  # type: ignore[arg-type]
+                return True
+        except (TypeError, ValueError):
+            continue
+    return False
 
 
 def _to_int(value: object) -> int:

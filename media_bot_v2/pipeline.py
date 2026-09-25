@@ -72,6 +72,7 @@ from media_bot_v2.telegram import captions, texts
 from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.upload import splitter
 from media_bot_v2.upload.media_probe import KIND_VIDEO, MediaInfo, probe, probe_with_thumb
+from media_bot_v2.upload.streamable import DEFAULT_FIX_TIMEOUT_SECONDS, ensure_streamable
 
 logger = logging.getLogger(__name__)
 
@@ -197,6 +198,13 @@ class DownloadPipeline:
                 source = Path(raw_path)
                 async with self._upload_budget() as cm:
                     up_cm = cm
+                    if not delivery.as_document:
+                        # "Send as file" delivers the bytes untouched; everything
+                        # sent as playable video must be H.264/AAC MP4 with the
+                        # moov up front or clients fail with IO_UNSPECIFIED.
+                        source = await asyncio.to_thread(
+                            ensure_streamable, source, timeout=self._fix_timeout()
+                        )
                     info = await asyncio.to_thread(probe_with_thumb, source)
                 parts = await asyncio.to_thread(splitter.split_file, source)
                 groups.append(_FileGroup(info=info, parts=parts))
@@ -392,6 +400,11 @@ class DownloadPipeline:
                 except Exception:
                     logger.exception("Failed to charge delivered parts for user=%s url=%s", user_id, url)
             self._cleanup(task_dir)
+
+    def _fix_timeout(self) -> float:
+        if self._upload_timeout and self._upload_timeout > 0:
+            return float(self._upload_timeout)
+        return DEFAULT_FIX_TIMEOUT_SECONDS
 
     def _upload_budget(self):
         if self._upload_timeout and self._upload_timeout > 0:

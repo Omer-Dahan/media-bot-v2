@@ -39,12 +39,23 @@ from media_bot_v2.telegram import texts
     "quality,expected_height",
     [("1080", 1080), ("720", 720), ("480", 480), ("360", 360)],
 )
-def test_build_format_selector_prefers_progressive_at_requested_height(quality, expected_height):
-    selector = build_format_selector(quality)
-    progressive, merge_fallback, best_fallback = selector.split("/")
-    assert progressive == f"best[vcodec!=none][acodec!=none][height<={expected_height}]"
-    assert merge_fallback == f"bestvideo[height<={expected_height}]+bestaudio"
-    assert best_fallback == "best"
+def test_build_format_selector_prefers_h264_aac_at_requested_height(quality, expected_height):
+    h = expected_height
+    assert build_format_selector(quality).split("/") == [
+        f"best[vcodec^=avc][acodec^=mp4a][height<={h}]",
+        f"bestvideo[vcodec^=avc][height<={h}]+bestaudio[acodec^=mp4a]",
+        f"bestvideo[vcodec^=avc][height<={h}]+bestaudio",
+        f"bestvideo[height<={h}]+bestaudio",
+        "best",
+    ]
+
+
+@pytest.mark.parametrize("quality", ["1080", "720", "480", "360"])
+def test_build_format_selector_never_starts_with_an_unrestricted_pick(quality):
+    """The regression behind "cannot play this video": the first choices must
+    be H.264/AAC-only, so AV1/VP9/Opus are only reached when nothing else exists."""
+    first_three = build_format_selector(quality).split("/")[:3]
+    assert all("vcodec^=avc" in choice for choice in first_three)
 
 
 def test_build_format_selector_audio_only():
