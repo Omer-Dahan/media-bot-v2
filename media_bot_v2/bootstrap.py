@@ -72,6 +72,7 @@ def main() -> None:
         free_download=settings.free_download,
         pipeline=pipeline,
         archive_channel=settings.archive_channel,
+        upload_workers=settings.upload_workers,
         max_download_size=settings.max_download_size,
         limiter=limiter,
         force_ipv4=settings.force_ipv4,

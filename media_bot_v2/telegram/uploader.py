@@ -35,6 +35,7 @@ from telethon.errors import (
 from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
 
 from media_bot_v2.telegram.captions import subtitle_caption
+from media_bot_v2.telegram.parallel_upload import ProgressCallback, upload_file_parallel
 from media_bot_v2.upload.media_probe import KIND_AUDIO, KIND_PHOTO, KIND_VIDEO, MediaInfo
 
 logger = logging.getLogger(__name__)
@@ -46,8 +47,11 @@ _MEDIA_REJECTED = (MediaInvalidError, VideoContentTypeInvalidError, MediaEmptyEr
 
 
 class TelethonUploader:
-    def __init__(self, client: TelegramClient, *, chat_id: int, archive_channel: str | None) -> None:
+    def __init__(
+        self, client: TelegramClient, *, chat_id: int, archive_channel: str | None, workers: int = 1
+    ) -> None:
         self._client = client
+        self._workers = workers
         self._chat_id = chat_id
         self._archive_channel = archive_channel
 
@@ -59,19 +63,31 @@ class TelethonUploader:
         media: MediaInfo | None = None,
         as_document: bool = False,
         title: str | None = None,
+        progress: ProgressCallback | None = None,
     ) -> Any:
         info = media or MediaInfo()
         # Photos are always sent as photos, whatever the "send as" setting.
         as_document = as_document and info.kind != KIND_PHOTO
         kwargs = self._send_kwargs(info, caption=caption, as_document=as_document, title=title)
+        source = await self._source(path, info, progress)
         try:
-            return await self._client.send_file(self._chat_id, str(path), **kwargs)
+            return await self._client.send_file(self._chat_id, source, **kwargs)
         except _MEDIA_REJECTED:
             if as_document:
                 raise
             logger.warning("Telegram rejected %s as %s, retrying once as a document", path.name, info.kind)
             fallback = self._send_kwargs(info, caption=caption, as_document=True, title=title)
-            return await self._client.send_file(self._chat_id, str(path), **fallback)
+            return await self._client.send_file(self._chat_id, source, **fallback)
+
+    async def _source(self, path: Path, info: MediaInfo, progress: ProgressCallback | None) -> Any:
+        """What to hand to `client.send_file`: the plain path (Telethon uploads it
+        sequentially) or, with several workers, an already-uploaded handle.
+        The handle is reused for the "retry as a document" send, so a rejected
+        video is not uploaded twice. Photos keep the path: Telethon resizes
+        oversized photos itself, and they are far too small to gain anything."""
+        if self._workers <= 1 or info.kind == KIND_PHOTO:
+            return str(path)
+        return await upload_file_parallel(self._client, path, workers=self._workers, progress=progress)
 
     @staticmethod
     def _send_kwargs(info: MediaInfo, *, caption: str | None, as_document: bool, title: str | None) -> dict:

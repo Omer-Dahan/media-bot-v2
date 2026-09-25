@@ -107,6 +107,9 @@ class Settings(BaseSettings):
     # --- Request timeout budget ---
     request_timeout: float = Field(default=600.0, validation_alias="REQUEST_TIMEOUT")
     upload_timeout: float = Field(default=600.0, validation_alias="UPLOAD_TIMEOUT")
+    # Parallel upload lanes per file (1..5). Above 5 is clamped to 5; below 1 is
+    # an error. More lanes upload faster but raise the FLOOD_WAIT risk.
+    upload_workers: int = Field(default=5, validation_alias="UPLOAD_WORKERS")
     # Budget for making a video Telegram-playable (ffmpeg). Separate from, and
     # smaller than, the upload budget; on expiry the original file is sent.
     convert_timeout: float = Field(default=180.0, validation_alias="CONVERT_TIMEOUT")
@@ -114,6 +117,13 @@ class Settings(BaseSettings):
     # --- Download limits (not user-configurable, kept as constants for clarity) ---
     tg_normal_max_size: int = 2000 * 1024 * 1024
     max_download_size: int = 4 * 1024 * 1024 * 1024
+
+    @field_validator("upload_workers")
+    @classmethod
+    def _clamp_upload_workers(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"UPLOAD_WORKERS must be between 1 and 5 (got {value})")
+        return min(value, 5)
 
     @field_validator("session_name")
     @classmethod

@@ -109,6 +109,7 @@ def register_handlers(
     free_download: int,
     pipeline: DownloadPipeline,
     archive_channel: str | None,
+    upload_workers: int = 1,
     max_download_size: int,
     limiter: ConcurrencyLimiter | None = None,
     force_ipv4: bool = False,
@@ -273,7 +274,9 @@ def register_handlers(
         if message is None:
             message = await event.respond(status_text)
         progress = MessageProgressReporter(message)
-        uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+        uploader = TelethonUploader(
+            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+        )
 
         try:
             is_playlist = is_playlist_url(url)
@@ -355,7 +358,9 @@ def register_handlers(
         if _host_matches(url, TIKTOK_HOSTS):
             message = await event.respond(texts.DOWNLOAD_STARTED)
             progress = MessageProgressReporter(message)
-            uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+            uploader = TelethonUploader(
+            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+        )
 
             async def on_wait() -> None:
                 await progress.update(texts.YOUTUBE_QUEUE_WAIT)
@@ -397,7 +402,9 @@ def register_handlers(
 
             message = await event.respond(texts.DOWNLOAD_STARTED)
             progress = MessageProgressReporter(message)
-            uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+            uploader = TelethonUploader(
+            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+        )
 
             async def on_wait() -> None:
                 await progress.update(texts.YOUTUBE_QUEUE_WAIT)
@@ -438,7 +445,9 @@ def register_handlers(
 
         message = await event.respond(texts.DOWNLOAD_STARTED)
         progress = MessageProgressReporter(message)
-        uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
+        uploader = TelethonUploader(
+            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+        )
 
         async def on_wait() -> None:
             await progress.update(texts.YOUTUBE_QUEUE_WAIT)

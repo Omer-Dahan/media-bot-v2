@@ -150,6 +150,18 @@ first deployment:
   by volume, `max(1, ceil(total_delivered_MB / MB_PER_CREDIT))` per request.
   200MB -> 1, 400MB -> 2, 5GB -> 26. Change it (e.g. `100`) here, no code
   change needed; restart the service to apply. Must be a positive integer.
+- `UPLOAD_WORKERS` (default `5`, range `1..5`): how many parts of one file are
+  uploaded to Telegram at the same time. Telegram limits bandwidth per
+  connection stream, so several parallel parts make large uploads much
+  faster (Telethon's own `upload_file` has no such option and sends parts one
+  by one, so `media_bot_v2/telegram/parallel_upload.py` does it). Values above
+  5 are clamped to 5; below 1 the bot refuses to start. `1` = the old
+  sequential behaviour. **Warning:** more lanes means more requests per
+  second and a higher `FLOOD_WAIT` risk. A flood wait retries only the part
+  that hit it; repeated ones automatically drop the lanes (5 -> 2 -> 1) and
+  the upload continues. If you still see `Flood wait` warnings in the log,
+  lower this value. The real speed-up depends on your server's bandwidth
+  and Telegram's limits for the account/DC.
 - `YOUTUBE_COOKIES_FILE` / `TIKTOK_COOKIES_FILE`: paths to cookie files, if
   you use them (never commit these files).
 - `TIKTOK_PROVIDERS` / `YOUTUBE_PROVIDERS` / `DISABLED_PROVIDERS`: provider

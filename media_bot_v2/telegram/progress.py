@@ -22,6 +22,7 @@ message is exactly as harmless to the already-completed transfer as an
 from __future__ import annotations
 
 import logging
+import time
 
 from telethon.errors import MessageNotModifiedError, RPCError
 
@@ -49,3 +50,50 @@ class MessageProgressReporter:
             pass  # content unchanged from Telegram's point of view - nothing to surface
         except (RPCError, ConnectionError, TimeoutError, OSError):
             logger.warning("Failed to edit progress message to %r", text, exc_info=True)
+
+
+class UploadProgress:
+    """Turns byte counts from the parallel upload lanes into a few progress edits.
+
+    Lanes report concurrently and out of order, so the shown percentage is
+    the highest one seen (never goes back, even when a part is retried), is
+    capped at 100, and an edit is made only when it moved by `min_step`
+    points and `min_interval` seconds passed - at most 100/min_step + 1
+    edits per request. Bytes are summed over every part of the request, so a
+    split file shows one 0-100% run rather than restarting per part.
+    """
+
+    def __init__(
+        self,
+        reporter,
+        label: str,
+        total: int,
+        *,
+        min_step: int = 5,
+        min_interval: float = 3.0,
+        clock=time.monotonic,
+    ) -> None:
+        self._reporter = reporter
+        self._label = label
+        self._total = max(total, 1)
+        self._min_step = min_step
+        self._min_interval = min_interval
+        self._clock = clock
+        self._base = 0
+        self._shown = 0
+        self._shown_at = float("-inf")
+
+    def start_part(self, bytes_done_before: int) -> None:
+        self._base = bytes_done_before
+
+    async def __call__(self, done: int, _part_total: int) -> None:
+        percent = min(100, (self._base + done) * 100 // self._total)
+        if percent <= self._shown:
+            return
+        now = self._clock()
+        finished = percent == 100
+        if not finished and (percent - self._shown < self._min_step or now - self._shown_at < self._min_interval):
+            return
+        self._shown = percent
+        self._shown_at = now
+        await self._reporter.update(f"{self._label} {percent}%")

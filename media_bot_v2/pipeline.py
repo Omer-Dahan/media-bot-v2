@@ -47,6 +47,7 @@ import inspect
 import logging
 import shutil
 import uuid
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
 from pathlib import Path
 from typing import Any, Protocol
@@ -70,6 +71,7 @@ from media_bot_v2.engines.tiktok import TikTokDownloadError
 from media_bot_v2.engines.youtube import YouTubeDownloadError
 from media_bot_v2.telegram import captions, texts
 from media_bot_v2.telegram.delivery import DeliveryOptions
+from media_bot_v2.telegram.progress import UploadProgress
 from media_bot_v2.upload import splitter
 from media_bot_v2.upload.media_probe import KIND_VIDEO, MediaInfo, probe, probe_with_thumb
 from media_bot_v2.upload.streamable import DEFAULT_FIX_TIMEOUT_SECONDS, ensure_streamable
@@ -90,6 +92,7 @@ class Uploader(Protocol):
         media: MediaInfo | None = None,
         as_document: bool = False,
         title: str | None = None,
+        progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> Any: ...
     async def copy_to_archive(self, message: Any, *, caption: str) -> Any | None: ...
     async def edit_caption(self, message: Any, caption: str) -> None: ...
@@ -214,6 +217,9 @@ class DownloadPipeline:
 
             # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
             await progress.update(texts.UPLOADING)
+            upload_progress = UploadProgress(
+                progress, texts.UPLOADING, sum(p.stat().st_size for g in groups for p in g.parts)
+            )
             archived_message_ids: list[int] = []
             cached_items: list[CachedItem] = []
             all_parts_archived = True
@@ -240,12 +246,14 @@ class DownloadPipeline:
                             reserved_units=captions.utf16_units(label) + 2 if label else 0,
                         )
                         caption = captions.with_part_label(label, full_caption) if label else full_caption
+                        upload_progress.start_part(sum(delivered_sizes))
                         message = await uploader.send_file(
                             part,
                             caption=caption,
                             media=send_info,
                             as_document=delivery.as_document or not playable,
                             title=result.title,
+                            progress=upload_progress,
                         )
                         last_media_message = message
 
