@@ -37,6 +37,7 @@ from media_bot_v2.engines.youtube import (
     YouTubeDownloadError,
     YouTubeEngine,
     extract_video_id,
+    fetch_title_duration,
     is_playlist_url,
 )
 from media_bot_v2.pipeline import DownloadPipeline
@@ -45,6 +46,7 @@ from media_bot_v2.providers.registry import ProviderRegistry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import settings_menu, texts
 from media_bot_v2.telegram.callback_data import decode
+from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.telegram.progress import MessageProgressReporter
 from media_bot_v2.telegram.quality_menu import QualitySelectionStore, build_quality_markup
 from media_bot_v2.telegram.uploader import TelethonUploader
@@ -55,6 +57,11 @@ URL_RE = re.compile(r"https?://\S+")
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
 TIKTOK_HOSTS = ("tiktok.com", "douyin.com")
 INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
+
+# The quality menu waits at most this long for the real title/duration; past
+# it the menu goes out with its placeholders (see fetch_title_duration).
+MENU_LOOKUP_TIMEOUT_SECONDS = 8.0
+_MARKDOWN_SPECIALS = str.maketrans({"*": " ", "_": " ", "`": "'", "[": "(", "]": ")"})
 
 
 def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
@@ -70,6 +77,28 @@ def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
 def _sender_info(event) -> tuple[str | None, str | None]:
     sender = event.sender
     return getattr(sender, "first_name", None), getattr(sender, "username", None)
+
+
+def _display_name(first_name: str | None, username: str | None) -> str:
+    name = (first_name or "").strip()
+    if username:
+        name = f"{name} @{username}".strip()
+    return name
+
+
+def _contact_buttons() -> list[list[Button]]:
+    return [[Button.url(texts.CREDITS_BUTTON, texts.CONTACT_URL)]]
+
+
+async def _report_quota_error(progress: MessageProgressReporter, exc: Exception) -> None:
+    """Out of credits / out of daily bandwidth get the contact button; a
+    blocked user just gets the message."""
+    if isinstance(exc, CreditsExhaustedException):
+        await progress.update(texts.CREDITS_EXHAUSTED, buttons=_contact_buttons())
+    elif isinstance(exc, BandwidthExhaustedException):
+        await progress.update(str(exc), buttons=_contact_buttons())
+    else:
+        await progress.update(str(exc))
 
 
 def register_handlers(
@@ -126,6 +155,32 @@ def register_handlers(
             return texts.SETTINGS
         return texts.SETTINGS + texts.SETTINGS_CREDITS.format(credits=int(remaining))
 
+    def load_delivery(user_id: int, *, first_name: str | None, username: str | None) -> DeliveryOptions:
+        """Create the user row if needed and snapshot their saved settings."""
+        with session_scope(session_factory) as session:
+            user = settings_menu.get_or_create_user(
+                session, user_id, first_name=first_name, username=username, free_download=free_download
+            )
+            return DeliveryOptions.from_setting(
+                user.settings, user_display=_display_name(user.first_name, user.username)
+            )
+
+    def build_youtube_engine(quality: str, progress=None, **overrides) -> YouTubeEngine:
+        return YouTubeEngine(
+            quality=quality,
+            max_download_size=max_download_size,
+            progress=progress,
+            force_ipv4=force_ipv4,
+            cookies_file=youtube_cookies_file,
+            po_token=potoken,
+            player_client=youtube_player_client,
+            js_runtimes=youtube_js_runtimes,
+            remote_components=youtube_remote_components,
+            registry=registry,
+            health_tracker=health_tracker,
+            **overrides,
+        )
+
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
         first_name, username = _sender_info(event)
@@ -140,7 +195,7 @@ def register_handlers(
         await event.respond(
             texts.HELP,
             link_preview=False,
-            buttons=[[Button.url("לצ'אט איתי 💬", "https://t.me/YD_IL")]],
+            buttons=[[Button.url(texts.CONTACT_BUTTON, texts.CONTACT_URL)]],
         )
 
     @client.on(events.NewMessage(pattern="/about"))
@@ -197,20 +252,26 @@ def register_handlers(
             await event.answer(texts.YOUTUBE_LINK_EXPIRED, alert=True)
             return
 
-        with session_scope(session_factory) as session:
-            settings_menu.get_or_create_user(
-                session, event.sender_id, first_name=None, username=None, free_download=free_download
-            )
+        delivery = load_delivery(event.sender_id, first_name=None, username=None)
 
-        await event.answer()
+        # Edit the menu message itself into the progress message (one message
+        # per download, no new one), and confirm with a short toast.
+        quality_name = texts.QUALITY_NAMES.get(quality, quality)
+        if quality == "audio":
+            await event.answer(texts.QUALITY_TOAST_AUDIO)
+            status_text = texts.DOWNLOADING_AUDIO
+        else:
+            await event.answer(texts.QUALITY_TOAST.format(name=quality_name))
+            status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
+        message = None
         try:
-            await event.edit(buttons=None)
+            message = await event.edit(status_text, buttons=None)
         except MessageNotModifiedError:
-            pass
+            message = await event.get_message()
         except (RPCError, ConnectionError, TimeoutError, OSError):
-            logger.debug("Failed to clear quality buttons", exc_info=True)
-
-        message = await event.respond(texts.DOWNLOAD_STARTED)
+            logger.debug("Failed to edit the quality menu message", exc_info=True)
+        if message is None:
+            message = await event.respond(status_text)
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(client, chat_id=event.chat_id, archive_channel=archive_channel)
 
@@ -218,30 +279,22 @@ def register_handlers(
             is_playlist = is_playlist_url(url)
             total_credits = credits_service.get_total_credits(event.sender_id)
             if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
-                raise CreditsExhaustedException("הקרדיטים שלך נגמרו.")
+                raise CreditsExhaustedException(texts.CREDITS_EXHAUSTED)
 
             playlist_limit = (
                 int(total_credits) if is_playlist and math.isfinite(total_credits) else None
             )
 
-            engine = YouTubeEngine(
-                quality=quality,
-                max_download_size=max_download_size,
+            engine = build_youtube_engine(
+                quality,
                 progress=progress,
-                force_ipv4=force_ipv4,
-                cookies_file=youtube_cookies_file,
-                po_token=potoken,
                 is_playlist=is_playlist,
                 playlist_item_limit=playlist_limit,
-                player_client=youtube_player_client,
-                js_runtimes=youtube_js_runtimes,
-                remote_components=youtube_remote_components,
-                registry=registry,
-                health_tracker=health_tracker,
+                subtitles=delivery.subtitles,
             )
 
             media_ref = extract_video_id(url) or url
-            cache_key = compute_cache_key(media_ref, quality)
+            cache_key = compute_cache_key(media_ref, quality, delivery.send_as, delivery.subtitles)
 
             async def on_wait() -> None:
                 await progress.update(texts.YOUTUBE_QUEUE_WAIT)
@@ -256,9 +309,10 @@ def register_handlers(
                     cache=video_cache_store,
                     cache_key=cache_key,
                     archive_channel=archive_channel,
+                    delivery=delivery,
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-            await progress.update(str(exc))
+            await _report_quota_error(progress, exc)
         except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
             await progress.update(str(exc))
         except TimeoutError:
@@ -266,7 +320,8 @@ def register_handlers(
         except Exception:
             logger.exception("YouTube download failed for url=%s", url)
 
-    @client.on(events.NewMessage())
+    # Private chats only, like the old bot: a link posted in a group is ignored.
+    @client.on(events.NewMessage(func=lambda e: bool(getattr(e, "is_private", False))))
     async def url_handler(event: events.NewMessage.Event) -> None:
         raw_text = event.raw_text or ""
         if raw_text.startswith("/"):
@@ -281,16 +336,20 @@ def register_handlers(
         url = match.group(0)
 
         first_name, username = _sender_info(event)
-        with session_scope(session_factory) as session:
-            settings_menu.get_or_create_user(
-                session, event.sender_id, first_name=first_name, username=username, free_download=free_download
-            )
+        delivery = load_delivery(event.sender_id, first_name=first_name, username=username)
 
         if _host_matches(url, YOUTUBE_HOSTS):
             url_hash = quality_store.put(url)
+            probe_engine = build_youtube_engine("720")
+            title, duration = await fetch_title_duration(
+                url, opts=probe_engine.info_opts(url), timeout=MENU_LOOKUP_TIMEOUT_SECONDS
+            )
             await event.respond(
-                texts.YOUTUBE_QUALITY_SELECT.format(title="סרטון יוטיוב", duration="לא ידוע"),
-                buttons=build_quality_markup(url_hash),
+                texts.YOUTUBE_QUALITY_SELECT.format(
+                    title=(title or "סרטון יוטיוב").translate(_MARKDOWN_SPECIALS),
+                    duration=duration or "לא ידוע",
+                ),
+                buttons=build_quality_markup(url_hash, default=delivery.default_quality),
             )
             return
         if _host_matches(url, TIKTOK_HOSTS):
@@ -318,11 +377,12 @@ def register_handlers(
                         uploader=uploader,
                         progress=progress,
                         cache=video_cache_store,
-                        cache_key=compute_cache_key(url, "tiktok"),
+                        cache_key=compute_cache_key(url, "tiktok", delivery.send_as),
                         archive_channel=archive_channel,
+                        delivery=delivery,
                     )
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-                await progress.update(str(exc))
+                await _report_quota_error(progress, exc)
             except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
                 await progress.update(str(exc))
             except TimeoutError:
@@ -358,11 +418,12 @@ def register_handlers(
                         uploader=uploader,
                         progress=progress,
                         cache=video_cache_store,
-                        cache_key=compute_cache_key(extract_instagram_id(url) or url, "instagram"),
+                        cache_key=compute_cache_key(extract_instagram_id(url) or url, "instagram", delivery.send_as),
                         archive_channel=archive_channel,
+                        delivery=delivery,
                     )
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-                await progress.update(str(exc))
+                await _report_quota_error(progress, exc)
             except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
                 await progress.update(str(exc))
             except TimeoutError:
@@ -391,11 +452,12 @@ def register_handlers(
                     uploader=uploader,
                     progress=progress,
                     cache=video_cache_store,
-                    cache_key=compute_cache_key(url, "direct"),
+                    cache_key=compute_cache_key(url, "direct", delivery.send_as),
                     archive_channel=archive_channel,
+                    delivery=delivery,
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-            await progress.update(str(exc))
+            await _report_quota_error(progress, exc)
         except (DownloadTooLargeError, UnsupportedUrlError) as exc:
             await progress.update(str(exc))
         except TimeoutError:

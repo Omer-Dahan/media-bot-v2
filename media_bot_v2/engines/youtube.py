@@ -134,6 +134,12 @@ def is_playlist_url(url: str) -> bool:
     return "list" in qs
 
 
+# Subtitle languages requested when the user enabled subtitles: the old bot's
+# English set. Kept narrow on purpose - `writeautomaticsub` with no language
+# filter would download every auto-translated track.
+SUBTITLE_LANGS = ["en", "en-orig", "en-US", "en-GB"]
+
+
 def build_format_selector(quality: str) -> str:
     if quality == "audio":
         return "bestaudio/best"
@@ -429,6 +435,20 @@ def _extract_file_paths(entry: dict) -> list[str]:
     return [filename] if filename else []
 
 
+def _extract_subtitle_paths(entry: dict) -> list[str]:
+    """Subtitle files yt-dlp wrote, in the order it reports them."""
+    requested = entry.get("requested_subtitles")
+    if not requested:
+        downloads = entry.get("requested_downloads") or []
+        requested = downloads[0].get("requested_subtitles") if downloads else None
+    paths: list[str] = []
+    for sub in (requested or {}).values():
+        filepath = sub.get("filepath") if isinstance(sub, dict) else None
+        if filepath and filepath not in paths and Path(filepath).exists():
+            paths.append(filepath)
+    return paths
+
+
 def summarize_ytdlp_failure(exc: Exception | str) -> str:
     original = getattr(exc, "original_error", None)
     msg = str(original) if original else str(exc)
@@ -478,6 +498,8 @@ def _result_from_info(
         for entry in entries:
             file_paths.extend(_extract_file_paths(entry))
         title = info.get("title") or "YouTube playlist"
+        description = None
+        subtitle_paths = []
         playlist_count = info.get("playlist_count") or info.get("n_entries")
         playlist_total = int(playlist_count) if playlist_count else None
         playlist_downloaded = len(file_paths)
@@ -496,6 +518,8 @@ def _result_from_info(
     else:
         file_paths = _extract_file_paths(info)
         title = info.get("title") or "YouTube"
+        description = info.get("description") or None
+        subtitle_paths = _extract_subtitle_paths(info)
         playlist_total = None
         playlist_downloaded = None
         playlist_trimmed_reason = None
@@ -505,10 +529,47 @@ def _result_from_info(
     return DownloadResult(
         file_paths=file_paths,
         title=title,
+        description=description,
+        subtitle_paths=subtitle_paths,
         playlist_total=playlist_total,
         playlist_downloaded=playlist_downloaded,
         playlist_trimmed_reason=playlist_trimmed_reason,
     )
+
+
+def format_duration(seconds: float | None) -> str | None:
+    if not seconds or seconds < 0:
+        return None
+    total = int(seconds)
+    hours, remainder = divmod(total, 3600)
+    minutes, secs = divmod(remainder, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{secs:02d}"
+    return f"{minutes}:{secs:02d}"
+
+
+async def fetch_title_duration(url: str, *, opts: dict, timeout: float) -> tuple[str | None, str | None]:
+    """Title and formatted duration for the quality menu, or (None, None).
+
+    A bounded, best-effort lookup: the menu must appear promptly whatever
+    happens here, so any failure or a blown `timeout` just means the caller
+    shows its placeholders. It is not a download attempt - it does not touch
+    the provider health tracker or a route-attempt summary.
+    """
+
+    def _extract() -> dict | None:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            return ydl.extract_info(url, download=False)
+
+    try:
+        info = await asyncio.wait_for(asyncio.to_thread(_extract), timeout=timeout)
+    except Exception:
+        logger.info("Title/duration lookup failed or timed out for %s", url, exc_info=True)
+        return None, None
+    if not isinstance(info, dict):
+        return None, None
+    title = info.get("title")
+    return (title.strip() or None) if isinstance(title, str) else None, format_duration(info.get("duration"))
 
 
 class YouTubeEngine(BaseEngine):
@@ -536,12 +597,14 @@ class YouTubeEngine(BaseEngine):
         remote_components: list[str] | set[str] | dict | str | None = None,
         registry: ProviderRegistry | None = None,
         health_tracker: ProviderHealthTracker | None = None,
+        subtitles: bool = False,
     ) -> None:
         if playlist_item_limit is not None:
             if playlist_item_limit <= 0:
                 raise ValueError(f"playlist_item_limit must be positive, got {playlist_item_limit}")
             is_playlist = True
         self._quality = quality
+        self._subtitles = subtitles
         self._max_download_size = max_download_size
         self._progress = progress
         self._force_ipv4 = force_ipv4
@@ -681,12 +744,33 @@ class YouTubeEngine(BaseEngine):
             "retries": TRANSPORT_RETRIES,
             "fragment_retries": TRANSPORT_RETRIES,
             "ignoreerrors": "only_download" if is_playlist_request else False,
-            "js_runtimes": self._js_runtimes,
         }
-        if self._remote_components:
-            opts["remote_components"] = self._remote_components
+        opts.update(self._connection_opts())
         if is_playlist_request and self._playlist_item_limit is not None:
             opts["playlistend"] = self._playlist_item_limit
+        if self._quality == "audio":
+            opts["postprocessors"] = [
+                {"key": "FFmpegExtractAudio", "preferredcodec": "mp3", "preferredquality": "192"}
+            ]
+        if self._subtitles and not is_playlist_request and self._quality != "audio":
+            # A subtitle that cannot be fetched is a yt-dlp warning, not a
+            # download failure, so it cannot cost the user their video.
+            opts["writesubtitles"] = True
+            opts["writeautomaticsub"] = True
+            opts["subtitleslangs"] = list(SUBTITLE_LANGS)
+            opts["subtitlesformat"] = "srt/best"
+            opts.setdefault("postprocessors", []).append(
+                {"key": "FFmpegSubtitlesConvertor", "format": "srt", "when": "before_dl"}
+            )
+        return opts
+
+    def _connection_opts(self) -> dict:
+        """The yt-dlp options that decide *how we reach YouTube* (JS runtime,
+        cookies, IPv4, player client, PO token) - shared by the real download
+        and the metadata-only lookup so both look like the same client."""
+        opts: dict = {"js_runtimes": self._js_runtimes}
+        if self._remote_components:
+            opts["remote_components"] = self._remote_components
         if self._force_ipv4:
             opts["source_address"] = "0.0.0.0"
         if self._cookies_file:
@@ -701,6 +785,22 @@ class YouTubeEngine(BaseEngine):
                 primary_client = client.split(",")[0].strip()
                 youtube_args.append(f"po_token={primary_client}+{self._po_token}")
         opts["extractor_args"] = {"youtube": youtube_args}
+        return opts
+
+    def info_opts(self, url: str) -> dict:
+        """Options for a metadata-only lookup (no download, no progress hooks)."""
+        opts: dict = {
+            "quiet": True,
+            "no_warnings": True,
+            "noprogress": True,
+            "skip_download": True,
+            "noplaylist": not is_playlist_url(url),
+            "socket_timeout": 10,
+            "retries": 0,
+        }
+        if is_playlist_url(url):
+            opts["extract_flat"] = "in_playlist"
+        opts.update(self._connection_opts())
         return opts
 
     def _make_progress_hook(

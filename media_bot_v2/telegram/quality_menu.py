@@ -48,15 +48,25 @@ class QualitySelectionStore:
             del self._entries[key]
 
 
-def build_quality_markup(url_hash: str) -> list[list[Button]]:
+QUALITY_BUTTON_LABELS = {
+    "1080": "🎬 1080p HD",
+    "720": "🎬 720p",
+    "480": "🎬 480p",
+    "360": "🎬 360p",
+    "audio": "🎵 שמע בלבד",
+}
+
+
+def build_quality_markup(url_hash: str, default: str | None = None) -> list[list[Button]]:
+    """The menu keyboard. `default` (the user's saved quality, as a menu key
+    like "720") gets a ✅ so the setting is visible where it applies."""
+
+    def button(key: str) -> Button:
+        label = QUALITY_BUTTON_LABELS[key] + (" ✅" if key == default else "")
+        return Button.inline(label, encode("ytq", key, url_hash))
+
     return [
-        [
-            Button.inline("🎬 1080p HD", encode("ytq", "1080", url_hash)),
-            Button.inline("🎬 720p", encode("ytq", "720", url_hash)),
-        ],
-        [
-            Button.inline("🎬 480p", encode("ytq", "480", url_hash)),
-            Button.inline("🎬 360p", encode("ytq", "360", url_hash)),
-        ],
-        [Button.inline("🎵 שמע בלבד", encode("ytq", "audio", url_hash))],
+        [button("1080"), button("720")],
+        [button("480"), button("360")],
+        [button("audio")],
     ]

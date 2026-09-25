@@ -15,7 +15,7 @@ from media_bot_v2.telegram.callback_data import encode
 
 QUALITY_CYCLE = {"high": "medium", "medium": "low", "low": "high"}
 QUALITY_DISPLAY = {"high": "1080p", "medium": "720p", "low": "480p"}
-FORMAT_DISPLAY = {"video": "וידאו", "document": "קובץ"}
+FORMAT_DISPLAY = {"video": "וידאו", "document": "קובץ", "audio": "שמע"}
 TITLE_LENGTH_CYCLE = {100: 250, 250: 500, 500: 1000, 1000: 4000, 4000: 0, 0: 100}
 
 TOGGLE_QUALITY = "toggle_quality"

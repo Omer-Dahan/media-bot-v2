@@ -27,6 +27,7 @@ from media_bot_v2.credits.exceptions import (
 )
 from media_bot_v2.db.models import User
 from media_bot_v2.db.session import session_scope
+from media_bot_v2.telegram import texts
 
 BYTES_PER_MB = 1024 * 1024
 DEFAULT_MB_PER_CREDIT = 200
@@ -81,9 +82,7 @@ class CreditsService:
             if (user.free or 0) + (user.paid or 0) <= 0:
                 raise CreditsExhaustedException("הקרדיטים שלך נגמרו.")
             if (user.paid or 0) <= 0 and (user.bandwidth_used or 0) >= self._free_bandwidth:
-                raise BandwidthExhaustedException(
-                    "הגעת למגבלת 2GB יומית למשתמשים חינמיים.\nלרכישת חבילה ללא הגבלה שלח /buy"
-                )
+                raise BandwidthExhaustedException(texts.BANDWIDTH_EXHAUSTED)
 
     def use_quota_dynamic(self, user_id: int, file_sizes: list[int]) -> int:
         """Deduct credits for everything one request delivered, return remaining credits."""

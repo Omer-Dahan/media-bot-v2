@@ -33,12 +33,18 @@ class MessageProgressReporter:
         self._message = message
         self._last_text: str | None = None
 
-    async def update(self, text: str) -> None:
-        if text == self._last_text:
+    async def update(self, text: str, *, buttons=None) -> None:
+        """Edit the message to `text`. `buttons` (e.g. the contact button under
+        a "credits exhausted" message) is passed only when given, so plain
+        status updates keep their exact `edit(text)` call."""
+        if text == self._last_text and buttons is None:
             return
         self._last_text = text
         try:
-            await self._message.edit(text)
+            if buttons is not None:
+                await self._message.edit(text, buttons=buttons)
+            else:
+                await self._message.edit(text)
         except MessageNotModifiedError:
             pass  # content unchanged from Telegram's point of view - nothing to surface
         except (RPCError, ConnectionError, TimeoutError, OSError):

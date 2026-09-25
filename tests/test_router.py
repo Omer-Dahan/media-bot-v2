@@ -62,9 +62,11 @@ class _FakeSender:
 class _FakeMessage:
     def __init__(self) -> None:
         self.edits: list[str] = []
+        self.edit_kwargs: list[dict] = []
 
     async def edit(self, text: str = "", *args, **kwargs) -> None:
         self.edits.append(text)
+        self.edit_kwargs.append(kwargs)
 
 
 class _FakeEvent:
@@ -143,20 +145,34 @@ def _find_ytq_handler(client: TelegramClient):
 
 
 class _FakeCallbackEvent:
+    """A callback on the quality menu / settings message. The message the
+    button sits under is `menu_message`; editing the event edits it in place
+    (as Telegram does) and returns it, and `respond` would add a new one."""
+
     def __init__(self, data: bytes, sender_id: int):
         self.data = data
         self.sender_id = sender_id
         self.chat_id = sender_id
         self.answer_calls: list[tuple[str | None, bool]] = []
-        self.messages: list[_FakeMessage] = []
+        self.menu_message = _FakeMessage()
+        self.messages: list[_FakeMessage] = [self.menu_message]
+        self.edit_calls: list[tuple[tuple, dict]] = []
+        self.respond_calls = 0
 
     async def answer(self, text: str | None = None, *, alert: bool = False) -> None:
         self.answer_calls.append((text, alert))
 
     async def edit(self, *args, **kwargs):
-        return None
+        self.edit_calls.append((args, kwargs))
+        if args and isinstance(args[0], str):
+            self.menu_message.edits.append(args[0])
+        return self.menu_message
+
+    async def get_message(self) -> _FakeMessage:
+        return self.menu_message
 
     async def respond(self, text: str, *args, **kwargs) -> _FakeMessage:
+        self.respond_calls += 1
         msg = _FakeMessage()
         self.messages.append(msg)
         return msg
@@ -412,7 +428,8 @@ async def test_quality_pick_playlist_regular_user_zero_credits_shows_error():
 
     pipeline.run.assert_not_called()
     assert len(cb_event.messages) == 1
-    assert "הקרדיטים שלך נגמרו." in cb_event.messages[0].edits
+    # The owner's wording + contact button replaced the bare service message.
+    assert texts.CREDITS_EXHAUSTED in cb_event.messages[0].edits
 
 
 async def test_url_handler_tiktok_link_runs_pipeline_with_tiktok_engine():

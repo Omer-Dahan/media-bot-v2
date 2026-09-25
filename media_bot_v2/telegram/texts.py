@@ -108,6 +108,24 @@ DOWNLOAD_FROM_CACHE = "נמצא במטמון, שולח..."
 DOWNLOAD_DONE = "הושלם ✅"
 DOWNLOAD_FAILED = "❌ ההורדה נכשלה. נסה שוב או שלח קישור אחר."
 
+CONTACT_URL = "https://t.me/YD_IL"
+CONTACT_BUTTON = "לצ'אט איתי 💬"
+CREDITS_BUTTON = "💬 לרכישת קרדיטים"
+CREDITS_EXHAUSTED = "❌ הקרדיטים שלך נגמרו.\nלרכישת קרדיטים נוספים, צור קשר עם יוצר הבוט. 👇"
+BANDWIDTH_EXHAUSTED = "הגעת למגבלת 2GB יומית למשתמשים חינמיים.\nלרכישת חבילה ללא הגבלה צרו קשר 👇"
+
+QUALITY_NAMES = {
+    "1080": "1080p HD",
+    "720": "720p",
+    "480": "480p",
+    "360": "360p",
+    "audio": "שמע בלבד",
+}
+QUALITY_TOAST = "⏳ מתחיל הורדה באיכות {name}..."
+QUALITY_TOAST_AUDIO = "⏳ מתחיל להוריד שמע..."
+DOWNLOADING_QUALITY = "🔄 מוריד באיכות {name}..."
+DOWNLOADING_AUDIO = "🔄 מוריד שמע..."
+
 YOUTUBE_LINK_EXPIRED = "⏰ תפוגת קישור: יש לשלוח את קישור היוטיוב שוב ולבחור איכות מחדש."
 YOUTUBE_QUEUE_WAIT = "⏳ יש עומס הורדות כרגע, הבקשה שלך בתור..."
 YOUTUBE_JS_RUNTIME_MISSING = (
