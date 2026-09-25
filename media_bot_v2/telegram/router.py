@@ -110,6 +110,7 @@ def register_handlers(
     pipeline: DownloadPipeline,
     archive_channel: str | None,
     upload_workers: int = 1,
+    upload_connections: int = 1,
     max_download_size: int,
     limiter: ConcurrencyLimiter | None = None,
     force_ipv4: bool = False,
@@ -275,7 +276,8 @@ def register_handlers(
             message = await event.respond(status_text)
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+            client, chat_id=event.chat_id, archive_channel=archive_channel,
+            workers=upload_workers, connections=upload_connections
         )
 
         try:
@@ -359,7 +361,8 @@ def register_handlers(
             message = await event.respond(texts.DOWNLOAD_STARTED)
             progress = MessageProgressReporter(message)
             uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+            client, chat_id=event.chat_id, archive_channel=archive_channel,
+            workers=upload_workers, connections=upload_connections
         )
 
             async def on_wait() -> None:
@@ -403,7 +406,8 @@ def register_handlers(
             message = await event.respond(texts.DOWNLOAD_STARTED)
             progress = MessageProgressReporter(message)
             uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+            client, chat_id=event.chat_id, archive_channel=archive_channel,
+            workers=upload_workers, connections=upload_connections
         )
 
             async def on_wait() -> None:
@@ -446,7 +450,8 @@ def register_handlers(
         message = await event.respond(texts.DOWNLOAD_STARTED)
         progress = MessageProgressReporter(message)
         uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel, workers=upload_workers
+            client, chat_id=event.chat_id, archive_channel=archive_channel,
+            workers=upload_workers, connections=upload_connections
         )
 
         async def on_wait() -> None:

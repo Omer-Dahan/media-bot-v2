@@ -162,6 +162,20 @@ first deployment:
   the upload continues. If you still see `Flood wait` warnings in the log,
   lower this value. The real speed-up depends on your server's bandwidth
   and Telegram's limits for the account/DC.
+- `UPLOAD_CONNECTIONS` (default `5`, range `1..5`, also capped by
+  `UPLOAD_WORKERS`): how many separate TCP connections to the same Telegram DC
+  one upload spreads its lanes over (lane 0 uses the bot's main connection, the
+  others use extra in-memory connections that reuse the main auth key; no
+  second session file and no second `TelegramClient`). Values above 5 are
+  clamped; below 1 the bot refuses to start. `1` = exactly the `UPLOAD_WORKERS`
+  behaviour above. If the extra connections cannot be set up, or one breaks,
+  the affected parts are sent over the main connection and a warning is
+  logged, so the file is still delivered. **Warning:** the gain relies on
+  Telegram enforcing its bandwidth limit *per connection*; this was not
+  measured against real Telegram (only against a simulated per-connection
+  limit). More connections also raise the `FLOOD_WAIT` risk; repeated flood
+  waits drop the lanes (5 -> 2 -> 1) as before. If you see `Flood wait`
+  warnings, lower this value.
 - `YOUTUBE_COOKIES_FILE` / `TIKTOK_COOKIES_FILE`: paths to cookie files, if
   you use them (never commit these files).
 - `TIKTOK_PROVIDERS` / `YOUTUBE_PROVIDERS` / `DISABLED_PROVIDERS`: provider

@@ -110,6 +110,9 @@ class Settings(BaseSettings):
     # Parallel upload lanes per file (1..5). Above 5 is clamped to 5; below 1 is
     # an error. More lanes upload faster but raise the FLOOD_WAIT risk.
     upload_workers: int = Field(default=5, validation_alias="UPLOAD_WORKERS")
+    # Real TCP connections used by one upload (1..5, at most UPLOAD_WORKERS).
+    # 1 = every lane shares the main connection (M10 behaviour).
+    upload_connections: int = Field(default=5, validation_alias="UPLOAD_CONNECTIONS")
     # Budget for making a video Telegram-playable (ffmpeg). Separate from, and
     # smaller than, the upload budget; on expiry the original file is sent.
     convert_timeout: float = Field(default=180.0, validation_alias="CONVERT_TIMEOUT")
@@ -123,6 +126,13 @@ class Settings(BaseSettings):
     def _clamp_upload_workers(cls, value: int) -> int:
         if value < 1:
             raise ValueError(f"UPLOAD_WORKERS must be between 1 and 5 (got {value})")
+        return min(value, 5)
+
+    @field_validator("upload_connections")
+    @classmethod
+    def _clamp_upload_connections(cls, value: int) -> int:
+        if value < 1:
+            raise ValueError(f"UPLOAD_CONNECTIONS must be between 1 and 5 (got {value})")
         return min(value, 5)
 
     @field_validator("session_name")

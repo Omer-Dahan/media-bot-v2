@@ -48,10 +48,11 @@ _MEDIA_REJECTED = (MediaInvalidError, VideoContentTypeInvalidError, MediaEmptyEr
 
 class TelethonUploader:
     def __init__(
-        self, client: TelegramClient, *, chat_id: int, archive_channel: str | None, workers: int = 1
+        self, client: TelegramClient, *, chat_id: int, archive_channel: str | None, workers: int = 1, connections: int = 1
     ) -> None:
         self._client = client
         self._workers = workers
+        self._connections = connections
         self._chat_id = chat_id
         self._archive_channel = archive_channel
 
@@ -87,7 +88,9 @@ class TelethonUploader:
         oversized photos itself, and they are far too small to gain anything."""
         if self._workers <= 1 or info.kind == KIND_PHOTO:
             return str(path)
-        return await upload_file_parallel(self._client, path, workers=self._workers, progress=progress)
+        return await upload_file_parallel(
+            self._client, path, workers=self._workers, connections=self._connections, progress=progress
+        )
 
     @staticmethod
     def _send_kwargs(info: MediaInfo, *, caption: str | None, as_document: bool, title: str | None) -> dict:
