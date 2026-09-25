@@ -5,6 +5,7 @@ flood ceiling in quality pick.
 
 from __future__ import annotations
 
+import asyncio
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
@@ -289,6 +290,7 @@ async def test_call_with_flood_retry_cumulative_sleep_bounded_by_max_wait():
             repeating_short_flood,
             max_retries=10,
             max_wait_seconds=12.0,
+            max_total_wait_seconds=12.0,
             sleep_func=fake_sleep,
         )
 
@@ -338,3 +340,72 @@ async def test_quality_pick_total_delay_strictly_bounded_under_repeated_floods()
     assert len(sleeps) == 2
     # Pipeline still proceeds!
     pipeline.run.assert_awaited_once()
+
+
+# =============================================================================
+# 4. M10.8: the cumulative ceiling is an explicit opt-in, never a global default
+# =============================================================================
+
+@pytest.mark.parametrize("floods", [[50, 50, 50], [100, 30]])
+async def test_send_file_survives_cumulative_floods_and_delivers(tmp_path, monkeypatch, floods):
+    """Media delivery prefers waiting over failing: several floods whose total
+    exceeds MAX_FLOOD_WAIT_SECONDS must still end with the file delivered."""
+    from telethon.errors import FloodWaitError as _Flood
+
+    from media_bot_v2.telegram.uploader import TelethonUploader
+
+    path = tmp_path / "vid.mp4"
+    path.write_bytes(b"x" * 1024)
+    pending = list(floods)
+    delivered = MagicMock(id=7)
+
+    async def send_file(*args, **kwargs):
+        if pending:
+            raise _Flood(None, capture=pending.pop(0))
+        return delivered
+
+    client = MagicMock()
+    client.send_file = AsyncMock(side_effect=send_file)
+    slept: list[float] = []
+
+    async def fake_sleep(sec):
+        slept.append(sec)
+
+    monkeypatch.setattr(asyncio, "sleep", fake_sleep)
+
+    uploader = TelethonUploader(client, chat_id=1, archive_channel=None)
+    result = await uploader.send_file(path)
+
+    assert result is delivered
+    assert slept == floods
+    assert sum(slept) > 120
+
+
+async def test_call_with_flood_retry_has_no_cumulative_ceiling_by_default():
+    slept: list[float] = []
+
+    async def fake_sleep(sec: float):
+        slept.append(sec)
+
+    remaining = [50, 50, 50]
+
+    async def flaky():
+        if remaining:
+            raise FloodWaitError(None, capture=remaining.pop(0))
+        return "ok"
+
+    assert await call_with_flood_retry(flaky, sleep_func=fake_sleep) == "ok"
+    assert sum(slept) == 150
+
+
+async def test_call_with_flood_retry_explicit_total_ceiling_still_enforced():
+    async def fake_sleep(sec: float):
+        pass
+
+    async def always():
+        raise FloodWaitError(None, capture=5)
+
+    with pytest.raises(FloodWaitError):
+        await call_with_flood_retry(
+            always, max_retries=10, max_total_wait_seconds=12.0, sleep_func=fake_sleep
+        )

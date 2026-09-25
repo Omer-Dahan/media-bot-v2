@@ -103,3 +103,21 @@ This document details the eight critical failure patterns identified in the prod
 - Chosen: extra `MTProtoSender`s built with the main client's in-memory `AuthKey` (`client._sender.auth_key`), connected to `client.session` DC, announced with `InvokeWithLayer(InitConnection(query=help.getConfig))` on a *copy* of `_init_request`. Own session id/seqno; no second `TelegramClient`, no session file (which is what caused `AUTH_KEY_DUPLICATED` in the old bot). Sending goes through `client._call(sender, request)` so Telethon's error mapping is reused.
 - Lane `i` uses connection `i % n`; lane 0 is the main connection and is never closed. Setup failure/timeout or a broken extra connection -> that part is retried on the main connection (fail-open). `FloodWaitError` is not treated as a connection failure.
 - Proven only on a simulated per-connection cap (`tests/test_multi_connection_upload.py`, 20 parts: 1.02s on one connection vs 0.22s on five, x4.7). Not measured against real Telegram.
+
+### 10.8 Cumulative flood ceiling is opt-in (M10.8)
+- `call_with_flood_retry` has two explicit limits: `max_wait_seconds` (one single flood wait) and `max_total_wait_seconds` (sum of all sleeps across retries). The latter defaults to `None` = no artificial cumulative ceiling. M10.7 had folded both into `max_wait_seconds`, which made `send_file` fail after e.g. `[50, 50, 50]` or `[100, 30]` and lose the whole download and upload.
+- Media delivery (`uploader.send_file`) uses the defaults: it waits out floods (bounded only by `max_retries`, the per-wait limit and the request/upload time budget). The quality menu / button-click path (`router.py`) passes `max_total_wait_seconds` equal to its remaining deadline (`MENU_STATUS_TIMEOUT_SECONDS`), so the user is never held for more than a few seconds there.
+- Proven by `tests/test_m10_7.py` (section 4) and the existing menu-deadline tests.
+
+## Known limitations (deliberately not fixed)
+Cosmetic only. None of them damages the delivered file or affects billing (charging is by volume and only for what was delivered). Do not open new rounds for them.
+
+1. **Contradicting message under consecutive floods.** A "download failed" message can appear next to a new message carrying the original text.
+   - Why it stays: the two messages come from two independent terminal-delivery fallbacks (edit -> respond -> delete -> send) each racing a flood; making them mutually exclusive would need a transactional layer over Telegram that does not exist.
+   - Actual risk: cosmetic only, no damage to the file, no charge.
+2. **Stale "Uploading... 95%" after a flooded deferred delete.** If the deferred deletion of the progress message is itself flooded, the message stays in the chat even though the file was delivered (predates the latest rounds).
+   - Why it stays: the delete is best-effort after the file is already delivered; retrying it indefinitely would only add load during a flood.
+   - Actual risk: cosmetic only, no damage to the file, no charge.
+3. **A status message next to the failure message when every operation is flooded at once.** Under a flood that disrupts every call simultaneously, a status message remains next to the failure message.
+   - Why it stays: it is not a realistic Telegram state (floods are per-method, not global across edit/respond/delete together), so it is not worth extra machinery.
+   - Actual risk: cosmetic only, no damage to the file, no charge.

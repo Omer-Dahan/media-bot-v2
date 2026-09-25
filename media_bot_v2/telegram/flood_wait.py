@@ -61,6 +61,7 @@ async def call_with_flood_retry[T](
     *args: Any,
     max_retries: int = 5,
     max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
+    max_total_wait_seconds: float | None = None,
     on_flood: Callable[..., Awaitable[None] | None] | None = None,
     on_flood_cleared: Callable[[], Awaitable[None] | None] | None = None,
     sleep_func: Callable[[float], Awaitable[None]] | None = None,
@@ -69,6 +70,15 @@ async def call_with_flood_retry[T](
     """Execute an async Telegram API call, waiting and retrying if a flood wait occurs.
 
     Catches both `FloodWaitError` and `FloodPremiumWaitError`.
+
+    Limits:
+    - `max_retries`: number of flood waits tolerated before re-raising.
+    - `max_wait_seconds`: ceiling for a SINGLE flood wait.
+    - `max_total_wait_seconds`: optional ceiling for the CUMULATIVE sleep across
+      retries. Default `None` means no artificial cumulative ceiling, so media
+      delivery (`send_file`) waits out repeated floods instead of losing the
+      whole download+upload. Interactive callers (quality menu / button clicks)
+      opt in explicitly to keep the user from being blocked for long.
     """
     attempts = 0
     sleeper = sleep_func or asyncio.sleep
@@ -83,10 +93,13 @@ async def call_with_flood_retry[T](
             if (
                 attempts > max_retries
                 or wait_seconds > max_wait_seconds
-                or (total_slept + wait_seconds) > max_wait_seconds
+                or (
+                    max_total_wait_seconds is not None
+                    and (total_slept + wait_seconds) > max_total_wait_seconds
+                )
             ):
                 logger.warning(
-                    "Telegram flood wait (%s: %ss) on %s (attempt %d/%d, total slept %.1fs/%.1fs) exceeded limits; raising",
+                    "Telegram flood wait (%s: %ss) on %s (attempt %d/%d, total slept %.1fs, per-wait limit %.1fs) exceeded limits; raising",
                     type(exc).__name__,
                     wait_seconds,
                     func_name,

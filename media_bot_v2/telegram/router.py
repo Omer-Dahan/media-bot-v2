@@ -318,12 +318,14 @@ def register_handlers(
             rem = max(0.0, menu_deadline - time.monotonic())
             try:
                 message = await call_with_flood_retry(
-                    event.edit, status_text, buttons=None, max_wait_seconds=rem
+                    event.edit, status_text, buttons=None, max_wait_seconds=rem, max_total_wait_seconds=rem
                 )
             except MessageNotModifiedError:
                 try:
                     rem = max(0.0, menu_deadline - time.monotonic())
-                    message = await call_with_flood_retry(event.get_message, max_wait_seconds=rem)
+                    message = await call_with_flood_retry(
+                        event.get_message, max_wait_seconds=rem, max_total_wait_seconds=rem
+                    )
                 except (RPCError, ConnectionError, TimeoutError, OSError):
                     logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
                     message = getattr(event, "message", None)
@@ -334,7 +336,7 @@ def register_handlers(
                 if rem > 0:
                     try:
                         message = await call_with_flood_retry(
-                            event.respond, status_text, max_wait_seconds=rem
+                            event.respond, status_text, max_wait_seconds=rem, max_total_wait_seconds=rem
                         )
                     except Exception:
                         logger.debug("Failed to send new status message after edit failure", exc_info=True)
