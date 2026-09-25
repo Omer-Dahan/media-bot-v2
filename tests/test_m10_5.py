@@ -16,7 +16,8 @@ from media_bot_v2.telegram.progress import (
     UploadProgress,
 )
 from media_bot_v2.telegram.router import _safe_answer_callback
-from tests.test_parallel_upload import PART, PartServer, make_file
+from tests.test_multi_connection_upload import ConnectionNetwork
+from tests.test_parallel_upload import PART, make_file
 from tests.test_router import (
     _FakeCallbackEvent,
     _find_url_handler,
@@ -56,11 +57,16 @@ def test_no_nested_tuples_in_except_clauses():
 # -----------------------------------------------------------------------------
 # 1b. Parallel upload succeeds with slow progress edit (>1s) and short flood (1-2s)
 # -----------------------------------------------------------------------------
-async def test_parallel_upload_succeeds_with_slow_edit_and_short_flood(tmp_path):
+async def test_parallel_upload_succeeds_with_slow_edit_and_short_flood(tmp_path, monkeypatch):
     """Requirement 1: Parallel upload with workers=2 and connections=2 must succeed
     when progress edit is slow (>1s timeout) or encounters short flood waits (1-2s).
     Resulting file must be byte-for-byte identical to the original."""
-    server = PartServer()
+    server = ConnectionNetwork()
+
+    async def opener(client):
+        return await server.open_sender(client)
+
+    monkeypatch.setattr(parallel_upload, "_open_sender", opener)
     path = make_file(tmp_path / "upload_test.bin", 6 * PART)
 
     call_count = 0
@@ -88,6 +94,11 @@ async def test_parallel_upload_succeeds_with_slow_edit_and_short_flood(tmp_path)
     uploaded_data = b"".join(server.parts[handle.id][i] for i in range(6))
     assert uploaded_data == path.read_bytes()
     assert call_count >= 2
+    # Multi-connection verification: both real connections must have carried parts
+    assert len(server.used_connections) == 2
+    assert server._sender in server.used_connections
+    assert server.opens == 1
+    assert all(s.disconnected for s in server.senders)
 
 
 # -----------------------------------------------------------------------------

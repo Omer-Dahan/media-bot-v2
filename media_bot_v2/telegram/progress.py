@@ -27,7 +27,7 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from telethon.errors import MessageNotModifiedError, RPCError
+from telethon.errors import MessageNotModifiedError, RPCError, ServerError
 
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.flood_wait import (
@@ -79,6 +79,93 @@ def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None =
     )
 
 
+def _is_permanent_edit_error(exc: Exception) -> bool:
+    """Determine whether an edit RPCError represents a permanent failure
+    (message was deleted, bad message ID, or lacking permissions to edit)
+    or a transient issue (server errors, 5xx, or temporary RPC hiccups)."""
+    if isinstance(exc, ServerError):
+        return False
+    code = getattr(exc, "code", None)
+    if code is not None and code >= 500:
+        return False
+
+    msg = str(getattr(exc, "message", "") or "").upper()
+    transient_markers = ("500", "502", "503", "504", "RPC_CALL_FAIL", "INTERNAL", "SERVER")
+    if any(marker in msg for marker in transient_markers):
+        return False
+
+    permanent_markers = (
+        "MESSAGE_ID_INVALID",
+        "CHAT_WRITE_FORBIDDEN",
+        "CHAT_ADMIN_REQUIRED",
+        "MESSAGE_AUTHOR_REQUIRED",
+        "CHANNEL_PRIVATE",
+        "USER_IS_BLOCKED",
+        "MSG_ID_INVALID",
+    )
+    if any(marker in msg for marker in permanent_markers):
+        return True
+
+    if code in (400, 403, 404):
+        return True
+
+    exc_type = type(exc).__name__
+    return any(k in exc_type for k in ("MessageIdInvalid", "Forbidden", "Required", "Private", "Blocked"))
+
+
+async def _deferred_terminal_retry(
+    message: Any,
+    text: str,
+    buttons: Any,
+    wait_seconds: float,
+    sleep_func: Callable[[float], Awaitable[None]] | None,
+    is_failure: bool,
+    needs_delete: bool,
+) -> None:
+    """Deferred delivery or cleanup after a prolonged flood wait expires.
+    Guarantees that on failure the user receives an error indication,
+    and stale progress messages (e.g. 95%) are never left behind."""
+    sleeper = sleep_func or asyncio.sleep
+    try:
+        if wait_seconds > 0:
+            await sleeper(wait_seconds)
+    except Exception:
+        logger.debug("Deferred terminal sleep interrupted", exc_info=True)
+        return
+
+    delivered = False
+    new_msg = None
+    if is_failure:
+        if not needs_delete and hasattr(message, "edit") and callable(message.edit):
+            try:
+                if buttons is not None:
+                    await message.edit(text, buttons=buttons)
+                else:
+                    await message.edit(text)
+                delivered = True
+                logger.info("Deferred failure delivery succeeded via edit: %r", text)
+            except Exception:
+                logger.debug("Deferred edit failed for failure message", exc_info=True)
+
+        if not delivered and hasattr(message, "respond") and callable(message.respond):
+            try:
+                if buttons is not None:
+                    new_msg = await message.respond(text, buttons=buttons)
+                else:
+                    new_msg = await message.respond(text)
+                delivered = True
+                logger.info("Deferred failure delivery succeeded via respond: %r", text)
+            except Exception:
+                logger.warning("Deferred respond failed for failure message: %r", text, exc_info=True)
+
+    if (needs_delete or new_msg is not None) and hasattr(message, "delete") and callable(message.delete):
+        try:
+            await message.delete()
+            logger.info("Deferred deletion of stale message succeeded")
+        except Exception:
+            logger.debug("Deferred delete failed", exc_info=True)
+
+
 class MessageProgressReporter:
     def __init__(
         self,
@@ -99,6 +186,7 @@ class MessageProgressReporter:
         self._uneditable: bool = message is None
         self._logged_uneditable: bool = False
         self._async_lock: asyncio.Lock | None = None
+        self._deferred_task: asyncio.Task[None] | None = None
 
     @property
     def _lock(self) -> asyncio.Lock:
@@ -177,14 +265,17 @@ class MessageProgressReporter:
                 except FLOOD_WAIT_ERRORS as exc:
                     flood_exc = exc
                 except RPCError as exc:
-                    self._uneditable = True
-                    if not self._logged_uneditable:
-                        self._logged_uneditable = True
-                        logger.warning(
-                            "Progress message is not editable (%s: %s); dropping further non-terminal edits",
-                            type(exc).__name__,
-                            exc,
-                        )
+                    if _is_permanent_edit_error(exc):
+                        self._uneditable = True
+                        if not self._logged_uneditable:
+                            self._logged_uneditable = True
+                            logger.warning(
+                                "Progress message is not editable (%s: %s); dropping further non-terminal edits",
+                                type(exc).__name__,
+                                exc,
+                            )
+                    else:
+                        logger.debug("Transient RPC error while editing progress message to %r: %s", text, exc)
                     break
                 except (ConnectionError, TimeoutError, OSError) as exc:
                     logger.debug("Transient error while editing progress message to %r: %s", text, exc)
@@ -229,6 +320,7 @@ class MessageProgressReporter:
             async with self._lock:
                 old_message = self._message
                 new_message = None
+                respond_exc = None
                 if hasattr(old_message, "respond") and callable(old_message.respond):
                     try:
                         if buttons is not None:
@@ -255,31 +347,66 @@ class MessageProgressReporter:
                             self._uneditable = False
                             self._logged_uneditable = False
                             logger.info("Delivered terminal progress message via new message after edit failure: %r", text)
-                    except Exception:
+                    except Exception as exc:
+                        respond_exc = exc
                         logger.warning("Failed to deliver fallback terminal message %r", text, exc_info=True)
 
                 if new_message is not None and hasattr(old_message, "delete") and callable(old_message.delete):
                     try:
-                        await old_message.delete()
+                        await call_with_flood_retry(
+                            old_message.delete,
+                            max_retries=self._max_retries,
+                            max_wait_seconds=self._max_wait_seconds,
+                            sleep_func=self._sleep,
+                        )
                         logger.info("Deleted stale progress message after fallback delivery")
                     except Exception:
                         logger.debug("Failed to delete stale progress message", exc_info=True)
                 elif new_message is None:
+                    is_failure = not text.startswith((texts.DOWNLOAD_DONE, "הושלם"))
                     logger.error(
                         "Terminal message %r could not be delivered (both edit and fallback failed); "
                         "deleting stale progress message to prevent misleading status",
                         text,
                     )
+                    deleted = False
+                    del_exc = None
                     if hasattr(old_message, "delete") and callable(old_message.delete):
                         try:
-                            await old_message.delete()
+                            await call_with_flood_retry(
+                                old_message.delete,
+                                max_retries=self._max_retries,
+                                max_wait_seconds=self._max_wait_seconds,
+                                sleep_func=self._sleep,
+                            )
+                            deleted = True
                             logger.info("Deleted stale progress message after complete terminal delivery failure")
-                        except Exception:
+                        except Exception as exc:
+                            del_exc = exc
                             logger.warning(
                                 "Failed to delete stale progress message after terminal delivery failure: %r",
                                 text,
                                 exc_info=True,
                             )
+
+                    if not deleted or is_failure:
+                        flood_secs = [
+                            get_flood_wait_seconds(e)
+                            for e in (flood_exc, respond_exc, del_exc)
+                            if e is not None and isinstance(e, FLOOD_WAIT_ERRORS)
+                        ]
+                        wait_seconds = float(max(flood_secs)) if flood_secs else 10.0
+                        self._deferred_task = asyncio.create_task(
+                            _deferred_terminal_retry(
+                                old_message,
+                                text,
+                                buttons,
+                                wait_seconds=wait_seconds,
+                                sleep_func=self._sleep,
+                                is_failure=is_failure,
+                                needs_delete=not deleted,
+                            )
+                        )
 
 
 class UploadProgress:

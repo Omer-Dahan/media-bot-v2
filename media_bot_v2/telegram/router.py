@@ -69,6 +69,7 @@ INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 # The quality menu waits at most this long for the real title/duration; past
 # it the menu goes out with its placeholders (see fetch_title_duration).
 MENU_LOOKUP_TIMEOUT_SECONDS = 8.0
+MENU_STATUS_TIMEOUT_SECONDS = 12.0
 _MARKDOWN_SPECIALS = str.maketrans({"*": " ", "_": " ", "`": "'", "[": "(", "]": ")"})
 
 
@@ -297,44 +298,57 @@ def register_handlers(
             await _safe_answer_callback(event, texts.YOUTUBE_LINK_EXPIRED, alert=True)
             return
 
-        delivery = load_delivery(event.sender_id, first_name=None, username=None)
-
-        # Edit the menu message itself into the progress message (one message
-        # per download, no new one), and confirm with a short toast.
-        quality_name = texts.QUALITY_NAMES.get(quality, quality)
-        if quality == "audio":
-            toast = texts.QUALITY_TOAST_AUDIO
-            status_text = texts.DOWNLOADING_AUDIO
-        else:
-            toast = texts.QUALITY_TOAST.format(name=quality_name)
-            status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
-        await _safe_answer_callback(event, toast)
-        message = None
+        progress: MessageProgressReporter | None = None
         try:
-            message = await call_with_flood_retry(event.edit, status_text, buttons=None)
-        except MessageNotModifiedError:
+            delivery = load_delivery(event.sender_id, first_name=None, username=None)
+
+            # Edit the menu message itself into the progress message (one message
+            # per download, no new one), and confirm with a short toast.
+            quality_name = texts.QUALITY_NAMES.get(quality, quality)
+            if quality == "audio":
+                toast = texts.QUALITY_TOAST_AUDIO
+                status_text = texts.DOWNLOADING_AUDIO
+            else:
+                toast = texts.QUALITY_TOAST.format(name=quality_name)
+                status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
+            await _safe_answer_callback(event, toast)
+
+            menu_deadline = time.monotonic() + MENU_STATUS_TIMEOUT_SECONDS
+            message = None
+            rem = max(0.0, menu_deadline - time.monotonic())
             try:
-                message = await call_with_flood_retry(event.get_message)
+                message = await call_with_flood_retry(
+                    event.edit, status_text, buttons=None, max_wait_seconds=rem
+                )
+            except MessageNotModifiedError:
+                try:
+                    rem = max(0.0, menu_deadline - time.monotonic())
+                    message = await call_with_flood_retry(event.get_message, max_wait_seconds=rem)
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
+                    message = getattr(event, "message", None)
             except (RPCError, ConnectionError, TimeoutError, OSError):
-                logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
-                message = getattr(event, "message", None)
-        except (RPCError, ConnectionError, TimeoutError, OSError):
-            logger.debug("Failed to edit the quality menu message", exc_info=True)
-        if message is None:
-            try:
-                message = await call_with_flood_retry(event.respond, status_text)
-            except Exception:
-                logger.debug("Failed to send new status message after edit failure", exc_info=True)
-                message = getattr(event, "message", None) or event
-        progress = MessageProgressReporter(message)
-        uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel,
-            workers=upload_workers, connections=upload_connections,
-            adaptive=True,
-            on_flood=progress.handle_flood_wait,
-        )
+                logger.debug("Failed to edit the quality menu message", exc_info=True)
+            if message is None:
+                rem = max(0.0, menu_deadline - time.monotonic())
+                if rem > 0:
+                    try:
+                        message = await call_with_flood_retry(
+                            event.respond, status_text, max_wait_seconds=rem
+                        )
+                    except Exception:
+                        logger.debug("Failed to send new status message after edit failure", exc_info=True)
+                        message = getattr(event, "message", None) or event
+                else:
+                    message = getattr(event, "message", None) or event
+            progress = MessageProgressReporter(message)
+            uploader = TelethonUploader(
+                client, chat_id=event.chat_id, archive_channel=archive_channel,
+                workers=upload_workers, connections=upload_connections,
+                adaptive=True,
+                on_flood=progress.handle_flood_wait,
+            )
 
-        try:
             is_playlist = is_playlist_url(url)
             total_credits = credits_service.get_total_credits(event.sender_id)
             if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
@@ -356,7 +370,8 @@ def register_handlers(
             cache_key = compute_cache_key(media_ref, quality, delivery.send_as, delivery.subtitles)
 
             async def on_wait() -> None:
-                await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
+                if progress is not None:
+                    await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
             async with limiter.slot(event.sender_id, on_wait=on_wait):
                 await pipeline.run(
@@ -371,21 +386,42 @@ def register_handlers(
                     delivery=delivery,
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-            await _report_quota_error(progress, exc)
+            if progress is not None:
+                await _report_quota_error(progress, exc)
+            else:
+                await _safe_answer_callback(event, str(exc), alert=True)
         except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-            await progress.update(str(exc), is_terminal=True)
+            if progress is not None:
+                await progress.update(str(exc), is_terminal=True)
+            else:
+                await _safe_answer_callback(event, str(exc), alert=True)
         except FLOOD_WAIT_ERRORS as exc:
             wait_seconds = get_flood_wait_seconds(exc)
             logger.warning("YouTube download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-            await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+            if progress is not None:
+                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
         except TimeoutError:
-            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+            if progress is not None:
+                try:
+                    await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on timeout", exc_info=True)
         except Exception:
             logger.exception("YouTube download failed for url=%s", url)
-            try:
-                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-            except Exception:
-                logger.debug("Failed to update progress on general failure", exc_info=True)
+            if progress is not None:
+                try:
+                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on general failure", exc_info=True)
+            else:
+                await _safe_answer_callback(event, texts.DOWNLOAD_FAILED, alert=True)
+                try:
+                    await call_with_flood_retry(event.edit, texts.DOWNLOAD_FAILED, buttons=None)
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    try:
+                        await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
+                    except (RPCError, ConnectionError, TimeoutError, OSError):
+                        logger.debug("Failed to report error after early failure in quality pick", exc_info=True)
 
     # Private chats only, like the old bot: a link posted in a group is ignored.
     @client.on(events.NewMessage(func=lambda e: bool(getattr(e, "is_private", False))))
@@ -402,77 +438,141 @@ def register_handlers(
             return
         url = match.group(0)
 
-        first_name, username = _sender_info(event)
-        delivery = load_delivery(event.sender_id, first_name=first_name, username=username)
+        progress: MessageProgressReporter | None = None
+        try:
+            first_name, username = _sender_info(event)
+            delivery = load_delivery(event.sender_id, first_name=first_name, username=username)
 
-        if _host_matches(url, YOUTUBE_HOSTS):
-            url_hash = quality_store.put(url)
-            probe_engine = build_youtube_engine("720")
-            title, duration = await fetch_title_duration(
-                url, opts=probe_engine.info_opts(url), timeout=MENU_LOOKUP_TIMEOUT_SECONDS
-            )
-            await call_with_flood_retry(
-                event.respond,
-                texts.YOUTUBE_QUALITY_SELECT.format(
-                    title=(title or "סרטון יוטיוב").translate(_MARKDOWN_SPECIALS),
-                    duration=duration or "לא ידוע",
-                ),
-                buttons=build_quality_markup(url_hash, default=delivery.default_quality),
-            )
-            return
-        if _host_matches(url, TIKTOK_HOSTS):
-            message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
-            progress = MessageProgressReporter(message)
-            uploader = TelethonUploader(
-                client, chat_id=event.chat_id, archive_channel=archive_channel,
-                workers=upload_workers, connections=upload_connections,
-                adaptive=True,
-                on_flood=progress.handle_flood_wait,
-            )
+            if _host_matches(url, YOUTUBE_HOSTS):
+                url_hash = quality_store.put(url)
+                probe_engine = build_youtube_engine("720")
+                title, duration = await fetch_title_duration(
+                    url, opts=probe_engine.info_opts(url), timeout=MENU_LOOKUP_TIMEOUT_SECONDS
+                )
+                await call_with_flood_retry(
+                    event.respond,
+                    texts.YOUTUBE_QUALITY_SELECT.format(
+                        title=(title or "סרטון יוטיוב").translate(_MARKDOWN_SPECIALS),
+                        duration=duration or "לא ידוע",
+                    ),
+                    buttons=build_quality_markup(url_hash, default=delivery.default_quality),
+                )
+                return
+            if _host_matches(url, TIKTOK_HOSTS):
+                message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
+                progress = MessageProgressReporter(message)
+                uploader = TelethonUploader(
+                    client, chat_id=event.chat_id, archive_channel=archive_channel,
+                    workers=upload_workers, connections=upload_connections,
+                    adaptive=True,
+                    on_flood=progress.handle_flood_wait,
+                )
 
-            async def on_wait() -> None:
-                await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
+                async def on_wait() -> None:
+                    if progress is not None:
+                        await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
-            tiktok_engine = TikTokEngine(
-                registry=registry,
-                health_tracker=health_tracker,
-                max_download_size=max_download_size,
-                cookies_file=tiktok_cookies_file,
-                progress=progress,
-            )
+                tiktok_engine = TikTokEngine(
+                    registry=registry,
+                    health_tracker=health_tracker,
+                    max_download_size=max_download_size,
+                    cookies_file=tiktok_cookies_file,
+                    progress=progress,
+                )
 
-            try:
-                async with limiter.slot(event.sender_id, on_wait=on_wait):
-                    await pipeline.run(
-                        user_id=event.sender_id,
-                        url=url,
-                        engine=tiktok_engine,
-                        uploader=uploader,
-                        progress=progress,
-                        cache=video_cache_store,
-                        cache_key=compute_cache_key(url, "tiktok", delivery.send_as),
-                        archive_channel=archive_channel,
-                        delivery=delivery,
-                    )
-            except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-                await _report_quota_error(progress, exc)
-            except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                await progress.update(str(exc), is_terminal=True)
-            except FLOOD_WAIT_ERRORS as exc:
-                wait_seconds = get_flood_wait_seconds(exc)
-                logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-            except TimeoutError:
-                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-            except Exception:
-                logger.exception("TikTok download failed for url=%s", url)
                 try:
-                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    async with limiter.slot(event.sender_id, on_wait=on_wait):
+                        await pipeline.run(
+                            user_id=event.sender_id,
+                            url=url,
+                            engine=tiktok_engine,
+                            uploader=uploader,
+                            progress=progress,
+                            cache=video_cache_store,
+                            cache_key=compute_cache_key(url, "tiktok", delivery.send_as),
+                            archive_channel=archive_channel,
+                            delivery=delivery,
+                        )
+                except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+                    await _report_quota_error(progress, exc)
+                except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
+                    await progress.update(str(exc), is_terminal=True)
+                except FLOOD_WAIT_ERRORS as exc:
+                    wait_seconds = get_flood_wait_seconds(exc)
+                    logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+                except TimeoutError:
+                    try:
+                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on timeout", exc_info=True)
                 except Exception:
-                    logger.debug("Failed to update progress on general failure", exc_info=True)
-            return
-        if _host_matches(url, INSTAGRAM_HOSTS):
-            if not matches_instagram_url(url):
+                    logger.exception("TikTok download failed for url=%s", url)
+                    try:
+                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on general failure", exc_info=True)
+                return
+            if _host_matches(url, INSTAGRAM_HOSTS):
+                if not matches_instagram_url(url):
+                    await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+                    return
+
+                message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
+                progress = MessageProgressReporter(message)
+                uploader = TelethonUploader(
+                    client, chat_id=event.chat_id, archive_channel=archive_channel,
+                    workers=upload_workers, connections=upload_connections,
+                    adaptive=True,
+                    on_flood=progress.handle_flood_wait,
+                )
+
+                async def on_wait() -> None:
+                    if progress is not None:
+                        await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
+
+                instagram_engine = InstagramEngine(
+                    max_download_size=max_download_size,
+                    cookies_file=instagram_cookies_file,
+                    force_ipv4=force_ipv4,
+                    progress=progress,
+                )
+
+                try:
+                    async with limiter.slot(event.sender_id, on_wait=on_wait):
+                        await pipeline.run(
+                            user_id=event.sender_id,
+                            url=url,
+                            engine=instagram_engine,
+                            uploader=uploader,
+                            progress=progress,
+                            cache=video_cache_store,
+                            cache_key=compute_cache_key(extract_instagram_id(url) or url, "instagram", delivery.send_as),
+                            archive_channel=archive_channel,
+                            delivery=delivery,
+                        )
+                except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+                    await _report_quota_error(progress, exc)
+                except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
+                    await progress.update(str(exc), is_terminal=True)
+                except FLOOD_WAIT_ERRORS as exc:
+                    wait_seconds = get_flood_wait_seconds(exc)
+                    logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+                except TimeoutError:
+                    try:
+                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on timeout", exc_info=True)
+                except Exception:
+                    logger.exception("Instagram download failed for url=%s", url)
+                    try:
+                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on general failure", exc_info=True)
+                return
+
+            if not direct_engine.matches(url):
                 await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
                 return
 
@@ -486,88 +586,50 @@ def register_handlers(
             )
 
             async def on_wait() -> None:
-                await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
-
-            instagram_engine = InstagramEngine(
-                max_download_size=max_download_size,
-                cookies_file=instagram_cookies_file,
-                force_ipv4=force_ipv4,
-                progress=progress,
-            )
+                if progress is not None:
+                    await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
             try:
                 async with limiter.slot(event.sender_id, on_wait=on_wait):
                     await pipeline.run(
                         user_id=event.sender_id,
                         url=url,
-                        engine=instagram_engine,
+                        engine=direct_engine,
                         uploader=uploader,
                         progress=progress,
                         cache=video_cache_store,
-                        cache_key=compute_cache_key(extract_instagram_id(url) or url, "instagram", delivery.send_as),
+                        cache_key=compute_cache_key(url, "direct", delivery.send_as),
                         archive_channel=archive_channel,
                         delivery=delivery,
                     )
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 await _report_quota_error(progress, exc)
-            except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
+            except (DownloadTooLargeError, UnsupportedUrlError) as exc:
                 await progress.update(str(exc), is_terminal=True)
             except FLOOD_WAIT_ERRORS as exc:
                 wait_seconds = get_flood_wait_seconds(exc)
-                logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
+                logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
                 await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
             except TimeoutError:
-                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                try:
+                    await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on timeout", exc_info=True)
             except Exception:
-                logger.exception("Instagram download failed for url=%s", url)
+                logger.exception("Direct download failed for url=%s", url)
                 try:
                     await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
                 except Exception:
                     logger.debug("Failed to update progress on general failure", exc_info=True)
-            return
-
-        if not direct_engine.matches(url):
-            await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
-            return
-
-        message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
-        progress = MessageProgressReporter(message)
-        uploader = TelethonUploader(
-            client, chat_id=event.chat_id, archive_channel=archive_channel,
-            workers=upload_workers, connections=upload_connections,
-            adaptive=True,
-            on_flood=progress.handle_flood_wait,
-        )
-
-        async def on_wait() -> None:
-            await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
-
-        try:
-            async with limiter.slot(event.sender_id, on_wait=on_wait):
-                await pipeline.run(
-                    user_id=event.sender_id,
-                    url=url,
-                    engine=direct_engine,
-                    uploader=uploader,
-                    progress=progress,
-                    cache=video_cache_store,
-                    cache_key=compute_cache_key(url, "direct", delivery.send_as),
-                    archive_channel=archive_channel,
-                    delivery=delivery,
-                )
-        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-            await _report_quota_error(progress, exc)
-        except (DownloadTooLargeError, UnsupportedUrlError) as exc:
-            await progress.update(str(exc), is_terminal=True)
-        except FLOOD_WAIT_ERRORS as exc:
-            wait_seconds = get_flood_wait_seconds(exc)
-            logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-            await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-        except TimeoutError:
-            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
         except Exception:
-            logger.exception("Direct download failed for url=%s", url)
-            try:
-                await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-            except Exception:
-                logger.debug("Failed to update progress on general failure", exc_info=True)
+            logger.exception("Handler failed for url=%s", url)
+            if progress is not None:
+                try:
+                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on general handler failure", exc_info=True)
+            else:
+                try:
+                    await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
+                except Exception:
+                    logger.debug("Failed to send error response on handler failure", exc_info=True)
