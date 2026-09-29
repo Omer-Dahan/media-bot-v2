@@ -173,7 +173,7 @@ def classify_instagram_error(message: str | None) -> str:
     is logged instead.
     """
     if not message:
-        return "ההורדה נכשלה: לא התקבל קובץ מדיה מאינסטגרם."
+        return "❌ ההורדה נכשלה: לא התקבל קובץ מדיה מאינסטגרם.\n➡️ נסה שוב או שלח קישור אחר."
     lowered = message.lower()
     for keywords, hebrew in _ERROR_PATTERNS:
         if any(keyword in lowered for keyword in keywords):

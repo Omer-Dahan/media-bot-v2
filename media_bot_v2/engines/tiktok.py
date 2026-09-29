@@ -142,7 +142,7 @@ class TikTokEngine(BaseEngine):
             raise
         except Exception as exc:
             logger.warning("Local TikTok engine failed for %s: %s", url, exc)
-            tracker.record("מנוע מקומי (yt-dlp)", summarize_ytdlp_failure(exc))
+            tracker.record("גיבוי מקומי", summarize_ytdlp_failure(exc))
             raise TikTokDownloadError(tracker.format_summary()) from exc
 
     def _make_progress_hook(

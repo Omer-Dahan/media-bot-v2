@@ -1,4 +1,4 @@
-"""M11: the shared bar/percent/size/speed/ETA renderer used by both the
+"""M11/M11.3: the shared bar/percent/size/speed/ETA renderer used by both the
 download (yt-dlp hook) and upload (byte-count) progress messages."""
 
 import re
@@ -8,7 +8,9 @@ from media_bot_v2.telegram.progress_format import (
     BAR_EMPTY,
     BAR_FILLED,
     BAR_WIDTH,
+    EMBED_LTR,
     LRM,
+    POP_EMBED,
     format_progress,
     human_eta,
     render_bar,
@@ -35,6 +37,51 @@ def _first_strong_is_rtl(line: str) -> bool:
         if bidi in ("R", "AL"):
             return True
     return False
+
+
+# --- a small, hand-verified UAX#9 special case, used below to check real
+# --- visual (not just logical/source-order) placement --------------------
+#
+# `python-bidi`/`libfribidi` are not installed in this project (no new
+# dependencies for this round) so this suite cannot shell out to a real bidi
+# engine at test time. Per the round's instructions, the fix was instead
+# cross-checked *during development* against a real, standards-conformant
+# implementation (`python-bidi` 0.6.11, installed only in a disposable
+# throwaway venv outside the repo, never added as a dependency here) - see
+# progress_format.py's module docstring for the reasoning and the exact
+# before/after visual strings that verification produced.
+#
+# The check below re-derives the same conclusion from the Unicode Bidirectional
+# Algorithm (UAX#9) rules directly, for the one restricted shape this
+# formatter actually produces: a base-RTL paragraph consisting of
+# [R/neutral label][EMBED_LTR][L/EN/neutral content, no R][POP_EMBED].
+#
+# For that shape specifically (no nested strong-R inside the embedding, no
+# other embeddings): explicit-level rule X5a assigns the embedded span one
+# level higher than the label; implicit rule I2 bumps the (odd) label's
+# level no further since it is already R; L2 ("from the highest level down
+# to the lowest odd level, reverse each contiguous run at or above that
+# level") then reverses the embedded span once (its own, higher level) and
+# reverses the *whole line* once more (the lowest odd level present, the
+# label's). Two reversals of the embedded span cancel out, so it renders in
+# its typed order; the single remaining reversal of the whole line is what
+# swaps the label and the embedded span's relative screen position. Net
+# result: screen order (left to right) is [embedded content, in typed
+# order] followed by [label] - i.e. reading right-to-left, label first,
+# then the embedded content in the order it was typed.
+def _visual_screen_order_ltr_embed(line: str) -> list[str]:
+    """Split `line` into [text before EMBED_LTR, text inside EMBED_LTR..POP_EMBED]
+    and return them in left-to-right screen order per the derivation above.
+    Only valid when the embedded span has no strong-RTL characters in it
+    (asserted here, since that is the precondition the derivation relies on)."""
+    before, _, rest = line.partition(EMBED_LTR)
+    inside, _, _after = rest.partition(POP_EMBED)
+    for ch in inside:
+        assert unicodedata.bidirectional(ch) not in ("R", "AL"), (
+            f"{ch!r} inside the embedded span is strong-RTL; "
+            "the special-case derivation above does not apply"
+        )
+    return [inside, before]
 
 
 # --- render_bar -------------------------------------------------------------
@@ -105,6 +152,29 @@ def test_format_progress_zero_or_non_finite_speed_is_omitted():
     for bad_speed in (0.0, float("nan"), float("inf")):
         text = format_progress(PHASE, transferred=50, total=100, speed=bad_speed)
         assert "מהירות" not in text
+
+
+# --- non-numeric speed/eta must not raise (finding 0.2) ----------------------
+
+
+def test_format_progress_non_numeric_speed_is_silently_omitted():
+    """A yt-dlp hook can report speed as `""` (unset) rather than `None` -
+    `"" > 0` raises `TypeError`, so this must not raise either."""
+    for junk_speed in ("", "unknown", None, [], {}):
+        text = format_progress(PHASE, transferred=50, total=100, speed=junk_speed)
+        assert "מהירות" not in text
+        assert "⚡" not in text
+
+
+def test_format_progress_non_numeric_eta_is_silently_omitted():
+    for junk_eta in ("", "unknown", [], {}):
+        text = format_progress(PHASE, transferred=50, total=100, eta=junk_eta)
+        assert "זמן משוער" not in text
+
+
+def test_human_eta_non_numeric_returns_none():
+    for junk in ("", "unknown", [], {}, object()):
+        assert human_eta(junk) is None
 
 
 def test_format_progress_positive_speed_is_shown():
@@ -219,15 +289,56 @@ def test_bar_and_percent_stay_in_sync_across_boundaries():
 # --- RTL: the bar/percent/size and speed/ETA lines carry an LTR override ----
 
 
-def test_bar_line_opens_with_hebrew_label_then_left_to_right_mark():
+def test_bar_line_opens_with_hebrew_label_then_embedded_ltr_run():
     text = format_progress(PHASE, transferred=45, total=100)
     bar_line = text.split("\n")[1]
-    assert not bar_line.startswith(LRM)  # LRM is itself strong-L; can't be first
-    assert LRM in bar_line
-    # Hebrew label precedes the LRM-anchored numeric/bar run
-    assert bar_line.index("התקדמות") < bar_line.index(LRM)
-    # within that LTR-anchored run, logical order is bar, then percent, then sizes
-    assert bar_line.index(BAR_FILLED) < bar_line.index("%") < bar_line.index("(")
+    assert not bar_line.startswith(EMBED_LTR)  # a strong-L char can't open an RTL line
+    assert EMBED_LTR in bar_line and POP_EMBED in bar_line
+    # Hebrew label precedes the embedded numeric/bar run
+    assert bar_line.index("התקדמות") < bar_line.index(EMBED_LTR)
+    # wrapped in backticks (Markdown inline code / monospace - finding 0.3):
+    # a proportional font renders BAR_FILLED/BAR_EMPTY at uneven widths,
+    # breaking the bar's alignment on some Android/iOS clients.
+    assert "`" in bar_line
+    inside = bar_line.partition(EMBED_LTR)[2].partition(POP_EMBED)[0]
+    # *typed* (logical/source) order inside the embedded run is size, then
+    # percent, then bar - the reverse of reading order. This is what the
+    # bidi visual-order test below (which is the one that actually matters)
+    # confirms lands bar-closest-to-label on screen; see the module
+    # docstring for why a naive bar-first typed order does not.
+    assert inside.index("(") < inside.index("%") < inside.index(BAR_FILLED)
+
+def test_bar_line_visual_order_is_label_then_bar_then_percent_then_sizes():
+    """The actual finding: cross-checked against a real bidi engine (see
+    module docstring and the header comment above `_visual_screen_order_ltr_embed`),
+    a bare LRM left the bar thrown to the far visual edge, disconnected from
+    the label, with the parenthesised size pair mirrored and broken apart.
+    The fix must produce, right-to-left (the order a person actually reads
+    this line): label, then bar, then percent, then sizes."""
+    text = format_progress(PHASE, transferred=45 * 1024 * 1024, total=100 * 1024 * 1024)
+    bar_line = text.split("\n")[1]
+    content, label = _visual_screen_order_ltr_embed(bar_line)
+
+    # `content` is the embedded span, screen-ordered left-to-right (per the
+    # derivation above, an embedded run with no strong-RTL inside renders in
+    # its typed order). Left-to-right on screen it is [sizes][percent][bar],
+    # i.e. bar sits at its *right* edge - immediately next to the label
+    # (which the derivation places further right still). Reading
+    # right-to-left, that is label, then bar, then percent, then sizes.
+    assert content.index("(45.0MB/100.0MB)") < content.index("45%") < content.index(BAR_FILLED)
+    assert "התקדמות" in label
+
+
+def test_bar_line_visual_order_holds_at_boundary_percents():
+    for percent in (0, 1, 50, 99, 100):
+        total = 1_000_000
+        transferred = percent / 100 * total
+        text = format_progress(PHASE, transferred=transferred, total=total)
+        bar_line = text.split("\n")[1]
+        content, label = _visual_screen_order_ltr_embed(bar_line)
+        bar_char = BAR_FILLED if BAR_FILLED in content else BAR_EMPTY
+        assert content.index(f"{percent}%") < content.rindex(bar_char)
+        assert "התקדמות" in label
 
 
 def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():

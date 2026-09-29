@@ -15,6 +15,7 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.telegram import texts
 
 
 class _FakeEngine(BaseEngine):
@@ -146,7 +147,7 @@ async def test_successful_download_charges_credits_and_deletes_local_file(
         user = session.query(User).filter(User.user_id == 1).one()
         assert user.free == 2  # exactly one credit deducted
 
-    assert progress.updates[-1] == "הושלם ✅"
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
 
 async def test_failed_download_charges_nothing_and_leaves_no_files(
@@ -261,7 +262,7 @@ async def test_archive_forward_failure_does_not_fail_download_or_undo_charge(
         user = session.query(User).filter(User.user_id == 1).one()
         assert user.free == 2  # still charged - the user got the file
 
-    assert progress.updates[-1] == "הושלם ✅"
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
 
 async def test_successful_download_writes_a_cache_entry_when_archive_channel_configured(
@@ -366,7 +367,7 @@ async def test_cache_hit_resends_without_calling_the_engine_and_charges_no_credi
         user = session.query(User).filter(User.user_id == 1).one()
         assert user.free == 3  # cache hits are free - no credit deducted
 
-    assert progress.updates[-1] == "הושלם ✅"
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
 
 async def test_cache_hit_that_fails_to_resend_deletes_the_stale_entry_and_downloads_fresh(

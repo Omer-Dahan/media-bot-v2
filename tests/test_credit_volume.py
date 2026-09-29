@@ -285,4 +285,8 @@ async def test_settings_screen_hides_balance_when_vip_disabled_or_owner(session_
         client = _settings_router(session_factory, **kwargs)
         event_ = _Event(1)
         await _settings_handler(client)(event_)
-        assert event_.responses[0] == texts.SETTINGS
+        # No credits line when VIP is off / the caller is an owner - the body
+        # (current quality/format/subtitles/description-length) is unaffected.
+        assert "קרדיטים נותרו" not in event_.responses[0]
+        assert "💳" not in event_.responses[0]
+        assert texts.SETTINGS_HEADER in event_.responses[0]

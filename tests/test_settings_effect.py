@@ -205,7 +205,7 @@ async def test_out_of_credits_message_carries_the_contact_button(session_factory
     await _find_ytq_handler(client)(cb)
 
     message = cb.menu_message
-    assert message.edits[-1] == "❌ הקרדיטים שלך נגמרו.\nלרכישת קרדיטים נוספים, צור קשר עם יוצר הבוט. 👇"
+    assert message.edits[-1] == texts.CREDITS_EXHAUSTED
     (row,) = message.edit_kwargs[-1]["buttons"]
     assert (row[0].text, row[0].type.url) == ("💬 לרכישת קרדיטים", "https://t.me/YD_IL")
 

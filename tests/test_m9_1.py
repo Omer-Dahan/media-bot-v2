@@ -87,7 +87,7 @@ async def test_conversion_timeout_sends_the_original_and_does_not_fail_the_reque
 
     assert [p.name for p in uploader.sent] == ["clip.mp4"]  # the original, unconverted
     assert texts.REQUEST_TIMEOUT_EXCEEDED not in progress.updates
-    assert progress.updates[-1] == texts.DOWNLOAD_DONE
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)
     with session_factory() as session:
         assert session.query(User).filter(User.user_id == 1).one().free == 2  # delivered -> charged
     orphans = await asyncio.to_thread(

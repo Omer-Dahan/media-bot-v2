@@ -46,6 +46,7 @@ import asyncio
 import inspect
 import logging
 import shutil
+import time
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass, replace
@@ -108,6 +109,15 @@ async def _update_progress(
             await progress.update(text, is_terminal=is_terminal)
 
 
+def _quality_label(height: int, *, as_document: bool) -> str:
+    """What actually went out, for the completion summary - never a guess:
+    `height` is 0 when the probe couldn't read a resolution (e.g. audio-only
+    or an unprobeable file), in which case only the format word is shown."""
+    if as_document:
+        return f"קובץ ({height}p)" if height else "קובץ"
+    return f"{height}p" if height else "וידאו"
+
+
 class Uploader(Protocol):
     async def send_file(
         self,
@@ -167,6 +177,10 @@ class DownloadPipeline:
         archive_channel: str | None = None,
         delivery: DeliveryOptions | None = None,
     ) -> None:
+        # Wall-clock start of this request, for the completion summary's
+        # "total time" line (texts.format_download_summary) - UI-only, never
+        # read by any billing/cache/retry decision.
+        request_started = time.monotonic()
         self._credits.check_quota(user_id)
         delivery = delivery or DeliveryOptions()
 
@@ -179,6 +193,7 @@ class DownloadPipeline:
                 cached=cached,
                 progress=progress,
                 delivery=delivery,
+                request_started=request_started,
             ):
                 return
             if cached is not None:
@@ -384,7 +399,19 @@ class DownloadPipeline:
                     is_terminal=True,
                 )
             else:
-                await _update_progress(progress, texts.DOWNLOAD_DONE, is_terminal=True)
+                quality_label = None
+                duration_seconds = None
+                if len(groups) == 1:
+                    info = groups[0].info
+                    quality_label = _quality_label(info.height, as_document=delivery.as_document)
+                    duration_seconds = info.duration or None
+                summary = texts.format_download_summary(
+                    quality_label=quality_label,
+                    duration_seconds=duration_seconds,
+                    size_bytes=sum(delivered_sizes) or None,
+                    elapsed_seconds=time.monotonic() - request_started,
+                )
+                await _update_progress(progress, summary, is_terminal=True)
         except TimeoutError as exc:
             cancel_token.set()
             dl_expired = bool(dl_cm and callable(getattr(dl_cm, "expired", None)) and dl_cm.expired())
@@ -588,6 +615,7 @@ class DownloadPipeline:
         cached: CacheEntry,
         progress: ProgressReporter,
         delivery: DeliveryOptions,
+        request_started: float,
     ) -> bool:
         try:
             await _update_progress(progress, texts.DOWNLOAD_FROM_CACHE, is_terminal=False)
@@ -621,7 +649,21 @@ class DownloadPipeline:
             delivery=delivery,
             reply_to=reply_to,
         )
-        await _update_progress(progress, texts.DOWNLOAD_DONE, is_terminal=True)
+        quality_label = None
+        duration_seconds = None
+        if len(cached.items) == 1:
+            item = cached.items[0]
+            quality_label = _quality_label(item.height, as_document=delivery.as_document)
+            duration_seconds = item.duration or None
+        summary = texts.format_download_summary(
+            quality_label=quality_label,
+            duration_seconds=duration_seconds,
+            # A cache resend doesn't re-measure bytes transferred, so size is
+            # not reported here - never a guessed/stale number.
+            size_bytes=None,
+            elapsed_seconds=time.monotonic() - request_started,
+        )
+        await _update_progress(progress, summary, is_terminal=True)
         return True
 
     def _cleanup(self, task_dir: Path) -> None:

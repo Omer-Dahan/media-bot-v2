@@ -26,6 +26,7 @@ from media_bot_v2.credits.exceptions import (
     UserBlockedException,
 )
 from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.db.models import Setting
 from media_bot_v2.db.session import session_scope
 from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
 from media_bot_v2.engines.direct import DirectEngine
@@ -191,14 +192,15 @@ def register_handlers(
         )
         registry = ProviderRegistry()
 
-    def settings_text(user_id: int) -> str:
+    def settings_text(user_id: int, setting: Setting) -> str:
         # Read the balance from the DB on every render (the service keeps no
         # cache), so it reflects the latest charge. Hidden when credits do not
         # apply to this user (ENABLE_VIP off, or an owner): the balance is inf.
+        body = settings_menu.describe_settings(setting)
         remaining = credits_service.get_total_credits(user_id)
         if not math.isfinite(remaining):
-            return texts.SETTINGS
-        return texts.SETTINGS + texts.SETTINGS_CREDITS.format(credits=int(remaining))
+            return body
+        return body + "\n\n" + texts.SETTINGS_CREDITS.format(credits=int(remaining))
 
     def load_delivery(user_id: int, *, first_name: str | None, username: str | None) -> DeliveryOptions:
         """Create the user row if needed and snapshot their saved settings."""
@@ -263,7 +265,8 @@ def register_handlers(
                 session, event.sender_id, first_name=first_name, username=username, free_download=free_download
             )
             buttons = settings_menu.build_settings_buttons(user.settings)
-        await call_with_flood_retry(event.respond, settings_text(event.sender_id), buttons=buttons)
+            text = settings_text(event.sender_id, user.settings)
+        await call_with_flood_retry(event.respond, text, buttons=buttons)
 
     @client.on(events.CallbackQuery(pattern=rb"^toggle_"))
     async def toggle_handler(event: events.CallbackQuery.Event) -> None:
@@ -274,13 +277,14 @@ def register_handlers(
             )
             answer = settings_menu.apply_toggle(user.settings, toggle_key)
             buttons = settings_menu.build_settings_buttons(user.settings)
+            text = settings_text(event.sender_id, user.settings)
         # The old bot popped an alert for the title-length toggle since its
         # answer text explains a behavior change (separate message/Telegraph
         # link), not just a value flip - a toast is easy to miss for that.
         alert = toggle_key == settings_menu.TOGGLE_TITLE_LEN
         await _safe_answer_callback(event, answer, alert=alert)
         try:
-            await call_with_flood_retry(event.edit, settings_text(event.sender_id), buttons=buttons)
+            await call_with_flood_retry(event.edit, text, buttons=buttons)
         except MessageNotModifiedError:
             pass  # content unchanged (e.g. same toggle value) - nothing to surface
 

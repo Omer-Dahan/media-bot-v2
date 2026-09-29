@@ -266,7 +266,7 @@ async def test_partial_upload_is_not_cached_and_repeat_request_downloads_again(t
     assert engine.calls == 2
     assert uploader.cached_sends == []
     assert [p.name for p in uploader.sent[-2:]] == ["part1.bin", "part2.bin"]
-    assert second.updates[-1] == texts.DOWNLOAD_DONE
+    assert second.updates[-1].startswith(texts.DOWNLOAD_DONE)
 
     # The complete result *is* cached, with every part, and request 3 is a
     # genuine full hit.

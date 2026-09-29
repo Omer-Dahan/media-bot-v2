@@ -18,6 +18,7 @@ from media_bot_v2.pipeline import DownloadPipeline
 from media_bot_v2.providers.base import BaseProvider, ProviderFetchError, ProviderResult
 from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
+from media_bot_v2.telegram import texts
 
 
 class _MockProvider(BaseProvider):
@@ -152,7 +153,7 @@ async def test_tiktok_full_pipeline_with_provider(tmp_path):
 
     assert len(uploader.sent) == 1
     assert len(uploader.archived) == 1
-    assert progress.updates[-1] == "הושלם ✅"
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
     # Verify credit deducted
     with session_factory() as session:

@@ -292,7 +292,7 @@ async def test_lesson4_failure_message_includes_routes_and_reasons(tmp_path):
     assert "פירוט הניסיונות:" in err_text
     assert "tikwm: לא נמצאה כתובת להורדה" in err_text
     assert "musicaldown: שגיאת שרת של הספק" in err_text
-    assert "מנוע מקומי (yt-dlp): סרטון דורש התחברות או אימות" in err_text
+    assert "גיבוי מקומי: סרטון דורש התחברות או אימות" in err_text
 
 
 async def test_lesson4_youtube_failure_message_includes_routes_and_reasons(tmp_path):
@@ -322,7 +322,7 @@ async def test_lesson4_youtube_failure_message_includes_routes_and_reasons(tmp_p
 
     err_text = str(exc_info.value)
     assert "פירוט הניסיונות:" in err_text
-    assert "מנוע מקומי (yt-dlp): סרטון דורש התחברות או אימות" in err_text
+    assert "גיבוי מקומי: סרטון דורש התחברות או אימות" in err_text
     assert "ytmp3: שגיאת שרת של הספק" in err_text
 
 
@@ -628,13 +628,13 @@ def test_m4_1_finding4_no_internal_path_or_host_leak_in_error_messages():
     leaky_path_msg = classify_youtube_error("ERROR: /srv/media/tmp/abc123.part: Permission denied")
     assert "/srv/media" not in leaky_path_msg
     assert ".part" not in leaky_path_msg
-    assert leaky_path_msg == "ההורדה מיוטיוב נכשלה. נסה שוב או שלח קישור אחר."
+    assert leaky_path_msg == texts.YOUTUBE_GENERIC_FAILURE
 
     # Hostname leak
     leaky_host_msg = classify_youtube_error("Failed to connect to internal-supplier.cloud.internal:8080")
     assert "internal-supplier" not in leaky_host_msg
     assert ".internal" not in leaky_host_msg
-    assert leaky_host_msg == "ההורדה מיוטיוב נכשלה. נסה שוב או שלח קישור אחר."
+    assert leaky_host_msg == texts.YOUTUBE_GENERIC_FAILURE
 
     # Failure summaries do not leak raw [:60]
     assert summarize_ytdlp_failure("/srv/media/tmp/abc123.part died") == "שגיאה במנוע המקומי"

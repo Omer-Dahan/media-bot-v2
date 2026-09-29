@@ -26,7 +26,7 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.pipeline import DownloadPipeline
-from media_bot_v2.telegram import captions
+from media_bot_v2.telegram import captions, texts
 from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.telegram.uploader import TelethonUploader
 from media_bot_v2.upload.media_probe import KIND_AUDIO, KIND_VIDEO, MediaInfo
@@ -233,7 +233,7 @@ async def test_cache_hit_resends_media_with_the_requesting_users_caption(
     assert "📐 רזולוציה: 320x240" in resent and "⏱️ אורך: 0:02 דקות" in resent
     assert "👤" not in resent and "Original Owner" not in resent  # never the archive's caption
     assert _credits_left(session_factory) == credits_after_first  # a cache hit is free
-    assert progress.updates[-1] == "הושלם ✅"
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
 
 async def test_cache_hit_with_a_deleted_archive_message_falls_back_to_a_fresh_download(
@@ -617,7 +617,7 @@ async def test_a_failing_subtitle_send_does_not_fail_the_download(client, upload
 
     progress = await _run(_pipeline(credits_service, tmp_path), engine, uploader, delivery=DeliveryOptions(subtitles=True))
 
-    assert progress.updates[-1] == "הושלם ✅"
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
 
 async def test_cached_subtitles_are_resent_only_when_the_user_wants_them(

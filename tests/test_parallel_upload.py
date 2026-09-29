@@ -262,10 +262,12 @@ async def test_user_progress_does_not_flood_the_message_and_reaches_100(tmp_path
     assert percents == sorted(percents) and len(set(percents)) == len(percents)
     assert percents[-1] == 100 and max(percents) <= 100
     assert len(percents) <= 21  # 100/5 steps + the final one, out of 200 reports
-    # Every line mixing the bar/size/speed with the Hebrew label carries the
-    # LTR override, and the byte count is the sum over every lane (not reset
-    # per connection): a monotonic, never-restarting percent proves that.
-    assert all("‎" in t for t in reporter.texts)
+    # Every line mixing the bar/size/speed with the Hebrew label carries an
+    # LTR override (a bare LRM for the speed/ETA lines, a full LRE/PDF
+    # embedding for the bar+percent+size line - see progress_format.py), and
+    # the byte count is the sum over every lane (not reset per connection): a
+    # monotonic, never-restarting percent proves that.
+    assert all(("\u200e" in t or "\u202a" in t) for t in reporter.texts)
 
 
 async def test_user_progress_is_time_throttled():

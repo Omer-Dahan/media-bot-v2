@@ -11,6 +11,7 @@ from __future__ import annotations
 from telethon import Button
 
 from media_bot_v2.db.models import Setting, User
+from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.callback_data import encode
 
 QUALITY_CYCLE = {"high": "medium", "medium": "low", "low": "high"}
@@ -52,6 +53,30 @@ def get_or_create_user(
         session.flush()
 
     return user
+
+
+def describe_settings(setting: Setting) -> str:
+    """The settings screen body: current value of every setting, always read
+    fresh off `setting` (never a static description that could drift from
+    what's actually saved), each with a one-line explanation of what it
+    controls and the current choice marked with a checkmark."""
+    quality = QUALITY_DISPLAY.get(setting.quality, "1080p")
+    fmt = FORMAT_DISPLAY.get(setting.format, "וידאו")
+    subtitles_display = "✅ פעיל" if setting.subtitles else "❌ כבוי"
+    title_len_display = "ללא הגבלה 🔗" if setting.title_length == 0 else str(setting.title_length)
+
+    return (
+        f"{texts.SETTINGS_HEADER}\n\n"
+        f"🎥 איכות: **{quality}** ✅\n"
+        "הרזולוציה המרבית שהבוט מוריד בה.\n\n"
+        f"📤 שליחה: **{fmt}** ✅\n"
+        "וידאו מתנגן ישירות בטלגרם, קובץ נשלח כמסמך להורדה.\n\n"
+        f"📝 כתוביות: **{subtitles_display}**\n"
+        "שליחת קובץ כתוביות נפרד לצד הווידאו, כשקיימות.\n\n"
+        f"📑 אורך תיאור: **{title_len_display}** ✅\n"
+        "כמה מהתיאור המקורי מוצג מתחת לקובץ.\n\n"
+        "👇 לחיצה על כפתור מחליפה לערך הבא."
+    )
 
 
 def build_settings_buttons(setting: Setting) -> list[list[Button]]:

@@ -274,8 +274,8 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "a javascript runtime is required",
         ),
         (
-            "שגיאת פענוח ביוטיוב: חסר בשרת runtime של JavaScript (Node.js או Deno) הנדרש "
-            "לפענוח חתימות יוטיוב.\nיש להתקין Node.js (גרסה 22 ומעלה) או Deno בשרת."
+            "❌ שגיאת פענוח חתימות ביוטיוב: חסר בשרת runtime של JavaScript (Node.js או Deno).\n"
+            "➡️ יש להתקין Node.js (גרסה 22 ומעלה) או Deno בשרת ולנסות שוב."
         ),
     ),
     (
@@ -289,7 +289,7 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
     (
         ("po token", "po_token", "missing a required po token"),
-        "יוטיוב דורש PO token עבור סרטון זה.\nיש להגדיר טוקן תקף בשרת (משתנה הסביבה POTOKEN).",
+        "❌ יוטיוב דורש PO token עבור סרטון זה.\n➡️ יש להגדיר טוקן תקף בשרת (משתנה הסביבה POTOKEN).",
     ),
     (
         (
@@ -304,15 +304,15 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "http error 429",
         ),
         (
-            "ההורדה מיוטיוב נחסמה (זיהוי בוט או נדרש אימות).\n"
-            "יש לעדכן את קובץ ה-cookies בשרת או להמתין להסרת החסימה."
+            "❌ ההורדה מיוטיוב נחסמה (זיהוי בוט או נדרש אימות).\n"
+            "➡️ יש לעדכן את קובץ ה-cookies בשרת או להמתין להסרת החסימה."
         ),
     ),
     (
         ("cookie", "cookies"),
         (
-            "שגיאת אימות מול יוטיוב: קובץ ה-cookies אינו תקין או שפג תוקפו.\n"
-            "יש לרענן את קובץ ה-cookies בשרת."
+            "❌ שגיאת אימות מול יוטיוב: קובץ ה-cookies אינו תקין או שפג תוקפו.\n"
+            "➡️ יש לרענן את קובץ ה-cookies בשרת."
         ),
     ),
     (
@@ -325,7 +325,7 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "members-only content",
             "video is no longer available",
         ),
-        "הסרטון אינו זמין (סרטון פרטי, נמחק, או דורש מנוי לערוץ).",
+        "❌ הסרטון אינו זמין (פרטי, נמחק, או דורש מנוי לערוץ).\n➡️ נסה קישור אחר.",
     ),
     (
         (
@@ -335,11 +335,11 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "blocked in your country",
             "georestricted",
         ),
-        "הסרטון חסום לצפייה במדינה שבה נמצא השרת (הגבלה גיאוגרפית).",
+        "❌ הסרטון חסום לצפייה במדינה שבה נמצא השרת (הגבלה גיאוגרפית).\n➡️ נסה קישור אחר.",
     ),
     (
         ("this live event", "live stream", "premieres in"),
-        "לא ניתן להוריד שידור חי פעיל. נסה שוב לאחר סיום השידור.",
+        "❌ לא ניתן להוריד שידור חי פעיל.\n➡️ נסה שוב לאחר סיום השידור.",
     ),
     (
         (
@@ -348,11 +348,11 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "the playlist is private",
             "playlist unavailable",
         ),
-        "הפלייליסט אינו זמין (פרטי, נמחק, או שאינו קיים).",
+        "❌ הפלייליסט אינו זמין (פרטי, נמחק, או שאינו קיים).\n➡️ נסה קישור אחר.",
     ),
     (
         ("requested format is not available", "no video formats found", "format not available"),
-        "ההורדה נכשלה: הפורמט המבוקש אינו זמין עבור סרטון זה. נסה איכות אחרת.",
+        "❌ הפורמט המבוקש אינו זמין עבור סרטון זה.\n➡️ נסה איכות אחרת.",
     ),
 )
 
@@ -380,7 +380,7 @@ def classify_youtube_error(message: str | None) -> str:
     hostnames, IPs, tokens or API keys. The raw text goes to the log only.
     """
     if not message:
-        return "ההורדה נכשלה: לא התקבל קובץ מדיה מיוטיוב."
+        return "❌ ההורדה נכשלה: לא התקבל קובץ מדיה מיוטיוב.\n➡️ נסה שוב או שלח קישור אחר."
     lowered = message.lower()
     for keywords, hebrew in _ERROR_PATTERNS:
         if any(keyword in lowered for keyword in keywords):
@@ -657,7 +657,7 @@ class YouTubeEngine(BaseEngine):
 
         tracker = RouteAttemptTracker()
         if initial_error:
-            tracker.record("מנוע מקומי (yt-dlp)", summarize_ytdlp_failure(initial_error))
+            tracker.record("גיבוי מקומי", summarize_ytdlp_failure(initial_error))
 
         attempted_providers: set[str] = set()
 
