@@ -151,6 +151,12 @@ NOT_MEDIA_CONTENT = (
 )
 REQUEST_TIMEOUT_EXCEEDED = "⏱️ הבקשה בוטלה עקב חריגה ממגבלת הזמן.\n➡️ נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
 
+CANCEL_BUTTON = "❌ ביטול"
+REQUEST_CANCELLED = "❌ הבקשה בוטלה."
+CANCEL_TOAST = "מבטל את הבקשה..."
+CANCEL_NOT_OWNER = "אפשר לבטל רק בקשה שהתחלת בעצמך."
+CANCEL_NOT_ACTIVE = "אין בקשה פעילה לביטול."
+
 
 def human_size(num_bytes: float | None) -> str:
     if not num_bytes:

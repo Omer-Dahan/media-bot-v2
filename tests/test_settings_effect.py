@@ -176,7 +176,9 @@ async def test_picking_a_quality_edits_the_menu_message_in_place(session_factory
     assert cb.respond_calls == 0  # no new message
     assert cb.answer_calls == [("⏳ מתחיל הורדה באיכות 720p...", False)]
     args, kwargs = cb.edit_calls[0]
-    assert args == ("🔄 מוריד באיכות 720p...",) and kwargs == {"buttons": None}
+    assert args == ("🔄 מוריד באיכות 720p...",)
+    (row,) = kwargs["buttons"]  # the ❌ cancel button, attached while the request is active
+    assert [b.text for b in row] == [texts.CANCEL_BUTTON]
     assert len(cb.messages) == 1
     # the pipeline reports into that same message
     progress = pipeline.run.call_args.kwargs["progress"]

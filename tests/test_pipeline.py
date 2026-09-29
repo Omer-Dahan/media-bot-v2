@@ -3,6 +3,7 @@ test file. See media_bot_v2/pipeline.py's module docstring for why charging
 happens only after a fully successful upload - this must hold even when the
 upload fails partway through a multi-part (split) file."""
 
+import asyncio
 from pathlib import Path
 
 import pytest
@@ -54,6 +55,42 @@ class _PartialWriteFailingEngine(BaseEngine):
         raise RuntimeError("boom: connection dropped mid-download")
 
 
+class _HangingEngine(BaseEngine):
+    """Writes a partial file to disk (as a real in-flight download would),
+    signals `ready`, then blocks until the wrapping task is cancelled - lets a
+    test cancel the pipeline mid-download and check what's left behind."""
+
+    def __init__(self, ready: asyncio.Event):
+        self._ready = ready
+
+    def matches(self, url: str) -> bool:
+        return True
+
+    async def download(self, url: str, *, dest_dir: Path, cancel_token=None):
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        (dest_dir / "partial.bin").write_bytes(b"partial-bytes")
+        self._ready.set()
+        await asyncio.Event().wait()  # never set - only cancellation ends this
+        raise AssertionError("must have been cancelled before reaching here")
+
+
+class _TwoFileEngine(BaseEngine):
+    """A result with two separately-uploaded files, so a test can cancel
+    between the two `send_file` calls and check that only the first one was
+    charged for - the same code path a real split file's parts go through."""
+
+    def matches(self, url: str) -> bool:
+        return True
+
+    async def download(self, url: str, *, dest_dir: Path, cancel_token=None) -> DownloadResult:
+        dest_dir.mkdir(parents=True, exist_ok=True)
+        first = dest_dir / "a.bin"
+        second = dest_dir / "b.bin"
+        first.write_bytes(b"aaa")
+        second.write_bytes(b"bbb")
+        return DownloadResult(file_paths=[str(first), str(second)], title="two files")
+
+
 class _FakeMessage:
     def __init__(self, id: int, label: str):
         self.id = id
@@ -97,6 +134,28 @@ class _FakeUploader:
             raise RuntimeError("boom: cached message no longer exists")
         self.cached_sends.append((archive_chat, message_ids))
         return _FakeMessage(9999, "resent-from-cache")
+
+
+class _HangingOnSecondPartUploader:
+    """Delivers the first part normally, then hangs on the second - so a test
+    can cancel while exactly one part has been delivered."""
+
+    def __init__(self, ready: asyncio.Event):
+        self._ready = ready
+        self.sent: list[Path] = []
+        self.archived: list[object] = []
+
+    async def send_file(self, path: Path, *, caption=None, **kwargs):
+        if len(self.sent) == 1:
+            self._ready.set()
+            await asyncio.Event().wait()  # never set - only cancellation ends this
+            raise AssertionError("must have been cancelled before reaching here")
+        self.sent.append(path)
+        return _FakeMessage(len(self.sent), f"message-for-{path.name}")
+
+    async def copy_to_archive(self, message, **kwargs):
+        self.archived.append(message)
+        return _FakeMessage(1000 + len(self.archived), f"archived-{message}")
 
 
 class _FakeProgress:
@@ -186,6 +245,80 @@ async def test_upload_failure_charges_nothing_and_cleans_up_partial_files(
         assert user.free == 3  # untouched - upload failed, no file was delivered
 
     assert not any(tmp_path.rglob("*.bin"))  # partial download cleaned up
+
+
+# ==============================================================================
+# M11.4: cancel button - `pipeline.run()`'s own `except asyncio.CancelledError`
+# handler is what the router's ❌ button task-cancel actually relies on: these
+# tests exercise it directly (asyncio.Task.cancel()), the same signal the
+# button handler sends, without going through Telegram/router plumbing.
+# ==============================================================================
+
+
+async def test_cancel_during_download_charges_nothing_and_leaves_no_files(
+    session_factory, credits_service, tmp_path
+):
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    progress = _FakeProgress()
+    ready = asyncio.Event()
+
+    tasks_before = {t for t in asyncio.all_tasks() if not t.done()}
+    task = asyncio.create_task(
+        pipeline.run(
+            user_id=1, url="http://x", engine=_HangingEngine(ready), uploader=uploader, progress=progress
+        )
+    )
+    await asyncio.wait_for(ready.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert uploader.sent == []  # nothing was ever delivered
+
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 3  # nothing was charged - cancelled before any delivery
+
+    assert not any(tmp_path.rglob("*"))  # the partial file and task_dir are both gone
+    # no lingering background task from this run (the limiter/pipeline's own
+    # finally blocks must have unwound completely, not left anything pending)
+    leftover = {t for t in asyncio.all_tasks() if not t.done()} - tasks_before
+    assert leftover == set()
+
+
+async def test_cancel_mid_split_upload_charges_only_the_delivered_part(
+    session_factory, credits_service, tmp_path
+):
+    """Covers the split-file/multi-part cancellation case: the first part
+    already reached the user and must be charged for; the second, which
+    never got there, must not be."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    ready = asyncio.Event()
+    uploader = _HangingOnSecondPartUploader(ready)
+    progress = _FakeProgress()
+
+    tasks_before = {t for t in asyncio.all_tasks() if not t.done()}
+    task = asyncio.create_task(
+        pipeline.run(
+            user_id=1, url="http://x", engine=_TwoFileEngine(), uploader=uploader, progress=progress
+        )
+    )
+    await asyncio.wait_for(ready.wait(), timeout=5)
+    task.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await task
+
+    assert len(uploader.sent) == 1  # only the first file was delivered before cancellation
+    assert len(uploader.archived) == 1
+
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 2  # charged for exactly the one delivered part, not two
+
+    assert not any(tmp_path.rglob("*"))  # local files (including the undelivered second part) cleaned up
+    leftover = {t for t in asyncio.all_tasks() if not t.done()} - tasks_before
+    assert leftover == set()
 
 
 async def test_quota_exhausted_never_calls_engine_and_charges_nothing(session_factory, tmp_path):

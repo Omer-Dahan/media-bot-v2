@@ -28,6 +28,7 @@ from collections.abc import Awaitable, Callable
 from typing import Any
 
 from telethon.errors import MessageNotModifiedError, RPCError, ServerError
+from telethon.tl.types import ReplyInlineMarkup
 
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.flood_wait import (
@@ -39,6 +40,12 @@ from media_bot_v2.telegram.flood_wait import (
 from media_bot_v2.telegram.progress_format import format_progress
 
 logger = logging.getLogger(__name__)
+
+# An explicit empty inline markup - the only `buttons` value Telethon passes
+# through unchanged (see `build_reply_markup`) that actually clears a
+# previously attached inline keyboard on edit, rather than leaving it (the
+# `buttons` kwarg's default, `None`, means "unchanged", not "cleared").
+_CLEAR_BUTTONS = ReplyInlineMarkup([])
 
 
 def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None = None) -> bool:
@@ -287,12 +294,20 @@ class MessageProgressReporter:
         max_retries: int = 5,
         max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
         sleep_func: Callable[[float], Awaitable[None]] | None = None,
+        clear_buttons_on_terminal: bool = False,
     ) -> None:
         self._message = message
         self._last_text: str | None = None
         self._max_retries = max_retries
         self._max_wait_seconds = max_wait_seconds
         self._sleep = sleep_func
+        # Opt-in only (default False): a message that never had a button
+        # attached (the vast majority of callers/tests) must keep getting a
+        # plain `edit(text)` call with no `buttons` kwarg at all - passing
+        # `buttons=` on every terminal edit would break any minimal fake/mock
+        # that only implements `edit(text)`. Only the router's cancel-button
+        # flows opt in, since they are the only ones that ever attach one.
+        self._clear_buttons_on_terminal = clear_buttons_on_terminal
         self._seq: int = 0
         self._last_applied_seq: int = 0
         self._is_terminal_completed: bool = False
@@ -364,6 +379,9 @@ class MessageProgressReporter:
 
         if text == self._last_text and buttons is None:
             return
+
+        if terminal and buttons is None and self._clear_buttons_on_terminal:
+            buttons = _CLEAR_BUTTONS
 
         attempts = 0
         success = False

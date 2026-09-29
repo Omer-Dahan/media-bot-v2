@@ -12,6 +12,7 @@ import math
 import re
 import time
 from collections.abc import Awaitable, Callable
+from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
@@ -49,7 +50,7 @@ from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import settings_menu, texts
-from media_bot_v2.telegram.callback_data import decode
+from media_bot_v2.telegram.callback_data import decode, encode
 from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.telegram.flood_wait import (
     FLOOD_WAIT_ERRORS,
@@ -98,6 +99,67 @@ def _display_name(first_name: str | None, username: str | None) -> str:
 
 def _contact_buttons() -> list[list[Button]]:
     return [[Button.url(texts.CREDITS_BUTTON, texts.CONTACT_URL)]]
+
+
+CANCEL_CALLBACK_DATA = encode("cancel")
+
+
+def _cancel_markup() -> list[list[Button]]:
+    return [[Button.inline(texts.CANCEL_BUTTON, CANCEL_CALLBACK_DATA)]]
+
+
+@dataclass
+class _ActiveRequest:
+    """One in-flight, cancellable `pipeline.run()` call: the task the ❌
+    button can `.cancel()`, who is allowed to press it, and the progress
+    message so the button press can confirm the cancellation immediately
+    instead of waiting for the task's own unwind to get there."""
+
+    task: asyncio.Task
+    owner_id: int
+    progress: MessageProgressReporter
+
+
+async def _run_cancellable(
+    active: dict[tuple[int, int], _ActiveRequest],
+    *,
+    chat_id: int,
+    message: Any,
+    owner_id: int,
+    progress: MessageProgressReporter,
+    coro: Awaitable[None],
+) -> None:
+    """Runs `coro` (a `pipeline.run(...)` call) as a task registered under
+    `message` for the ❌ cancel button, so a button press can interrupt it via
+    `task.cancel()`. The pipeline's own `except asyncio.CancelledError`
+    handler (media_bot_v2/pipeline.py) takes care of stopping the
+    download/upload, charging for whatever was already delivered, and
+    deleting local files - this just wires the button to that existing path.
+
+    Degrades to a plain `await coro` (no cancel button support) if `message`
+    has no `id` - the last-resort fallback in quality_pick_handler when even
+    `event.respond` failed can leave `message` as the event itself.
+    """
+    message_id = getattr(message, "id", None)
+    if message_id is None:
+        await coro
+        return
+
+    key = (chat_id, message_id)
+    task: asyncio.Task = asyncio.create_task(coro)
+    active[key] = _ActiveRequest(task=task, owner_id=owner_id, progress=progress)
+    try:
+        await task
+    except asyncio.CancelledError:
+        # Cancelled via the button (nothing else cancels this task): treat it
+        # as a handled outcome, not a failure to propagate as an error.
+        if not progress.is_terminal_completed:
+            try:
+                await progress.update(texts.REQUEST_CANCELLED, is_terminal=True)
+            except Exception:
+                logger.debug("Failed to update progress after cancellation", exc_info=True)
+    finally:
+        active.pop(key, None)
 
 
 async def _safe_answer_callback(
@@ -170,6 +232,10 @@ def register_handlers(
     instagram_cookies_file: str | None = None,
 ) -> None:
     quality_store = QualitySelectionStore()
+    # Keyed by (chat_id, progress message id) - the same pair a CallbackQuery
+    # event reports for the message its button sits under, so the cancel
+    # handler needs no id encoded into callback_data at all.
+    active_cancellations: dict[tuple[int, int], _ActiveRequest] = {}
     direct_engine = DirectEngine(max_download_size=max_download_size)
     if limiter is None:
         limiter = ConcurrencyLimiter(global_limit=100, per_user_limit=2)
@@ -322,7 +388,7 @@ def register_handlers(
             rem = max(0.0, menu_deadline - time.monotonic())
             try:
                 message = await call_with_flood_retry(
-                    event.edit, status_text, buttons=None, max_wait_seconds=rem, max_total_wait_seconds=rem
+                    event.edit, status_text, buttons=_cancel_markup(), max_wait_seconds=rem, max_total_wait_seconds=rem
                 )
             except MessageNotModifiedError:
                 try:
@@ -340,14 +406,18 @@ def register_handlers(
                 if rem > 0:
                     try:
                         message = await call_with_flood_retry(
-                            event.respond, status_text, max_wait_seconds=rem, max_total_wait_seconds=rem
+                            event.respond,
+                            status_text,
+                            buttons=_cancel_markup(),
+                            max_wait_seconds=rem,
+                            max_total_wait_seconds=rem,
                         )
                     except Exception:
                         logger.debug("Failed to send new status message after edit failure", exc_info=True)
                         message = getattr(event, "message", None) or event
                 else:
                     message = getattr(event, "message", None) or event
-            progress = MessageProgressReporter(message)
+            progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
             uploader = TelethonUploader(
                 client, chat_id=event.chat_id, archive_channel=archive_channel,
                 workers=upload_workers, connections=upload_connections,
@@ -380,16 +450,23 @@ def register_handlers(
                     await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
 
             async with limiter.slot(event.sender_id, on_wait=on_wait):
-                await pipeline.run(
-                    user_id=event.sender_id,
-                    url=url,
-                    engine=engine,
-                    uploader=uploader,
+                await _run_cancellable(
+                    active_cancellations,
+                    chat_id=event.chat_id,
+                    message=message,
+                    owner_id=event.sender_id,
                     progress=progress,
-                    cache=video_cache_store,
-                    cache_key=cache_key,
-                    archive_channel=archive_channel,
-                    delivery=delivery,
+                    coro=pipeline.run(
+                        user_id=event.sender_id,
+                        url=url,
+                        engine=engine,
+                        uploader=uploader,
+                        progress=progress,
+                        cache=video_cache_store,
+                        cache_key=cache_key,
+                        archive_channel=archive_channel,
+                        delivery=delivery,
+                    ),
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
             if progress is not None:
@@ -434,6 +511,23 @@ def register_handlers(
                     except (RPCError, ConnectionError, TimeoutError, OSError):
                         logger.debug("Failed to report error after early failure in quality pick", exc_info=True)
 
+    @client.on(events.CallbackQuery(pattern=rb"^cancel$"))
+    async def cancel_handler(event: events.CallbackQuery.Event) -> None:
+        active = active_cancellations.get((event.chat_id, event.message_id))
+        if active is None:
+            await _safe_answer_callback(event, texts.CANCEL_NOT_ACTIVE, alert=True)
+            return
+        if active.owner_id != event.sender_id:
+            await _safe_answer_callback(event, texts.CANCEL_NOT_OWNER, alert=True)
+            return
+        active.task.cancel()
+        await _safe_answer_callback(event, texts.CANCEL_TOAST)
+        if not active.progress.is_terminal_completed:
+            try:
+                await active.progress.update(texts.REQUEST_CANCELLED, is_terminal=True)
+            except Exception:
+                logger.debug("Failed to update progress on cancel button press", exc_info=True)
+
     # Private chats only, like the old bot: a link posted in a group is ignored.
     @client.on(events.NewMessage(func=lambda e: bool(getattr(e, "is_private", False))))
     async def url_handler(event: events.NewMessage.Event) -> None:
@@ -470,8 +564,10 @@ def register_handlers(
                 )
                 return
             if _host_matches(url, TIKTOK_HOSTS):
-                message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
-                progress = MessageProgressReporter(message)
+                message = await call_with_flood_retry(
+                    event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                )
+                progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
                 uploader = TelethonUploader(
                     client, chat_id=event.chat_id, archive_channel=archive_channel,
                     workers=upload_workers, connections=upload_connections,
@@ -493,16 +589,23 @@ def register_handlers(
 
                 try:
                     async with limiter.slot(event.sender_id, on_wait=on_wait):
-                        await pipeline.run(
-                            user_id=event.sender_id,
-                            url=url,
-                            engine=tiktok_engine,
-                            uploader=uploader,
+                        await _run_cancellable(
+                            active_cancellations,
+                            chat_id=event.chat_id,
+                            message=message,
+                            owner_id=event.sender_id,
                             progress=progress,
-                            cache=video_cache_store,
-                            cache_key=compute_cache_key(url, "tiktok", delivery.send_as),
-                            archive_channel=archive_channel,
-                            delivery=delivery,
+                            coro=pipeline.run(
+                                user_id=event.sender_id,
+                                url=url,
+                                engine=tiktok_engine,
+                                uploader=uploader,
+                                progress=progress,
+                                cache=video_cache_store,
+                                cache_key=compute_cache_key(url, "tiktok", delivery.send_as),
+                                archive_channel=archive_channel,
+                                delivery=delivery,
+                            ),
                         )
                 except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                     await _report_quota_error(progress, exc)
@@ -533,8 +636,10 @@ def register_handlers(
                     await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
                     return
 
-                message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
-                progress = MessageProgressReporter(message)
+                message = await call_with_flood_retry(
+                    event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                )
+                progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
                 uploader = TelethonUploader(
                     client, chat_id=event.chat_id, archive_channel=archive_channel,
                     workers=upload_workers, connections=upload_connections,
@@ -555,16 +660,25 @@ def register_handlers(
 
                 try:
                     async with limiter.slot(event.sender_id, on_wait=on_wait):
-                        await pipeline.run(
-                            user_id=event.sender_id,
-                            url=url,
-                            engine=instagram_engine,
-                            uploader=uploader,
+                        await _run_cancellable(
+                            active_cancellations,
+                            chat_id=event.chat_id,
+                            message=message,
+                            owner_id=event.sender_id,
                             progress=progress,
-                            cache=video_cache_store,
-                            cache_key=compute_cache_key(extract_instagram_id(url) or url, "instagram", delivery.send_as),
-                            archive_channel=archive_channel,
-                            delivery=delivery,
+                            coro=pipeline.run(
+                                user_id=event.sender_id,
+                                url=url,
+                                engine=instagram_engine,
+                                uploader=uploader,
+                                progress=progress,
+                                cache=video_cache_store,
+                                cache_key=compute_cache_key(
+                                    extract_instagram_id(url) or url, "instagram", delivery.send_as
+                                ),
+                                archive_channel=archive_channel,
+                                delivery=delivery,
+                            ),
                         )
                 except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                     await _report_quota_error(progress, exc)
@@ -595,8 +709,10 @@ def register_handlers(
                 await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
                 return
 
-            message = await call_with_flood_retry(event.respond, texts.DOWNLOAD_STARTED)
-            progress = MessageProgressReporter(message)
+            message = await call_with_flood_retry(
+                event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+            )
+            progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
             uploader = TelethonUploader(
                 client, chat_id=event.chat_id, archive_channel=archive_channel,
                 workers=upload_workers, connections=upload_connections,
@@ -610,16 +726,23 @@ def register_handlers(
 
             try:
                 async with limiter.slot(event.sender_id, on_wait=on_wait):
-                    await pipeline.run(
-                        user_id=event.sender_id,
-                        url=url,
-                        engine=direct_engine,
-                        uploader=uploader,
+                    await _run_cancellable(
+                        active_cancellations,
+                        chat_id=event.chat_id,
+                        message=message,
+                        owner_id=event.sender_id,
                         progress=progress,
-                        cache=video_cache_store,
-                        cache_key=compute_cache_key(url, "direct", delivery.send_as),
-                        archive_channel=archive_channel,
-                        delivery=delivery,
+                        coro=pipeline.run(
+                            user_id=event.sender_id,
+                            url=url,
+                            engine=direct_engine,
+                            uploader=uploader,
+                            progress=progress,
+                            cache=video_cache_store,
+                            cache_key=compute_cache_key(url, "direct", delivery.send_as),
+                            archive_channel=archive_channel,
+                            delivery=delivery,
+                        ),
                     )
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 await _report_quota_error(progress, exc)
