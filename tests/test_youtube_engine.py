@@ -7,6 +7,7 @@ and even that is not run from automated tests)."""
 
 from __future__ import annotations
 
+import asyncio
 from pathlib import Path
 from typing import ClassVar
 
@@ -173,6 +174,32 @@ def test_format_progress_text_finished_status():
 
 def test_format_progress_text_ignores_unknown_status():
     assert format_progress_text({"status": "some-future-status"}) is None
+
+
+async def test_ytdlp_progress_hook_forwards_bar_to_progress_reporter():
+    """M11: the yt-dlp progress hook (real dicts, e.g. downloaded_bytes/total_bytes/
+    speed/eta) must actually reach the message reporter, with the graphical bar -
+    not just be formattable in isolation."""
+    updates: list[str] = []
+
+    class _FakeProgress:
+        async def update(self, text: str, *, is_terminal: bool | None = None) -> None:
+            updates.append(text)
+
+    loop = asyncio.get_running_loop()
+    engine = YouTubeEngine(quality="720", max_download_size=10**9, progress=_FakeProgress())
+    hook = engine._make_progress_hook(loop)
+
+    hook({"status": "downloading", "downloaded_bytes": 45, "total_bytes": 100, "speed": 1024, "eta": 30})
+    for _ in range(5):  # let run_coroutine_threadsafe's callback run on this same loop
+        await asyncio.sleep(0)
+
+    assert updates, "hook did not forward the dict to progress.update"
+    text = updates[-1]
+    assert "45%" in text
+    assert "█" in text
+    assert "מהירות" in text
+    assert "זמן משוער" in text
 
 
 # --- YouTubeEngine.download (yt_dlp.YoutubeDL fully mocked) -----------

@@ -36,6 +36,7 @@ from media_bot_v2.telegram.flood_wait import (
     call_with_flood_retry,
     get_flood_wait_seconds,
 )
+from media_bot_v2.telegram.progress_format import format_progress
 
 logger = logging.getLogger(__name__)
 
@@ -585,6 +586,10 @@ class UploadProgress:
         self._shown = 0
         self._shown_at = float("-inf")
         self._in_flood = False
+        self._started_at: float | None = None
+        self._last_transferred: int | None = None
+        self._last_speed: float | None = None
+        self._last_eta: float | None = None
 
     def start_part(self, bytes_done_before: int) -> None:
         self._base = bytes_done_before
@@ -606,14 +611,24 @@ class UploadProgress:
         """When a flood wait finishes, restore the progress message to avoid frozen state."""
         if self._in_flood:
             self._in_flood = False
-            text = f"{self._label} {self._shown}%" if self._shown > 0 else self._label
+            if self._last_transferred is not None:
+                text = format_progress(
+                    f"⬆️ {self._label}",
+                    transferred=self._last_transferred,
+                    total=self._total,
+                    speed=self._last_speed,
+                    eta=self._last_eta,
+                )
+            else:
+                text = f"⬆️ {self._label}"
             try:
                 await self._reporter.update(text, is_terminal=False)
             except TypeError:
                 await self._reporter.update(text)
 
     async def __call__(self, done: int, _part_total: int) -> None:
-        percent = min(100, (self._base + done) * 100 // self._total)
+        total_done = self._base + done
+        percent = min(100, total_done * 100 // self._total)
         if percent <= self._shown and not self._in_flood:
             return
         now = self._clock()
@@ -624,10 +639,30 @@ class UploadProgress:
             and (percent - self._shown < self._min_step or now - self._shown_at < self._min_interval)
         ):
             return
+        if self._started_at is None:
+            self._started_at = now
+        elapsed = now - self._started_at
+        # Average speed since this upload phase began (not an instantaneous
+        # sample), summed across every parallel lane via `total_done` -
+        # `done`/`_part_total` here are already the cumulative bytes the
+        # caller (parallel_upload._State) tracks across all lanes, not one
+        # connection's share.
+        speed = total_done / elapsed if elapsed > 0 else None
+        eta = (self._total - total_done) / speed if speed else None
+        text = format_progress(
+            f"⬆️ {self._label}",
+            transferred=total_done,
+            total=self._total,
+            speed=speed,
+            eta=eta,
+        )
         try:
-            await self._reporter.update(f"{self._label} {percent}%", is_terminal=False)
+            await self._reporter.update(text, is_terminal=False)
         except TypeError:
-            await self._reporter.update(f"{self._label} {percent}%")
+            await self._reporter.update(text)
         self._shown = max(self._shown, percent)
         self._shown_at = now
         self._in_flood = False
+        self._last_transferred = total_done
+        self._last_speed = speed
+        self._last_eta = eta

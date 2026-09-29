@@ -40,6 +40,7 @@ from media_bot_v2.engines.ytdlp_support import (
     too_large_error,
 )
 from media_bot_v2.telegram import texts
+from media_bot_v2.telegram.progress_format import format_progress
 
 logger = logging.getLogger(__name__)
 
@@ -191,40 +192,16 @@ def is_retryable_error(message: str | None) -> bool:
     return any(pattern in lowered for pattern in _NETWORK_PATTERNS) or "http error 5" in lowered
 
 
-def _human_size(num_bytes: float | None) -> str:
-    if not num_bytes:
-        return "0B"
-    value = float(num_bytes)
-    for unit in ("B", "KB", "MB", "GB"):
-        if value < 1024:
-            return f"{value:.1f}{unit}"
-        value /= 1024
-    return f"{value:.1f}TB"
-
-
-def _human_eta(seconds: float | None) -> str:
-    if not seconds:
-        return "לא ידוע"
-    seconds = int(seconds)
-    if seconds < 60:
-        return f"{seconds} שניות"
-    minutes, secs = divmod(seconds, 60)
-    if minutes < 60:
-        return f"{minutes}:{secs:02d} דקות"
-    hours, minutes = divmod(minutes, 60)
-    return f"{hours}:{minutes:02d} שעות"
-
-
 def format_progress_text(d: dict) -> str | None:
     status = d.get("status")
     if status == "downloading":
-        downloaded = d.get("downloaded_bytes") or 0
-        total = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
-        percent = int(downloaded / total * 100) if total else 0
-        size_text = f"{_human_size(downloaded)}/{_human_size(total)}" if total else _human_size(downloaded)
-        speed_text = f"{_human_size(d.get('speed'))}/s" if d.get("speed") else "לא ידוע"
-        eta_text = _human_eta(d.get("eta"))
-        return f"{texts.DOWNLOADING}\n{percent}% ({size_text})\n⚡ מהירות: {speed_text}\n⏱️ זמן משוער: {eta_text}"
+        return format_progress(
+            f"⬇️ {texts.DOWNLOADING}",
+            transferred=d.get("downloaded_bytes"),
+            total=d.get("total_bytes") or d.get("total_bytes_estimate"),
+            speed=d.get("speed"),
+            eta=d.get("eta"),
+        )
     if status == "finished":
         return texts.PROCESSING
     return None

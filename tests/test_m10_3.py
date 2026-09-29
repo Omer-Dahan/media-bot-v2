@@ -208,8 +208,9 @@ async def test_upload_progress_long_flood_wait_explains_and_restores():
     reporter.update.side_effect = update_tracker
 
     upload_progress = UploadProgress(reporter, "מעלה לטלגרם...", total=1000)
-    upload_progress._shown = 45
-    reporter._last_text = "מעלה לטלגרם... 45%"
+    await upload_progress(450, 1000)  # a real 45% report, so internal state is populated
+    progress_text = reporter._last_text
+    assert "45%" in progress_text
 
     # Long flood wait (15 seconds)
     await upload_progress.handle_flood_wait(15, 1)
@@ -218,10 +219,10 @@ async def test_upload_progress_long_flood_wait_explains_and_restores():
     reporter.update.assert_called_with(expected_msg)
     assert reporter._last_text == expected_msg
 
-    # Flood wait cleared -> restores percentage
+    # Flood wait cleared -> restores the last progress text shown before the wait
     await upload_progress.handle_flood_cleared()
-    reporter.update.assert_called_with("מעלה לטלגרם... 45%")
-    assert reporter._last_text == "מעלה לטלגרם... 45%"
+    reporter.update.assert_called_with(progress_text)
+    assert reporter._last_text == progress_text
 
 
 async def test_upload_progress_short_flood_wait_does_not_flicker():

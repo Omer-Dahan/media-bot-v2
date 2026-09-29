@@ -12,6 +12,7 @@ from __future__ import annotations
 import asyncio
 import hashlib
 import os
+import re
 import time
 from pathlib import Path
 
@@ -241,6 +242,12 @@ class _Reporter:
         self.texts.append(text)
 
 
+def _percent(text: str) -> int:
+    match = re.search(r"(\d+)%", text)
+    assert match, f"no percent found in {text!r}"
+    return int(match.group(1))
+
+
 async def test_user_progress_does_not_flood_the_message_and_reaches_100(tmp_path, sleeps):
     path = make_file(tmp_path / "f.bin", 200 * PART)
     server = PartServer(delay=0.0005)
@@ -251,10 +258,14 @@ async def test_user_progress_does_not_flood_the_message_and_reaches_100(tmp_path
 
     await upload_file_parallel(server, path, workers=5, progress=progress)
 
-    percents = [int(t.split()[-1].rstrip("%")) for t in reporter.texts]
+    percents = [_percent(t) for t in reporter.texts]
     assert percents == sorted(percents) and len(set(percents)) == len(percents)
     assert percents[-1] == 100 and max(percents) <= 100
     assert len(percents) <= 21  # 100/5 steps + the final one, out of 200 reports
+    # Every line mixing the bar/size/speed with the Hebrew label carries the
+    # LTR override, and the byte count is the sum over every lane (not reset
+    # per connection): a monotonic, never-restarting percent proves that.
+    assert all("‎" in t for t in reporter.texts)
 
 
 async def test_user_progress_is_time_throttled():
@@ -266,9 +277,13 @@ async def test_user_progress_is_time_throttled():
     assert len(reporter.texts) == 1  # only the first edit until time passes
     now[0] = 10.0
     await progress(600, 1000)
-    assert reporter.texts[-1] == "up 60%"
+    assert _percent(reporter.texts[-1]) == 60
+    # 10s elapsed and 600 bytes moved since the first sample -> speed/ETA are computable now.
+    assert "מהירות" in reporter.texts[-1]
+    assert "זמן משוער" in reporter.texts[-1]
+    last = reporter.texts[-1]
     await progress(500, 1000)  # a late, smaller report never moves it back
-    assert reporter.texts[-1] == "up 60%"
+    assert reporter.texts[-1] == last
 
 
 async def test_progress_sums_over_split_parts():
@@ -278,7 +293,28 @@ async def test_progress_sums_over_split_parts():
     await progress(100, 100)
     progress.start_part(100)
     await progress(50, 100)
-    assert reporter.texts == ["up 25%", "up 37%"]  # continues, does not restart at 0
+    assert [_percent(t) for t in reporter.texts] == [25, 37]  # continues, does not restart at 0
+
+
+async def test_upload_progress_speed_reflects_summed_bytes_not_a_single_lane():
+    """`done` is already parallel_upload._State.uploaded - the sum across every
+    lane, not one connection's share. Speed computed from it must track that
+    sum (stable across reports, never reset low) rather than one lane's delta."""
+    reporter = _Reporter()
+    now = [0.0]
+    progress = UploadProgress(reporter, "up", 1000, min_step=1, min_interval=0, clock=lambda: now[0])
+
+    await progress(100, 1000)  # first part landed, from whichever lane
+    now[0] = 5.0
+    await progress(300, 1000)  # another lane's part landed on top: cumulative 300
+    now[0] = 10.0
+    await progress(600, 1000)  # cumulative 600
+
+    last = reporter.texts[-1]
+    assert _percent(last) == 60
+    # 600 bytes over the 10s since the phase started = 60 B/s, computed from
+    # the cumulative counter both times - not lane B's own 200-byte delta.
+    assert "60.0B/s" in last
 
 
 # ---------------------------------------------------------------- config
@@ -386,8 +422,8 @@ async def test_pipeline_end_to_end_progress_charging_and_cleanup(tmp_path, sleep
     handle = server.send_files()[0].args[1]
     assert handle.parts == 40
     assert len(server.assembled(handle)) == total
-    percent_texts = [t for t in reporter.texts if t.endswith("%")]
-    percents = [int(t.split()[-1].rstrip("%")) for t in percent_texts]
+    percent_texts = [t for t in reporter.texts if re.search(r"\d+%", t)]
+    percents = [_percent(t) for t in percent_texts]
     assert percents == sorted(percents) and percents[-1] == 100
     assert not list((tmp_path / "dl").rglob("*.bin"))  # scratch files removed
     with factory() as session:
