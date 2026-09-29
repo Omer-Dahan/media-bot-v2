@@ -2,6 +2,7 @@
 download (yt-dlp hook) and upload (byte-count) progress messages."""
 
 import re
+import unicodedata
 
 from media_bot_v2.telegram.progress_format import (
     BAR_EMPTY,
@@ -20,6 +21,20 @@ def _percent(text: str) -> int:
     match = re.search(r"(\d+)%", text)
     assert match, f"no percent found in {text!r}"
     return int(match.group(1))
+
+
+def _first_strong_is_rtl(line: str) -> bool:
+    """Per Unicode bidi rule P2/P3, a paragraph's direction is decided by its
+    first *strong* character - neutrals (emoji, punctuation) and weak types
+    (digits) are skipped over. LRM's own bidi type is strong-L, so a line
+    that starts with LRM (rather than a Hebrew letter) is LTR, not RTL."""
+    for ch in line:
+        bidi = unicodedata.bidirectional(ch)
+        if bidi == "L":
+            return False
+        if bidi in ("R", "AL"):
+            return True
+    return False
 
 
 # --- render_bar -------------------------------------------------------------
@@ -48,6 +63,14 @@ def test_render_bar_partial_fill_matches_percent():
     assert bar.count(BAR_EMPTY) == 5
 
 
+def test_render_bar_never_full_below_hundred():
+    """A rounded fill (e.g. round(9.5) == 10) would make 95%/99% look like a
+    completed bar. Floored fill must leave at least one empty cell short of 100."""
+    for percent in (94, 95, 96, 99, 99.9):
+        bar = render_bar(percent, width=10)
+        assert BAR_EMPTY in bar, f"{percent}% rendered a full bar: {bar!r}"
+
+
 # --- human_eta ---------------------------------------------------------------
 
 
@@ -60,6 +83,34 @@ def test_human_eta_seconds_minutes_hours():
     assert human_eta(5) == "5 שניות"
     assert human_eta(125) == "2:05 דקות"
     assert human_eta(7325) == "2:02 שעות"
+
+
+def test_human_eta_negative_or_non_finite_is_omitted():
+    assert human_eta(-5) is None
+    assert human_eta(float("inf")) is None
+    assert human_eta(float("nan")) is None
+
+
+# --- negative/zero speed must never be shown -------------------------------
+
+
+def test_format_progress_negative_speed_is_omitted():
+    text = format_progress(PHASE, transferred=50, total=100, speed=-500.0)
+    assert "מהירות" not in text
+    assert "⚡" not in text
+    assert "-500" not in text
+
+
+def test_format_progress_zero_or_non_finite_speed_is_omitted():
+    for bad_speed in (0.0, float("nan"), float("inf")):
+        text = format_progress(PHASE, transferred=50, total=100, speed=bad_speed)
+        assert "מהירות" not in text
+
+
+def test_format_progress_positive_speed_is_shown():
+    text = format_progress(PHASE, transferred=50, total=100, speed=1024.0)
+    assert "מהירות" in text
+    assert "1.0KB/s" in text
 
 
 # --- format_progress: the four required example states ----------------------
@@ -140,15 +191,42 @@ def test_format_progress_omits_size_block_when_no_data_at_all():
     assert text == PHASE
 
 
+# --- Bar/percent sync: one source of truth, never a bar that looks "done" -
+# --- before the text says 100% -----------------------------------------------
+
+_BOUNDARY_PERCENTS = (0, 1, 5, 45.1, 49.9, 50, 95, 99, 99.9, 100)
+
+
+def test_bar_and_percent_stay_in_sync_across_boundaries():
+    total = 1_000_000
+    for percent in _BOUNDARY_PERCENTS:
+        transferred = percent / 100 * total
+        text = format_progress(PHASE, transferred=transferred, total=total)
+        shown_percent = _percent(text)
+        assert shown_percent == int(percent), f"percent={percent}: text shows {shown_percent}%"
+
+        bar_line = text.split("\n")[1]
+        filled = bar_line.count(BAR_FILLED)
+        empty = bar_line.count(BAR_EMPTY)
+        assert filled + empty == BAR_WIDTH
+
+        if shown_percent < 100:
+            assert empty > 0, f"percent={percent}: bar is fully filled before 100% ({bar_line!r})"
+        else:
+            assert filled == BAR_WIDTH and empty == 0
+
+
 # --- RTL: the bar/percent/size and speed/ETA lines carry an LTR override ----
 
 
-def test_bar_line_is_prefixed_with_left_to_right_mark():
+def test_bar_line_opens_with_hebrew_label_then_left_to_right_mark():
     text = format_progress(PHASE, transferred=45, total=100)
     bar_line = text.split("\n")[1]
-    assert bar_line.startswith(LRM)
-    # the logical (unicode codepoint) order is bar, then percent, then sizes -
-    # exactly the order a LTR-reading client renders it in, once anchored by LRM
+    assert not bar_line.startswith(LRM)  # LRM is itself strong-L; can't be first
+    assert LRM in bar_line
+    # Hebrew label precedes the LRM-anchored numeric/bar run
+    assert bar_line.index("התקדמות") < bar_line.index(LRM)
+    # within that LTR-anchored run, logical order is bar, then percent, then sizes
     assert bar_line.index(BAR_FILLED) < bar_line.index("%") < bar_line.index("(")
 
 
@@ -164,7 +242,35 @@ def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():
     assert eta_line.index("משוער") < eta_line.index(LRM)
 
 
-def test_unknown_total_line_is_also_ltr_anchored():
+def test_unknown_total_line_opens_with_hebrew_label_then_left_to_right_mark():
     text = format_progress(PHASE, transferred=12, total=None)
     size_line = text.split("\n")[1]
-    assert size_line.startswith(LRM)
+    assert not size_line.startswith(LRM)
+    assert size_line.index("הורד") < size_line.index(LRM)
+
+
+def test_every_line_of_a_full_message_opens_with_a_strong_rtl_character():
+    """The concrete failure mode this guards against: a plain-text bidi
+    renderer (or a Telegram client that computes per-line paragraph
+    direction) picks LTR for any line whose first *strong* character isn't
+    Hebrew/Arabic - even if LRM is present later in the line. This must hold
+    for every line the formatter can produce, not just the ones with a bar."""
+    text = format_progress(
+        PHASE,
+        transferred=45 * 1024 * 1024,
+        total=100 * 1024 * 1024,
+        speed=1.5 * 1024 * 1024,
+        eta=36,
+    )
+    for line in text.split("\n"):
+        assert _first_strong_is_rtl(line), f"line does not open with a strong RTL character: {line!r}"
+
+    unknown_total_text = format_progress(PHASE, transferred=12 * 1024 * 1024, total=None)
+    for line in unknown_total_text.split("\n"):
+        assert _first_strong_is_rtl(line), f"line does not open with a strong RTL character: {line!r}"
+
+    # NOTE: a string-level check like this confirms the *bidi type* of each
+    # line's leading character, which decides paragraph direction. It cannot
+    # confirm how Telegram's actual clients (desktop/web/Android/iOS) render
+    # the full multi-line message - that still requires an eyeball check in
+    # each client against a real in-progress download/upload message.

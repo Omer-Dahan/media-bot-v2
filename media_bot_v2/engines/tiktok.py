@@ -19,6 +19,7 @@ from media_bot_v2.engines.base import (
 )
 from media_bot_v2.engines.youtube import (
     _result_from_info,
+    format_progress_text,
     summarize_provider_failure,
     summarize_ytdlp_failure,
 )
@@ -37,6 +38,8 @@ from media_bot_v2.providers.tikwm import matches_tiktok_url
 from media_bot_v2.telegram import texts
 
 logger = logging.getLogger(__name__)
+
+_PROGRESS_THROTTLE_SECONDS = 2.0
 
 
 class TikTokDownloadError(Exception):
@@ -132,8 +135,9 @@ class TikTokEngine(BaseEngine):
 
         # All providers failed or were suppressed; try local yt-dlp engine
         logger.info("All TikTok providers failed for %s, falling back to local yt-dlp", url)
+        loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._download_local_sync, url, dest_dir, cancel_token)
+            return await asyncio.to_thread(self._download_local_sync, url, dest_dir, loop, cancel_token)
         except DownloadTooLargeError:
             raise
         except Exception as exc:
@@ -141,23 +145,58 @@ class TikTokEngine(BaseEngine):
             tracker.record("מנוע מקומי (yt-dlp)", summarize_ytdlp_failure(exc))
             raise TikTokDownloadError(tracker.format_summary()) from exc
 
+    def _make_progress_hook(
+        self,
+        loop: asyncio.AbstractEventLoop,
+        guard: DownloadGuard,
+    ):
+        """Mirrors youtube.YouTubeEngine._make_progress_hook so the local
+        TikTok fallback shows the same bar/percent/speed/ETA as YouTube and
+        Instagram instead of a static message - without ever skipping
+        `guard.check`, which enforces the size ceiling and must run on every
+        callback regardless of whether a progress reporter is attached."""
+        state = {"last_forward": 0.0}
+
+        def hook(d: dict) -> None:
+            guard.check(d)
+            if self._progress is None:
+                return
+            text = format_progress_text(d)
+            if text is None:
+                return
+            now = time.monotonic()
+            if d.get("status") != "downloading" or now - state["last_forward"] >= _PROGRESS_THROTTLE_SECONDS:
+                state["last_forward"] = now
+                try:
+                    coro = self._progress.update(text, is_terminal=False)
+                except TypeError:
+                    coro = self._progress.update(text)
+                asyncio.run_coroutine_threadsafe(coro, loop)
+
+        return hook
+
     def _download_local_sync(
         self,
         url: str,
         dest_dir: Path,
+        loop: asyncio.AbstractEventLoop | None = None,
         cancel_token: CancellationToken | None = None,
     ) -> DownloadResult:
         if cancel_token is not None and cancel_token.is_set():
             return DownloadResult(file_paths=[])
 
         guard = DownloadGuard(self._max_download_size, cancel_token)
+        if loop is not None and self._progress is not None:
+            hooks = [self._make_progress_hook(loop, guard)]
+        else:
+            hooks = [guard.check]
         ydl_opts = {
             "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,
             "noplaylist": True,
-            "progress_hooks": [guard.check],
+            "progress_hooks": hooks,
             "match_filter": guard.match_filter(),
             "retries": TRANSPORT_RETRIES,
             "fragment_retries": TRANSPORT_RETRIES,
