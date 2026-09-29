@@ -295,9 +295,11 @@ class MessageProgressReporter:
         max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
         sleep_func: Callable[[float], Awaitable[None]] | None = None,
         clear_buttons_on_terminal: bool = False,
+        get_failure_buttons: Callable[[str], Any] | None = None,
     ) -> None:
         self._message = message
         self._last_text: str | None = None
+        self._last_buttons: Any = None
         self._max_retries = max_retries
         self._max_wait_seconds = max_wait_seconds
         self._sleep = sleep_func
@@ -308,6 +310,7 @@ class MessageProgressReporter:
         # that only implements `edit(text)`. Only the router's cancel-button
         # flows opt in, since they are the only ones that ever attach one.
         self._clear_buttons_on_terminal = clear_buttons_on_terminal
+        self._get_failure_buttons = get_failure_buttons
         self._seq: int = 0
         self._last_applied_seq: int = 0
         self._is_terminal_completed: bool = False
@@ -377,11 +380,20 @@ class MessageProgressReporter:
         if terminal:
             self._is_terminal_completed = True
 
-        if text == self._last_text and buttons is None:
+        if not terminal and text == self._last_text and buttons is None:
             return
 
-        if terminal and buttons is None and self._clear_buttons_on_terminal:
-            buttons = _CLEAR_BUTTONS
+        if terminal and buttons is None:
+            if self._get_failure_buttons is not None:
+                try:
+                    buttons = self._get_failure_buttons(text)
+                except Exception:
+                    logger.debug("Failed to get failure buttons for terminal update", exc_info=True)
+            if buttons is None and self._clear_buttons_on_terminal:
+                buttons = _CLEAR_BUTTONS
+
+        if text == self._last_text and buttons == getattr(self, "_last_buttons", None):
+            return
 
         attempts = 0
         success = False
@@ -402,6 +414,7 @@ class MessageProgressReporter:
                             await self._message.edit(text)
                         success = True
                         self._last_text = text
+                        self._last_buttons = buttons
                         self._last_applied_seq = seq
                         self._uneditable = False
                         self._logged_uneditable = False
@@ -414,6 +427,7 @@ class MessageProgressReporter:
                 except MessageNotModifiedError:
                     success = True
                     self._last_text = text
+                    self._last_buttons = buttons
                     self._last_applied_seq = seq
                     self._uneditable = False
                     self._logged_uneditable = False
@@ -501,6 +515,7 @@ class MessageProgressReporter:
                         if new_message is not None:
                             self._message = new_message
                             self._last_text = text
+                            self._last_buttons = buttons
                             self._last_applied_seq = seq
                             self._uneditable = False
                             self._logged_uneditable = False

@@ -46,6 +46,7 @@ class FakeTelegramClient:
         self._next_id = 0
         self._send_file_count = 0
         self.fail_send_file: dict[int, Exception] = {}
+        self._handlers: list[tuple[Any, Any]] = []
 
     # -- recording helpers -------------------------------------------------
     def calls_to(self, method: str) -> list[Call]:
@@ -89,3 +90,12 @@ class FakeTelegramClient:
     async def forward_messages(self, *args, **kwargs):
         self.calls.append(Call("forward_messages", args, kwargs))
         raise AssertionError("forward_messages must never be used (leaks 'Forwarded from')")
+
+    def on(self, event_builder: Any) -> Any:
+        def decorator(func: Any) -> Any:
+            self._handlers.append((func, event_builder))
+            return func
+        return decorator
+
+    def list_event_handlers(self) -> list[tuple[Any, Any]]:
+        return list(self._handlers)

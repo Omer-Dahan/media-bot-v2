@@ -157,6 +157,11 @@ CANCEL_TOAST = "מבטל את הבקשה..."
 CANCEL_NOT_OWNER = "אפשר לבטל רק בקשה שהתחלת בעצמך."
 CANCEL_NOT_ACTIVE = "אין בקשה פעילה לביטול."
 
+RETRY_BUTTON = "🔄 נסה שוב"
+RETRY_NOT_OWNER = "אפשר לנסות שוב רק בקשה שהתחלת בעצמך."
+RETRY_ALREADY_RUNNING = "הבקשה כבר רצה."
+RETRY_NOT_AVAILABLE = "הכפתור כבר לא זמין."
+
 
 def human_size(num_bytes: float | None) -> str:
     if not num_bytes:

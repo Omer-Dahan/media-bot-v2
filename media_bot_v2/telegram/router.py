@@ -59,6 +59,11 @@ from media_bot_v2.telegram.flood_wait import (
 )
 from media_bot_v2.telegram.progress import MessageProgressReporter
 from media_bot_v2.telegram.quality_menu import QualitySelectionStore, build_quality_markup
+from media_bot_v2.telegram.retry import (
+    RetryStore,
+    build_retry_markup,
+    is_hopeless_failure,
+)
 from media_bot_v2.telegram.uploader import TelethonUploader
 
 logger = logging.getLogger(__name__)
@@ -230,8 +235,11 @@ def register_handlers(
     registry: ProviderRegistry | None = None,
     tiktok_cookies_file: str | None = None,
     instagram_cookies_file: str | None = None,
+    retry_store: RetryStore | None = None,
 ) -> None:
     quality_store = QualitySelectionStore()
+    if retry_store is None:
+        retry_store = RetryStore()
     # Keyed by (chat_id, progress message id) - the same pair a CallbackQuery
     # event reports for the message its button sits under, so the cancel
     # handler needs no id encoded into callback_data at all.
@@ -293,6 +301,155 @@ def register_handlers(
             health_tracker=health_tracker,
             **overrides,
         )
+
+    def make_progress(
+        message: Any,
+        *,
+        user_id: int,
+        chat_id: int,
+        url: str,
+        platform: str,
+        quality: str | None = None,
+    ) -> MessageProgressReporter:
+        def get_failure_buttons(text: str) -> Any:
+            if is_hopeless_failure(text=text):
+                return None
+            msg = getattr(progress, "_message", message) if progress is not None else message
+            msg_id = getattr(msg, "id", None)
+            if msg_id is None:
+                msg_id = getattr(message, "id", None)
+            if msg_id is None:
+                return None
+            ctx = retry_store.put(
+                user_id=user_id,
+                chat_id=chat_id,
+                message_id=msg_id,
+                url=url,
+                platform=platform,
+                quality=quality,
+            )
+            return build_retry_markup(ctx.retry_id)
+
+        progress: MessageProgressReporter | None = None
+        progress = MessageProgressReporter(
+            message,
+            clear_buttons_on_terminal=True,
+            get_failure_buttons=get_failure_buttons,
+        )
+        return progress
+
+    async def _execute_download(
+        *,
+        job_user_id: int,
+        job_chat_id: int,
+        job_url: str,
+        job_platform: str,
+        job_quality: str | None = None,
+        message: Any,
+        progress: MessageProgressReporter,
+        delivery: DeliveryOptions | None = None,
+    ) -> None:
+        try:
+            if delivery is None:
+                delivery = load_delivery(job_user_id, first_name=None, username=None)
+            total_credits = credits_service.get_total_credits(job_user_id)
+
+            if job_platform == "youtube":
+                is_playlist = is_playlist_url(job_url)
+                if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
+                    raise CreditsExhaustedException(texts.CREDITS_EXHAUSTED)
+                playlist_limit = (
+                    int(total_credits) if is_playlist and math.isfinite(total_credits) else None
+                )
+                engine = build_youtube_engine(
+                    job_quality or "720",
+                    progress=progress,
+                    is_playlist=is_playlist,
+                    playlist_item_limit=playlist_limit,
+                    subtitles=delivery.subtitles,
+                )
+                media_ref = extract_video_id(job_url) or job_url
+                cache_key = compute_cache_key(media_ref, job_quality or "720", delivery.send_as, delivery.subtitles)
+            elif job_platform == "tiktok":
+                engine = TikTokEngine(
+                    registry=registry,
+                    health_tracker=health_tracker,
+                    max_download_size=max_download_size,
+                    cookies_file=tiktok_cookies_file,
+                    progress=progress,
+                )
+                cache_key = compute_cache_key(job_url, "tiktok", delivery.send_as)
+            elif job_platform == "instagram":
+                engine = InstagramEngine(
+                    max_download_size=max_download_size,
+                    cookies_file=instagram_cookies_file,
+                    force_ipv4=force_ipv4,
+                    progress=progress,
+                )
+                cache_key = compute_cache_key(
+                    extract_instagram_id(job_url) or job_url, "instagram", delivery.send_as
+                )
+            else:  # direct
+                engine = direct_engine
+                cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
+
+            uploader = TelethonUploader(
+                client, chat_id=job_chat_id, archive_channel=archive_channel,
+                workers=upload_workers, connections=upload_connections,
+                adaptive=True,
+                on_flood=progress.handle_flood_wait,
+            )
+
+            async def on_wait() -> None:
+                if progress is not None:
+                    await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
+
+            async with limiter.slot(job_user_id, on_wait=on_wait):
+                await _run_cancellable(
+                    active_cancellations,
+                    chat_id=job_chat_id,
+                    message=message,
+                    owner_id=job_user_id,
+                    progress=progress,
+                    coro=pipeline.run(
+                        user_id=job_user_id,
+                        url=job_url,
+                        engine=engine,
+                        uploader=uploader,
+                        progress=progress,
+                        cache=video_cache_store,
+                        cache_key=cache_key,
+                        archive_channel=archive_channel,
+                        delivery=delivery,
+                    ),
+                )
+        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+            msg_id = getattr(getattr(progress, "_message", message), "id", None)
+            if msg_id is not None:
+                retry_store.remove((job_chat_id, msg_id))
+            if progress is not None:
+                await _report_quota_error(progress, exc)
+        except (YouTubeDownloadError, TikTokDownloadError, InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
+            if not getattr(progress, "is_terminal_completed", False):
+                await progress.update(str(exc), is_terminal=True)
+        except FLOOD_WAIT_ERRORS as exc:
+            wait_seconds = get_flood_wait_seconds(exc)
+            logger.warning("Download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, job_url)
+            if not getattr(progress, "is_terminal_completed", False):
+                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+        except TimeoutError:
+            if not getattr(progress, "is_terminal_completed", False):
+                try:
+                    await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on timeout", exc_info=True)
+        except Exception:
+            logger.exception("Download failed for url=%s", job_url)
+            if not getattr(progress, "is_terminal_completed", False):
+                try:
+                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                except Exception:
+                    logger.debug("Failed to update progress on general failure", exc_info=True)
 
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
@@ -417,84 +574,26 @@ def register_handlers(
                         message = getattr(event, "message", None) or event
                 else:
                     message = getattr(event, "message", None) or event
-            progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
-            uploader = TelethonUploader(
-                client, chat_id=event.chat_id, archive_channel=archive_channel,
-                workers=upload_workers, connections=upload_connections,
-                adaptive=True,
-                on_flood=progress.handle_flood_wait,
+            progress = make_progress(
+                message,
+                user_id=event.sender_id,
+                chat_id=event.chat_id,
+                url=url,
+                platform="youtube",
+                quality=quality,
             )
-
-            is_playlist = is_playlist_url(url)
-            total_credits = credits_service.get_total_credits(event.sender_id)
-            if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
-                raise CreditsExhaustedException(texts.CREDITS_EXHAUSTED)
-
-            playlist_limit = (
-                int(total_credits) if is_playlist and math.isfinite(total_credits) else None
-            )
-
-            engine = build_youtube_engine(
-                quality,
+            await _execute_download(
+                job_user_id=event.sender_id,
+                job_chat_id=event.chat_id,
+                job_url=url,
+                job_platform="youtube",
+                job_quality=quality,
+                message=message,
                 progress=progress,
-                is_playlist=is_playlist,
-                playlist_item_limit=playlist_limit,
-                subtitles=delivery.subtitles,
+                delivery=delivery,
             )
-
-            media_ref = extract_video_id(url) or url
-            cache_key = compute_cache_key(media_ref, quality, delivery.send_as, delivery.subtitles)
-
-            async def on_wait() -> None:
-                if progress is not None:
-                    await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
-
-            async with limiter.slot(event.sender_id, on_wait=on_wait):
-                await _run_cancellable(
-                    active_cancellations,
-                    chat_id=event.chat_id,
-                    message=message,
-                    owner_id=event.sender_id,
-                    progress=progress,
-                    coro=pipeline.run(
-                        user_id=event.sender_id,
-                        url=url,
-                        engine=engine,
-                        uploader=uploader,
-                        progress=progress,
-                        cache=video_cache_store,
-                        cache_key=cache_key,
-                        archive_channel=archive_channel,
-                        delivery=delivery,
-                    ),
-                )
-        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-            if progress is not None:
-                await _report_quota_error(progress, exc)
-            else:
-                await _safe_answer_callback(event, str(exc), alert=True)
-        except (YouTubeDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-            if progress is not None:
-                if not getattr(progress, "is_terminal_completed", False):
-                    await progress.update(str(exc), is_terminal=True)
-            else:
-                await _safe_answer_callback(event, str(exc), alert=True)
-        except FLOOD_WAIT_ERRORS as exc:
-            wait_seconds = get_flood_wait_seconds(exc)
-            logger.warning("YouTube download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-            if progress is not None and not getattr(progress, "is_terminal_completed", False):
-                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-        except TimeoutError:
-            if progress is not None:
-                if not getattr(progress, "is_terminal_completed", False):
-                    try:
-                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on timeout", exc_info=True)
-            else:
-                await _safe_answer_callback(event, texts.REQUEST_TIMEOUT_EXCEEDED, alert=True)
         except Exception:
-            logger.exception("YouTube download failed for url=%s", url)
+            logger.exception("Early failure in quality pick for url=%s", url)
             if progress is not None:
                 if not getattr(progress, "is_terminal_completed", False):
                     try:
@@ -527,6 +626,89 @@ def register_handlers(
                 await active.progress.update(texts.REQUEST_CANCELLED, is_terminal=True)
             except Exception:
                 logger.debug("Failed to update progress on cancel button press", exc_info=True)
+
+    @client.on(events.CallbackQuery(pattern=rb"^retry(:|$)"))
+    async def retry_handler(event: events.CallbackQuery.Event) -> None:
+        if getattr(event, "is_private", None) is False:
+            return
+
+        parts = decode(event.data)
+        retry_id = parts[1] if len(parts) > 1 else None
+        retry_ctx = retry_store.get(retry_id) if retry_id else None
+        if retry_ctx is None:
+            msg_id = getattr(event, "message_id", None) or getattr(getattr(event, "message", None), "id", None)
+            if msg_id is not None:
+                retry_ctx = retry_store.get((event.chat_id, msg_id))
+
+        if retry_ctx is None:
+            await _safe_answer_callback(event, texts.RETRY_NOT_AVAILABLE, alert=True)
+            return
+
+        if retry_ctx.user_id != event.sender_id:
+            await _safe_answer_callback(event, texts.RETRY_NOT_OWNER, alert=True)
+            return
+
+        if retry_ctx.is_running:
+            await _safe_answer_callback(event, texts.RETRY_ALREADY_RUNNING, alert=True)
+            return
+
+        retry_ctx.is_running = True
+        await _safe_answer_callback(event)
+
+        message = None
+        try:
+            message = await call_with_flood_retry(
+                event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+            )
+        except MessageNotModifiedError:
+            try:
+                message = await call_with_flood_retry(event.get_message)
+            except (RPCError, ConnectionError, TimeoutError, OSError):
+                message = getattr(event, "message", None)
+        except (RPCError, ConnectionError, TimeoutError, OSError):
+            logger.debug("Failed to edit failure message on retry", exc_info=True)
+
+        if message is None:
+            try:
+                await call_with_flood_retry(event.edit, buttons=None)
+            except (RPCError, ConnectionError, TimeoutError, OSError):
+                logger.debug("Failed to remove buttons on retry message", exc_info=True)
+            try:
+                message = await call_with_flood_retry(
+                    event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                )
+            except (RPCError, ConnectionError, TimeoutError, OSError):
+                logger.debug("Failed to send replacement status message on retry", exc_info=True)
+                message = getattr(event, "message", None) or event
+
+        old_id = retry_ctx.retry_id
+        old_url = retry_ctx.url
+        old_platform = retry_ctx.platform
+        old_quality = retry_ctx.quality
+        old_user_id = retry_ctx.user_id
+        old_chat_id = retry_ctx.chat_id
+
+        progress = make_progress(
+            message,
+            user_id=old_user_id,
+            chat_id=old_chat_id,
+            url=old_url,
+            platform=old_platform,
+            quality=old_quality,
+        )
+
+        try:
+            await _execute_download(
+                job_user_id=old_user_id,
+                job_chat_id=old_chat_id,
+                job_url=old_url,
+                job_platform=old_platform,
+                job_quality=old_quality,
+                message=message,
+                progress=progress,
+            )
+        finally:
+            retry_store.remove(old_id)
 
     # Private chats only, like the old bot: a link posted in a group is ignored.
     @client.on(events.NewMessage(func=lambda e: bool(getattr(e, "is_private", False))))
@@ -567,69 +749,21 @@ def register_handlers(
                 message = await call_with_flood_retry(
                     event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
                 )
-                progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
-                uploader = TelethonUploader(
-                    client, chat_id=event.chat_id, archive_channel=archive_channel,
-                    workers=upload_workers, connections=upload_connections,
-                    adaptive=True,
-                    on_flood=progress.handle_flood_wait,
+                progress = make_progress(
+                    message,
+                    user_id=event.sender_id,
+                    chat_id=event.chat_id,
+                    url=url,
+                    platform="tiktok",
                 )
-
-                async def on_wait() -> None:
-                    if progress is not None:
-                        await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
-
-                tiktok_engine = TikTokEngine(
-                    registry=registry,
-                    health_tracker=health_tracker,
-                    max_download_size=max_download_size,
-                    cookies_file=tiktok_cookies_file,
+                await _execute_download(
+                    job_user_id=event.sender_id,
+                    job_chat_id=event.chat_id,
+                    job_url=url,
+                    job_platform="tiktok",
+                    message=message,
                     progress=progress,
                 )
-
-                try:
-                    async with limiter.slot(event.sender_id, on_wait=on_wait):
-                        await _run_cancellable(
-                            active_cancellations,
-                            chat_id=event.chat_id,
-                            message=message,
-                            owner_id=event.sender_id,
-                            progress=progress,
-                            coro=pipeline.run(
-                                user_id=event.sender_id,
-                                url=url,
-                                engine=tiktok_engine,
-                                uploader=uploader,
-                                progress=progress,
-                                cache=video_cache_store,
-                                cache_key=compute_cache_key(url, "tiktok", delivery.send_as),
-                                archive_channel=archive_channel,
-                                delivery=delivery,
-                            ),
-                        )
-                except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-                    await _report_quota_error(progress, exc)
-                except (TikTokDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                    if not getattr(progress, "is_terminal_completed", False):
-                        await progress.update(str(exc), is_terminal=True)
-                except FLOOD_WAIT_ERRORS as exc:
-                    wait_seconds = get_flood_wait_seconds(exc)
-                    logger.warning("TikTok download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                    if not getattr(progress, "is_terminal_completed", False):
-                        await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-                except TimeoutError:
-                    if not getattr(progress, "is_terminal_completed", False):
-                        try:
-                            await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                        except Exception:
-                            logger.debug("Failed to update progress on timeout", exc_info=True)
-                except Exception:
-                    logger.exception("TikTok download failed for url=%s", url)
-                    if not getattr(progress, "is_terminal_completed", False):
-                        try:
-                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                        except Exception:
-                            logger.debug("Failed to update progress on general failure", exc_info=True)
                 return
             if _host_matches(url, INSTAGRAM_HOSTS):
                 if not matches_instagram_url(url):
@@ -639,70 +773,21 @@ def register_handlers(
                 message = await call_with_flood_retry(
                     event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
                 )
-                progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
-                uploader = TelethonUploader(
-                    client, chat_id=event.chat_id, archive_channel=archive_channel,
-                    workers=upload_workers, connections=upload_connections,
-                    adaptive=True,
-                    on_flood=progress.handle_flood_wait,
+                progress = make_progress(
+                    message,
+                    user_id=event.sender_id,
+                    chat_id=event.chat_id,
+                    url=url,
+                    platform="instagram",
                 )
-
-                async def on_wait() -> None:
-                    if progress is not None:
-                        await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
-
-                instagram_engine = InstagramEngine(
-                    max_download_size=max_download_size,
-                    cookies_file=instagram_cookies_file,
-                    force_ipv4=force_ipv4,
+                await _execute_download(
+                    job_user_id=event.sender_id,
+                    job_chat_id=event.chat_id,
+                    job_url=url,
+                    job_platform="instagram",
+                    message=message,
                     progress=progress,
                 )
-
-                try:
-                    async with limiter.slot(event.sender_id, on_wait=on_wait):
-                        await _run_cancellable(
-                            active_cancellations,
-                            chat_id=event.chat_id,
-                            message=message,
-                            owner_id=event.sender_id,
-                            progress=progress,
-                            coro=pipeline.run(
-                                user_id=event.sender_id,
-                                url=url,
-                                engine=instagram_engine,
-                                uploader=uploader,
-                                progress=progress,
-                                cache=video_cache_store,
-                                cache_key=compute_cache_key(
-                                    extract_instagram_id(url) or url, "instagram", delivery.send_as
-                                ),
-                                archive_channel=archive_channel,
-                                delivery=delivery,
-                            ),
-                        )
-                except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-                    await _report_quota_error(progress, exc)
-                except (InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-                    if not getattr(progress, "is_terminal_completed", False):
-                        await progress.update(str(exc), is_terminal=True)
-                except FLOOD_WAIT_ERRORS as exc:
-                    wait_seconds = get_flood_wait_seconds(exc)
-                    logger.warning("Instagram download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                    if not getattr(progress, "is_terminal_completed", False):
-                        await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-                except TimeoutError:
-                    if not getattr(progress, "is_terminal_completed", False):
-                        try:
-                            await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                        except Exception:
-                            logger.debug("Failed to update progress on timeout", exc_info=True)
-                except Exception:
-                    logger.exception("Instagram download failed for url=%s", url)
-                    if not getattr(progress, "is_terminal_completed", False):
-                        try:
-                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                        except Exception:
-                            logger.debug("Failed to update progress on general failure", exc_info=True)
                 return
 
             if not direct_engine.matches(url):
@@ -712,61 +797,21 @@ def register_handlers(
             message = await call_with_flood_retry(
                 event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
             )
-            progress = MessageProgressReporter(message, clear_buttons_on_terminal=True)
-            uploader = TelethonUploader(
-                client, chat_id=event.chat_id, archive_channel=archive_channel,
-                workers=upload_workers, connections=upload_connections,
-                adaptive=True,
-                on_flood=progress.handle_flood_wait,
+            progress = make_progress(
+                message,
+                user_id=event.sender_id,
+                chat_id=event.chat_id,
+                url=url,
+                platform="direct",
             )
-
-            async def on_wait() -> None:
-                if progress is not None:
-                    await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
-
-            try:
-                async with limiter.slot(event.sender_id, on_wait=on_wait):
-                    await _run_cancellable(
-                        active_cancellations,
-                        chat_id=event.chat_id,
-                        message=message,
-                        owner_id=event.sender_id,
-                        progress=progress,
-                        coro=pipeline.run(
-                            user_id=event.sender_id,
-                            url=url,
-                            engine=direct_engine,
-                            uploader=uploader,
-                            progress=progress,
-                            cache=video_cache_store,
-                            cache_key=compute_cache_key(url, "direct", delivery.send_as),
-                            archive_channel=archive_channel,
-                            delivery=delivery,
-                        ),
-                    )
-            except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-                await _report_quota_error(progress, exc)
-            except (DownloadTooLargeError, UnsupportedUrlError) as exc:
-                if not getattr(progress, "is_terminal_completed", False):
-                    await progress.update(str(exc), is_terminal=True)
-            except FLOOD_WAIT_ERRORS as exc:
-                wait_seconds = get_flood_wait_seconds(exc)
-                logger.warning("Direct download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, url)
-                if not getattr(progress, "is_terminal_completed", False):
-                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-            except TimeoutError:
-                if not getattr(progress, "is_terminal_completed", False):
-                    try:
-                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on timeout", exc_info=True)
-            except Exception:
-                logger.exception("Direct download failed for url=%s", url)
-                if not getattr(progress, "is_terminal_completed", False):
-                    try:
-                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on general failure", exc_info=True)
+            await _execute_download(
+                job_user_id=event.sender_id,
+                job_chat_id=event.chat_id,
+                job_url=url,
+                job_platform="direct",
+                message=message,
+                progress=progress,
+            )
         except Exception:
             logger.exception("Handler failed for url=%s", url)
             if progress is not None:
