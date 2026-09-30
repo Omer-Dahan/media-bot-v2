@@ -34,6 +34,7 @@ from media_bot_v2.engines.content_check import (
 )
 from media_bot_v2.engines.safe_filename import safe_basename_from_url_path, within_directory
 from media_bot_v2.engines.ssrf_guard import SSRFBlockedError, safe_request
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress_format import format_progress
 
@@ -121,7 +122,7 @@ class DirectEngine(BaseEngine):
         dest_path = within_directory(dest_dir, filename, fallback="download.bin")
         loop = asyncio.get_running_loop() if self._progress is not None else None
         try:
-            await asyncio.to_thread(
+            await run_in_thread(
                 _preflight_and_stream_to_file,
                 url,
                 dest_path,

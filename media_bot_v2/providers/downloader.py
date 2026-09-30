@@ -24,6 +24,7 @@ from media_bot_v2.engines.safe_filename import (
     within_directory,
 )
 from media_bot_v2.engines.ssrf_guard import safe_request
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.providers.base import ProviderResult
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress_format import format_progress
@@ -229,7 +230,7 @@ async def download_provider_media(
             break
         filename = _filename_for_item(result, media_url, idx, total_items)
         dest_path = within_directory(dest_dir, filename, fallback=f"download_{idx:03d}.bin")
-        bytes_written = await asyncio.to_thread(
+        bytes_written = await run_in_thread(
             _stream_url_to_file,
             media_url,
             dest_path,

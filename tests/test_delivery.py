@@ -476,6 +476,50 @@ def test_description_message_is_an_expandable_quote_and_escaped():
     assert captions.build_description_message(None, None) is None
 
 
+def test_description_message_fits_telegrams_4096_utf16_limit_with_emoji_heavy_text():
+    """M11.11 finding C: a description made of 1000 astral-plane emoji is only
+    1000 Python characters (under the old DESCRIPTION_LIMIT=4000 character
+    slice) but 2000+ UTF-16 code units, and with the template overhead the old
+    code produced a message over Telegram's real 4096-unit limit - which
+    Telegram silently rejected, so the user never got the description."""
+    text = captions.build_description_message("😀" * 1000, "🎉" * 1000)
+    assert text is not None
+    assert captions.utf16_units(text) <= captions.MESSAGE_LIMIT
+    assert "<blockquote expandable>" in text and text.endswith("</blockquote>")
+
+
+def test_description_message_never_splits_a_surrogate_pair():
+    text = captions.build_description_message(None, "x" * 3000 + "😀" * 1000)
+    assert text is not None
+    # A split surrogate pair would make this raise (lone surrogates are not
+    # valid UTF-16-LE for a full round trip) or corrupt the emoji at the cut.
+    text.encode("utf-16-le")
+    assert captions.utf16_units(text) <= captions.MESSAGE_LIMIT
+
+
+def test_archive_caption_fits_1024_units_with_emoji_heavy_filename_and_url():
+    """M11.11 finding C: a filename+url full of emoji reached 1128 UTF-16
+    units under the old fixed 200/300-*character* caps, Telegram rejected the
+    archive copy, and the request silently fell out of cache (cache.put
+    requires every part to have archived successfully)."""
+    caption = captions.build_archive_caption(
+        user_display="🎉" * 100,
+        user_id=12345,
+        filename="🎬" * 300 + ".mp4",
+        url="https://example.com/" + "📎" * 300,
+    )
+    assert captions.utf16_units(caption) <= captions.CAPTION_LIMIT
+    caption.encode("utf-16-le")  # never a split surrogate pair
+
+
+def test_archive_caption_short_inputs_are_not_truncated():
+    caption = captions.build_archive_caption(
+        user_display="Dana", user_id=1, filename="clip.mp4", url="http://example.com/x"
+    )
+    assert "📁 קובץ: clip.mp4" in caption
+    assert "🔗 קישור: http://example.com/x" in caption
+
+
 # --------------------------------------------------------------------------
 # split files: part labels + the signature moving to the last part
 # --------------------------------------------------------------------------

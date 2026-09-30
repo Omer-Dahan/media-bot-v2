@@ -398,6 +398,71 @@ async def test_archive_forward_failure_does_not_fail_download_or_undo_charge(
     assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # terminal success, with the new completion summary
 
 
+async def test_charge_failure_after_successful_delivery_still_reports_success(
+    session_factory, credits_service, tmp_path
+):
+    """Covers finding B (M11.11): `charged = True` used to be set *before*
+    `use_quota_dynamic` ran, so a DB error there raised out of the try block,
+    landed in the generic `except Exception` handler, and reported the same
+    "download failed" + retry-button message as an actual download failure -
+    even though the file had already reached the user. The charge must be
+    attempted without ever turning a successful delivery into a reported
+    failure; the pipeline's own `finally`-block retry (already used for the
+    cancel/error-mid-upload path) picks the charge back up transparently."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    progress = _FakeProgress()
+
+    real_use_quota = credits_service.use_quota_dynamic
+    calls: list[None] = []
+
+    def flaky_use_quota(user_id, file_sizes):
+        calls.append(None)
+        if len(calls) == 1:
+            raise RuntimeError("boom: db unavailable")
+        return real_use_quota(user_id, file_sizes)
+
+    credits_service.use_quota_dynamic = flaky_use_quota
+
+    await pipeline.run(user_id=1, url="http://x", engine=_FakeEngine(), uploader=uploader, progress=progress)
+
+    assert len(uploader.sent) == 1  # the file was delivered
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)  # success, not texts.DOWNLOAD_FAILED
+    assert texts.DOWNLOAD_FAILED not in progress.updates[-1]
+
+    assert len(calls) == 2  # first attempt failed, the finally-block retry succeeded
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 2  # charged exactly once despite the first attempt failing
+
+
+async def test_charge_permanently_failing_after_delivery_still_reports_success(
+    session_factory, credits_service, tmp_path
+):
+    """Even if the retry in `finally` also fails, a delivery that already
+    reached the user must still be reported as a success (with a warning
+    only in the log) - not "download failed" with a retry button, which
+    would invite a duplicate download of a file the user already has."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    uploader = _FakeUploader()
+    progress = _FakeProgress()
+
+    def always_fails(user_id, file_sizes):
+        raise RuntimeError("boom: db unavailable")
+
+    credits_service.use_quota_dynamic = always_fails
+
+    await pipeline.run(user_id=1, url="http://x", engine=_FakeEngine(), uploader=uploader, progress=progress)
+
+    assert len(uploader.sent) == 1  # the file was delivered
+    assert progress.updates[-1].startswith(texts.DOWNLOAD_DONE)
+    assert texts.DOWNLOAD_FAILED not in progress.updates[-1]
+
+    with session_factory() as session:
+        user = session.query(User).filter(User.user_id == 1).one()
+        assert user.free == 3  # never charged - both attempts failed, but delivery still succeeded
+
+
 async def test_successful_download_writes_a_cache_entry_when_archive_channel_configured(
     session_factory, credits_service, cache_store, tmp_path
 ):

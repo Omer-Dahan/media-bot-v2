@@ -77,7 +77,9 @@ def test_youtube_and_concurrency_defaults(monkeypatch):
     assert settings.youtube_js_runtimes is None
     assert settings.youtube_remote_components is None
     assert settings.workers == 100
-    assert settings.user_workers == 2
+    assert settings.user_workers == 5  # M11.11: 2 -> 5, see config.py's comment
+    assert settings.thread_pool_size == 48
+    assert settings.upload_concurrency_limit == 20
 
 
 def test_youtube_and_concurrency_custom_values(monkeypatch):
@@ -93,6 +95,8 @@ def test_youtube_and_concurrency_custom_values(monkeypatch):
     monkeypatch.setenv("YOUTUBE_REMOTE_COMPONENTS", "ejs:github")
     monkeypatch.setenv("WORKERS", "50")
     monkeypatch.setenv("USER_WORKERS", "4")
+    monkeypatch.setenv("THREAD_POOL_SIZE", "24")
+    monkeypatch.setenv("UPLOAD_CONCURRENCY_LIMIT", "10")
     settings = Settings(_env_file=None)
     assert settings.force_ipv4 is True
     assert settings.potoken == "po_token_value"
@@ -103,6 +107,8 @@ def test_youtube_and_concurrency_custom_values(monkeypatch):
     assert settings.youtube_remote_components == "ejs:github"
     assert settings.workers == 50
     assert settings.user_workers == 4
+    assert settings.thread_pool_size == 24
+    assert settings.upload_concurrency_limit == 10
 
 
 def test_youtube_settings_alias_choices(monkeypatch):

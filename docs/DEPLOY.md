@@ -180,6 +180,42 @@ first deployment:
   you use them (never commit these files).
 - `TIKTOK_PROVIDERS` / `YOUTUBE_PROVIDERS` / `DISABLED_PROVIDERS`: provider
   fallback order, see `docs/providers.md`.
+- `WORKERS` (default `100`) / `USER_WORKERS` (default `5`): `asyncio.Semaphore`
+  caps on requests *in flight* globally / per user. **`THREAD_POOL_SIZE`
+  below is the setting that actually matters for real concurrency** - see
+  its entry immediately after this one. Raising `WORKERS` alone changes
+  nothing if `THREAD_POOL_SIZE` isn't also raised, because every blocking
+  call inside a request queues on that pool regardless of how many requests
+  `WORKERS` lets in.
+- `THREAD_POOL_SIZE` (default `48`): the real concurrency ceiling for
+  download / mp3-conversion / ffprobe / split / upload-part-read work
+  (`media_bot_v2/executor.py`). `asyncio.to_thread()` on its own schedules
+  onto the event loop's *default* executor, which Python sizes to
+  `min(32, cpu_count() + 4)` - **10 threads on a 6-core box** - independent
+  of `WORKERS`/`USER_WORKERS` entirely. Before this setting existed, every
+  one of those blocking calls shared that one 10-thread pool: `WORKERS=100`
+  "allowed" 100 concurrent requests, but the 11th blocking call inside them
+  always queued behind the first 10 regardless, so raising `WORKERS` never
+  raised real concurrency. `THREAD_POOL_SIZE` gives that work its own
+  dedicated `ThreadPoolExecutor`, created once at startup and shut down on
+  exit; set it to whatever your server's CPU/disk/ffmpeg budget can sustain
+  under real concurrent load - there's no reason to keep it near Python's
+  small CPU-derived default on a box provisioned for this workload.
+- `UPLOAD_CONCURRENCY_LIMIT` (default `20`): an account-health ceiling,
+  separate from the two settings above, on how many *uploads* (not
+  downloads) run at once process-wide. Raising `WORKERS`/`USER_WORKERS`/
+  `THREAD_POOL_SIZE` raises how many files can be downloaded/converted/split
+  concurrently, and each of those can then start uploading with up to
+  `UPLOAD_CONNECTIONS` (default `5`) real TCP connections to the same
+  Telegram DC - at `WORKERS=100` that is a theoretical 500 simultaneous
+  connections from one account. That does not speed anything up (Telegram
+  caps *bandwidth*, not connection count, so 60 concurrent uploads share the
+  same pipe as 20 - see `UPLOAD_WORKERS`/`UPLOAD_CONNECTIONS` above) and only
+  raises `FLOOD_WAIT` risk. This semaphore
+  (`media_bot_v2/telegram/parallel_upload.py`) caps concurrent uploads
+  without touching download/conversion concurrency at all - a slot is held
+  only for the upload step, acquired after a file is already downloaded and
+  processed.
 
 ## 6. systemd service
 

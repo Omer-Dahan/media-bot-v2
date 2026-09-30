@@ -32,6 +32,7 @@ from media_bot_v2.engines.ytdlp_support import (
     safe_outtmpl,
     too_large_error,
 )
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
@@ -139,7 +140,7 @@ class TikTokEngine(BaseEngine):
         logger.info("All TikTok providers failed for %s, falling back to local yt-dlp", url)
         loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._download_local_sync, url, dest_dir, loop, cancel_token)
+            return await run_in_thread(self._download_local_sync, url, dest_dir, loop, cancel_token)
         except DownloadTooLargeError:
             raise
         except Exception as exc:

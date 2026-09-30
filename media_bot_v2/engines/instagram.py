@@ -41,6 +41,7 @@ from media_bot_v2.engines.ytdlp_support import (
     safe_outtmpl,
     too_large_error,
 )
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress_format import format_progress
 
@@ -285,7 +286,7 @@ class InstagramEngine(BaseEngine):
         dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop()
         try:
-            return await asyncio.to_thread(self._download_sync, url, dest_dir, loop, cancel_token)
+            return await run_in_thread(self._download_sync, url, dest_dir, loop, cancel_token)
         except DownloadTooLargeError:
             raise
         except UnsupportedUrlError:

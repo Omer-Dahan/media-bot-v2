@@ -24,6 +24,12 @@ from media_bot_v2.upload.media_probe import KIND_AUDIO, KIND_VIDEO
 
 CAPTION_LIMIT = 1024
 DESCRIPTION_LIMIT = 4000
+# Telegram's real limit for a plain message (the "full description" follow-up
+# message) is 4096 UTF-16 code units - not 4000 *characters* as DESCRIPTION_LIMIT
+# above assumes. DESCRIPTION_LIMIT is a user-facing setting sentinel (the "full
+# description" choice in settings_menu.py's TITLE_LENGTH_CYCLE) and must keep
+# its value; MESSAGE_LIMIT below is the actual Telegram send-time budget.
+MESSAGE_LIMIT = 4096
 _ELLIPSIS = "…"
 
 # Old bot: a title length of 0 (unlimited, Telegraph) or >= 1000 is cut to 750
@@ -137,21 +143,78 @@ def _render(kind: str, title: str, url: str, *, width: int, height: int, duratio
 
 
 def build_description_message(title: str | None, description: str | None) -> str | None:
-    """Follow-up message for the "4000" description-length setting."""
+    """Follow-up message for the "4000" description-length setting.
+
+    Telegram's real limit here is `MESSAGE_LIMIT` (4096) UTF-16 code units on
+    the *parsed* message - not `DESCRIPTION_LIMIT` (4000) Python characters.
+    A description full of astral-plane emoji (2 UTF-16 units each) can blow
+    past 4096 units while still under 4000 characters; the old flat
+    `full_text[:DESCRIPTION_LIMIT]` slice let that through and Telegram
+    silently rejected the send, so the user never got the description at
+    all. Shrinking is codepoint-by-codepoint (`text[:keep]`), which - unlike
+    slicing a raw UTF-16 buffer - can never split a surrogate pair.
+    """
     full_text = "\n\n".join(part for part in ((title or "").strip(), (description or "").strip()) if part)
     if not full_text:
         return None
-    body = html.escape(full_text[:DESCRIPTION_LIMIT])
-    return f"📋 <b>תיאור מלא:</b>\n\n<blockquote expandable>{body}</blockquote>"
+
+    def render(text: str) -> str:
+        body = html.escape(text)
+        return f"📋 <b>תיאור מלא:</b>\n\n<blockquote expandable>{body}</blockquote>"
+
+    text = full_text
+    message = render(text)
+    overflow = utf16_units(message) - MESSAGE_LIMIT
+    while overflow > 0 and text:
+        cut = max(overflow, 1)
+        keep = max(len(text) - cut - 1, 0)
+        text = text[:keep].rstrip() + (_ELLIPSIS if keep else "")
+        message = render(text)
+        overflow = utf16_units(message) - MESSAGE_LIMIT
+        if not keep:
+            break
+    return message
 
 
 def build_archive_caption(*, user_display: str, user_id: int, filename: str, url: str) -> str:
-    """Operator-facing header of the archive copy (never shown to a user)."""
-    shown_name = filename if len(filename) <= 200 else filename[:200] + "..."
-    shown_url = url if len(url) <= 300 else url[:300] + "..."
-    return (
-        f"👤 משתמש: {html.escape(user_display)}\n"
-        f"🆔 {user_id}\n"
-        f"📁 קובץ: {html.escape(shown_name)}\n"
-        f"<blockquote expandable>🔗 קישור: {html.escape(shown_url)}</blockquote>"
-    )
+    """Operator-facing header of the archive copy (never shown to a user).
+
+    Shrinks the filename, then the url, the same way `build_user_caption`
+    shrinks title/url - by UTF-16 code-unit count against `CAPTION_LIMIT`
+    (1024), not a flat character count. A filename or url loaded with
+    astral-plane emoji could previously exceed 1024 units despite being
+    under the old fixed 200/300-character caps; Telegram then rejected the
+    archive copy, `_archive_copy` swallowed the failure, and the whole
+    request silently fell out of cache (`cache.put` requires every part to
+    have archived successfully).
+    """
+    shown_name = filename
+    shown_url = url
+
+    def render(name: str, link: str) -> str:
+        return (
+            f"👤 משתמש: {html.escape(user_display)}\n"
+            f"🆔 {user_id}\n"
+            f"📁 קובץ: {html.escape(name)}\n"
+            f"<blockquote expandable>🔗 קישור: {html.escape(link)}</blockquote>"
+        )
+
+    caption = render(shown_name, shown_url)
+    overflow = utf16_units(caption) - CAPTION_LIMIT
+    while overflow > 0 and shown_name:
+        cut = max(overflow, 1)
+        keep = max(len(shown_name) - cut - 1, 0)
+        shown_name = shown_name[:keep].rstrip() + (_ELLIPSIS if keep else "")
+        caption = render(shown_name, shown_url)
+        overflow = utf16_units(caption) - CAPTION_LIMIT
+        if not keep:
+            break
+
+    while overflow > 0 and len(shown_url) > 1:
+        keep = max(len(shown_url) - overflow - 1, 0)
+        shown_url = shown_url[:keep] + _ELLIPSIS
+        caption = render(shown_name, shown_url)
+        overflow = utf16_units(caption) - CAPTION_LIMIT
+        if not keep:
+            break
+    return caption

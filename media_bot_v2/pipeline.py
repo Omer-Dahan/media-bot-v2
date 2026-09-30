@@ -70,6 +70,7 @@ from media_bot_v2.engines.base import (
 from media_bot_v2.engines.instagram import InstagramDownloadError
 from media_bot_v2.engines.tiktok import TikTokDownloadError
 from media_bot_v2.engines.youtube import YouTubeDownloadError
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.telegram import captions, texts
 from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
@@ -256,12 +257,12 @@ class DownloadPipeline:
             for raw_path in result.file_paths:
                 source = Path(raw_path)
                 if is_audio_requested:
-                    cover_path = await asyncio.to_thread(
+                    cover_path = await run_in_thread(
                         resolve_cover_image,
                         source,
                         explicit_thumb=Path(result.thumb_path) if getattr(result, "thumb_path", None) else None,
                     )
-                    source = await asyncio.to_thread(
+                    source = await run_in_thread(
                         convert_to_mp3,
                         source,
                         title=result.title,
@@ -272,7 +273,7 @@ class DownloadPipeline:
                     )
                     async with self._upload_budget() as cm:
                         up_cm = cm
-                        info = await asyncio.to_thread(probe, source)
+                        info = await run_in_thread(probe, source)
                         info = replace(
                             info,
                             kind=KIND_AUDIO,
@@ -292,8 +293,8 @@ class DownloadPipeline:
                         source = await self._make_streamable(source)
                     async with self._upload_budget() as cm:
                         up_cm = cm
-                        info = await asyncio.to_thread(probe_with_thumb, source)
-                parts = await asyncio.to_thread(splitter.split_file, source)
+                        info = await run_in_thread(probe_with_thumb, source)
+                parts = await run_in_thread(splitter.split_file, source)
                 groups.append(_FileGroup(info=info, parts=parts))
 
             # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
@@ -371,8 +372,26 @@ class DownloadPipeline:
                         if label:
                             previous = (message, label)
 
-            charged = True
-            self._credits.use_quota_dynamic(user_id, delivered_sizes)
+            # Delivery is done at this point - every part already reached the
+            # user. A charging failure past this line must never surface as
+            # "download failed" (it wasn't), and must never offer the retry
+            # button (retrying would just re-download and re-charge on top of
+            # an already-delivered file). So the charge is attempted here but
+            # never allowed to raise into the except blocks below: on failure
+            # `charged` stays False and the `finally` block's own retry (used
+            # today for the cancel/error mid-upload case) picks it up and logs
+            # if that retry also fails - the user still sees the normal
+            # success summary either way.
+            try:
+                self._credits.use_quota_dynamic(user_id, delivered_sizes)
+                charged = True
+            except Exception:
+                logger.warning(
+                    "Charging failed after successful delivery for user=%s url=%s; will retry once more in cleanup",
+                    user_id,
+                    url,
+                    exc_info=True,
+                )
 
             # 4. Extras after the media: subtitles (never charged) and the
             # "full description" message. Neither may fail the download.
@@ -539,7 +558,7 @@ class DownloadPipeline:
         the ffmpeg child; any failure (timeout included) is logged and the
         original file is returned - never an error for the user."""
         try:
-            return await asyncio.to_thread(ensure_streamable, source, timeout=self._fix_timeout())
+            return await run_in_thread(ensure_streamable, source, timeout=self._fix_timeout())
         except Exception:
             logger.warning("Streamable conversion failed for %s, sending it as-is", source, exc_info=True)
             return source
@@ -562,7 +581,7 @@ class DownloadPipeline:
         """
         if total == 1:
             return group.info, "", True
-        part_info = await asyncio.to_thread(probe, part)
+        part_info = await run_in_thread(probe, part)
         playable = part_info.kind == group.info.kind and group.info.kind in (KIND_VIDEO, "audio")
         if not playable:
             return MediaInfo(), captions.doc_part_label(index, total, part.name), False

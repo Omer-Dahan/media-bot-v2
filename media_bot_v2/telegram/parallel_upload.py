@@ -51,6 +51,7 @@ from telethon.network import MTProtoSender
 from telethon.tl import functions, types
 from telethon.tl.alltlobjects import LAYER
 
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.telegram.flood_wait import (
     FLOOD_WAIT_ERRORS,
     MAX_FLOOD_WAIT_SECONDS,
@@ -67,6 +68,34 @@ CONNECT_TIMEOUT = 20.0
 _DEGRADE_AFTER = ((4, 1), (2, 2))
 
 ProgressCallback = Callable[[int, int], Awaitable[None] | None]
+
+# Account-health ceiling (M11.11 finding A.4): WORKERS/USER_WORKERS and
+# THREAD_POOL_SIZE bound how many downloads/conversions run at once, but say
+# nothing about how many *uploads* run at once - and each upload can open up
+# to UPLOAD_CONNECTIONS (default 5) real TCP connections to the same DC. With
+# WORKERS=100 that is a theoretical 500 simultaneous connections from one
+# account, which does nothing for throughput (Telegram's bandwidth cap is
+# what actually limits an upload, not the connection count) and only raises
+# FLOOD_WAIT risk. This semaphore caps concurrent *uploads* process-wide,
+# independent of - and without reducing - download/conversion concurrency,
+# which is governed entirely by ConcurrencyLimiter/THREAD_POOL_SIZE and never
+# touches this semaphore.
+DEFAULT_UPLOAD_CONCURRENCY_LIMIT = 20
+
+_upload_semaphore: asyncio.Semaphore | None = None
+
+
+def init_upload_concurrency_limit(limit: int = DEFAULT_UPLOAD_CONCURRENCY_LIMIT) -> asyncio.Semaphore:
+    global _upload_semaphore
+    _upload_semaphore = asyncio.Semaphore(max(1, limit))
+    return _upload_semaphore
+
+
+def get_upload_semaphore() -> asyncio.Semaphore:
+    global _upload_semaphore
+    if _upload_semaphore is None:
+        _upload_semaphore = asyncio.Semaphore(DEFAULT_UPLOAD_CONCURRENCY_LIMIT)
+    return _upload_semaphore
 
 
 async def _sleep(seconds: float) -> None:
@@ -195,7 +224,7 @@ async def upload_file_parallel(
 
     # Small files need an MD5 over the whole content; computing it up front
     # keeps parts independent of each other (and is cheap below 10MB).
-    md5 = None if is_big else await asyncio.to_thread(_md5_of, path)
+    md5 = None if is_big else await run_in_thread(_md5_of, path)
 
     flood_cb = on_flood or getattr(progress, "handle_flood_wait", None)
     flood_cleared_cb = on_flood_cleared or getattr(progress, "handle_flood_cleared", None)
@@ -204,28 +233,32 @@ async def upload_file_parallel(
     for index in range(part_count):
         pending.put_nowait(index)
 
-    # No point in a connection per lane that will never get a part.
-    links = await _open_links(client, min(connections, part_count))
-    fd = os.open(path, os.O_RDONLY)
-    try:
-        lanes = [
-            asyncio.create_task(
-                _lane(client, lane, links, fd, file_id, part_count, part_size, is_big, pending, state, progress)
-            )
-            for lane in range(workers)
-        ]
+    # Gates only the connections/lanes below - a process-wide account-health
+    # ceiling (see DEFAULT_UPLOAD_CONCURRENCY_LIMIT above), never the
+    # download/conversion work that happens before this point.
+    async with get_upload_semaphore():
+        # No point in a connection per lane that will never get a part.
+        links = await _open_links(client, min(connections, part_count))
+        fd = os.open(path, os.O_RDONLY)
         try:
-            done, _ = await asyncio.wait(lanes, return_when=asyncio.FIRST_EXCEPTION)
-            for task in done:
-                if task.exception() is not None:
-                    raise task.exception()
+            lanes = [
+                asyncio.create_task(
+                    _lane(client, lane, links, fd, file_id, part_count, part_size, is_big, pending, state, progress)
+                )
+                for lane in range(workers)
+            ]
+            try:
+                done, _ = await asyncio.wait(lanes, return_when=asyncio.FIRST_EXCEPTION)
+                for task in done:
+                    if task.exception() is not None:
+                        raise task.exception()
+            finally:
+                for task in lanes:
+                    task.cancel()
+                await asyncio.gather(*lanes, return_exceptions=True)
         finally:
-            for task in lanes:
-                task.cancel()
-            await asyncio.gather(*lanes, return_exceptions=True)
-    finally:
-        os.close(fd)
-        await _close_links(links)
+            os.close(fd)
+            await _close_links(links)
 
     if is_big:
         return types.InputFileBig(file_id, part_count, name)
@@ -247,7 +280,7 @@ async def _lane(client, lane, links, fd, file_id, part_count, part_size, is_big,
             index = pending.get_nowait()
         except asyncio.QueueEmpty:
             return
-        data = await asyncio.to_thread(_read_part, fd, index * part_size, part_size)
+        data = await run_in_thread(_read_part, fd, index * part_size, part_size)
         if is_big:
             request = functions.upload.SaveBigFilePartRequest(file_id, index, part_count, data)
         else:

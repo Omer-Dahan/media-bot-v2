@@ -138,8 +138,26 @@ class Settings(BaseSettings):
     provider_cooldown_seconds: int = Field(default=300, validation_alias="PROVIDER_COOLDOWN_SECONDS")
 
     # --- Concurrency limits ---
+    # NOTE: workers/user_workers gate how many requests may be *in flight*
+    # (asyncio.Semaphore only). The actual ceiling on blocking work inside a
+    # request (download, mp3 conversion, ffprobe, split, upload part I/O) is
+    # thread_pool_size below - see media_bot_v2/executor.py. Raising workers
+    # without also raising thread_pool_size changes nothing.
     workers: int = Field(default=100, validation_alias="WORKERS")
-    user_workers: int = Field(default=2, validation_alias="USER_WORKERS")
+    # 2 -> 5 (M11.11): 2 let a single active user queue behind their own
+    # cap while WORKERS=100 sat mostly idle; 5 gives one user real headroom
+    # without letting them monopolize the global pool.
+    user_workers: int = Field(default=5, validation_alias="USER_WORKERS")
+    # The dedicated thread pool's size - the real concurrency ceiling for
+    # to_thread work (see media_bot_v2/executor.py's module docstring for
+    # why Python's default executor, min(32, cpu+4), silently capped this
+    # regardless of WORKERS/USER_WORKERS).
+    thread_pool_size: int = Field(default=48, gt=0, validation_alias="THREAD_POOL_SIZE")
+    # Account-health ceiling on concurrent *uploads* (not downloads), each of
+    # which may open up to UPLOAD_CONNECTIONS real TCP connections to
+    # Telegram - see media_bot_v2/telegram/parallel_upload.py's module
+    # docstring for why this is bounded separately from WORKERS.
+    upload_concurrency_limit: int = Field(default=20, gt=0, validation_alias="UPLOAD_CONCURRENCY_LIMIT")
 
     # --- Request timeout budget ---
     request_timeout: float = Field(default=600.0, validation_alias="REQUEST_TIMEOUT")

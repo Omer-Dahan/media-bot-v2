@@ -19,6 +19,7 @@ from media_bot_v2.config import load_settings
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.session import build_session_factory
 from media_bot_v2.engines.youtube import check_js_runtime
+from media_bot_v2.executor import init_thread_pool, shutdown_thread_pool
 from media_bot_v2.logging_setup import configure_logging
 from media_bot_v2.pipeline import DownloadPipeline
 from media_bot_v2.providers.health import ProviderHealthTracker
@@ -26,6 +27,7 @@ from media_bot_v2.providers.registry import build_provider_registry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram.client import build_client
 from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
+from media_bot_v2.telegram.parallel_upload import init_upload_concurrency_limit
 from media_bot_v2.telegram.router import register_handlers
 
 logger = logging.getLogger(__name__)
@@ -96,6 +98,18 @@ def main() -> None:
     check_js_runtime()
     log_archive_channel(settings.archive_channel)
 
+    # The real ceiling for download/convert/probe/split/upload-read work -
+    # see media_bot_v2/executor.py's module docstring. Created once here and
+    # shut down in the finally below; every to_thread call in the pipeline
+    # goes through it instead of asyncio's default executor.
+    init_thread_pool(settings.thread_pool_size)
+    logger.info("Thread pool initialized with THREAD_POOL_SIZE=%d", settings.thread_pool_size)
+    init_upload_concurrency_limit(settings.upload_concurrency_limit)
+    logger.info(
+        "Upload concurrency ceiling initialized with UPLOAD_CONCURRENCY_LIMIT=%d",
+        settings.upload_concurrency_limit,
+    )
+
     session_factory = build_session_factory(settings.db_dsn)
     credits_service = CreditsService(
         session_factory,
@@ -150,8 +164,11 @@ def main() -> None:
     )
 
     logger.info("Starting media-bot-v2")
-    start_client_with_flood_retry(client, bot_token=settings.bot_token)
-    client.run_until_disconnected()
+    try:
+        start_client_with_flood_retry(client, bot_token=settings.bot_token)
+        client.run_until_disconnected()
+    finally:
+        shutdown_thread_pool()
 
 
 if __name__ == "__main__":
