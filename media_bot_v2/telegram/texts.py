@@ -224,13 +224,16 @@ def format_download_summary(
     duration_seconds: int | None = None,
     size_bytes: int | None = None,
     elapsed_seconds: float | None = None,
+    is_audio: bool = False,
 ) -> str:
     """`DOWNLOAD_DONE` plus whichever of quality/format, duration, size, and
     total request time are actually known - never a guessed or placeholder
     value, and never a credits balance (that stays in /settings only, per
     the owner's standing decision - see SETTINGS_CREDITS)."""
     lines = [DOWNLOAD_DONE]
-    if quality_label:
+    if is_audio or quality_label == "MP3":
+        lines.append("🎵 נשלח: MP3")
+    elif quality_label:
         lines.append(f"🎬 נשלח: {quality_label}")
 
     detail_parts = []

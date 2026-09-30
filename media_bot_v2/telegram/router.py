@@ -421,6 +421,7 @@ def register_handlers(
                         cache_key=cache_key,
                         archive_channel=archive_channel,
                         delivery=delivery,
+                        audio_only=(job_quality == "audio"),
                     ),
                 )
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:

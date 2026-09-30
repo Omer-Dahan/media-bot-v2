@@ -121,6 +121,9 @@ class DownloadResult:
     # Subtitle files written next to the media (never part of `file_paths`,
     # never charged); delivered only if the user enabled subtitles.
     subtitle_paths: list[str] = field(default_factory=list)
+    artist: str | None = None
+    album: str | None = None
+    thumb_path: str | None = None
 
 
 class BaseEngine(ABC):

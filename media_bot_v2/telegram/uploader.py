@@ -77,14 +77,16 @@ class TelethonUploader:
         media: MediaInfo | None = None,
         as_document: bool = False,
         title: str | None = None,
+        performer: str | None = None,
         progress: ProgressCallback | None = None,
         on_flood: Any = None,
         on_flood_cleared: Any = None,
     ) -> Any:
         info = media or MediaInfo()
         # Photos are always sent as photos, whatever the "send as" setting.
-        as_document = as_document and info.kind != KIND_PHOTO
-        kwargs = self._send_kwargs(info, caption=caption, as_document=as_document, title=title)
+        # Audio is sent as audio (DocumentAttributeAudio), not document.
+        as_document = as_document and info.kind not in (KIND_PHOTO, KIND_AUDIO)
+        kwargs = self._send_kwargs(info, caption=caption, as_document=as_document, title=title, performer=performer)
         flood_cb = on_flood or getattr(progress, "handle_flood_wait", None) or self._on_flood
         flood_cleared_cb = (
             on_flood_cleared or getattr(progress, "handle_flood_cleared", None) or self._on_flood_cleared
@@ -103,7 +105,7 @@ class TelethonUploader:
             if as_document:
                 raise
             logger.warning("Telegram rejected %s as %s, retrying once as a document", path.name, info.kind)
-            fallback = self._send_kwargs(info, caption=caption, as_document=True, title=title)
+            fallback = self._send_kwargs(info, caption=caption, as_document=True, title=title, performer=performer)
             return await call_with_flood_retry(
                 self._client.send_file,
                 self._chat_id,
@@ -149,7 +151,14 @@ class TelethonUploader:
         )
 
     @staticmethod
-    def _send_kwargs(info: MediaInfo, *, caption: str | None, as_document: bool, title: str | None) -> dict:
+    def _send_kwargs(
+        info: MediaInfo,
+        *,
+        caption: str | None,
+        as_document: bool,
+        title: str | None,
+        performer: str | None = None,
+    ) -> dict:
         kwargs: dict[str, Any] = {"caption": caption or "", "parse_mode": "html"}
         thumb = str(info.thumb_path) if info.thumb_path else None
         if as_document:
@@ -173,7 +182,16 @@ class TelethonUploader:
                     )
                 ]
         elif info.kind == KIND_AUDIO:
-            kwargs["attributes"] = [DocumentAttributeAudio(duration=info.duration, title=title)]
+            if thumb:
+                kwargs["thumb"] = thumb
+            attr_kwargs: dict[str, Any] = {"duration": info.duration}
+            effective_title = getattr(info, "title", None) or title
+            if effective_title:
+                attr_kwargs["title"] = effective_title
+            effective_performer = getattr(info, "performer", None) or performer
+            if effective_performer:
+                attr_kwargs["performer"] = effective_performer
+            kwargs["attributes"] = [DocumentAttributeAudio(**attr_kwargs)]
         return kwargs
 
     async def edit_caption(self, message: Any, caption: str) -> None:

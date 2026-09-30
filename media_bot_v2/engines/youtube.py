@@ -478,6 +478,8 @@ def _result_from_info(
     playlist_item_limit: int | None = None,
     too_large_count: int = 0,
 ) -> DownloadResult:
+    artist: str | None = None
+    album: str | None = None
     if info.get("_type") == "playlist" or "entries" in info:
         entries = [e for e in (info.get("entries") or []) if e]
         file_paths: list[str] = []
@@ -506,6 +508,8 @@ def _result_from_info(
         title = info.get("title") or "YouTube"
         description = info.get("description") or None
         subtitle_paths = _extract_subtitle_paths(info)
+        artist = (info.get("artist") or "").strip() or None
+        album = (info.get("album") or "").strip() or None
         playlist_total = None
         playlist_downloaded = None
         playlist_trimmed_reason = None
@@ -520,6 +524,8 @@ def _result_from_info(
         playlist_total=playlist_total,
         playlist_downloaded=playlist_downloaded,
         playlist_trimmed_reason=playlist_trimmed_reason,
+        artist=artist,
+        album=album,
     )
 
 

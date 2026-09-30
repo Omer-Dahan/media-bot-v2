@@ -75,7 +75,14 @@ from media_bot_v2.telegram.delivery import DeliveryOptions
 from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
 from media_bot_v2.telegram.progress import MessageProgressReporter, UploadProgress
 from media_bot_v2.upload import splitter
-from media_bot_v2.upload.media_probe import KIND_VIDEO, MediaInfo, probe, probe_with_thumb
+from media_bot_v2.upload.audio_converter import convert_to_mp3, resolve_cover_image
+from media_bot_v2.upload.media_probe import (
+    KIND_AUDIO,
+    KIND_VIDEO,
+    MediaInfo,
+    probe,
+    probe_with_thumb,
+)
 from media_bot_v2.upload.streamable import DEFAULT_FIX_TIMEOUT_SECONDS, ensure_streamable
 
 logger = logging.getLogger(__name__)
@@ -127,6 +134,7 @@ class Uploader(Protocol):
         media: MediaInfo | None = None,
         as_document: bool = False,
         title: str | None = None,
+        performer: str | None = None,
         progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> Any: ...
     async def copy_to_archive(self, message: Any, *, caption: str) -> Any | None: ...
@@ -176,6 +184,7 @@ class DownloadPipeline:
         cache_key: str | None = None,
         archive_channel: str | None = None,
         delivery: DeliveryOptions | None = None,
+        audio_only: bool = False,
     ) -> None:
         # Wall-clock start of this request, for the completion summary's
         # "total time" line (texts.format_download_summary) - UI-only, never
@@ -183,6 +192,11 @@ class DownloadPipeline:
         request_started = time.monotonic()
         self._credits.check_quota(user_id)
         delivery = delivery or DeliveryOptions()
+        is_audio_requested = (
+            audio_only
+            or getattr(engine, "quality", None) == "audio"
+            or getattr(engine, "_quality", None) == "audio"
+        )
 
         if cache is not None and cache_key is not None:
             cached = cache.get(cache_key)
@@ -241,17 +255,44 @@ class DownloadPipeline:
             groups: list[_FileGroup] = []
             for raw_path in result.file_paths:
                 source = Path(raw_path)
-                if not delivery.as_document:
-                    # "Send as file" delivers the bytes untouched; everything
-                    # sent as playable video must be H.264/AAC MP4 with the
-                    # moov up front or clients fail with IO_UNSPECIFIED. This
-                    # runs OUTSIDE the upload budget with its own smaller
-                    # one: a slow conversion is killed and the original is
-                    # sent, and it never eats the time the upload needs.
-                    source = await self._make_streamable(source)
-                async with self._upload_budget() as cm:
-                    up_cm = cm
-                    info = await asyncio.to_thread(probe_with_thumb, source)
+                if is_audio_requested:
+                    cover_path = await asyncio.to_thread(
+                        resolve_cover_image,
+                        source,
+                        explicit_thumb=Path(result.thumb_path) if getattr(result, "thumb_path", None) else None,
+                    )
+                    source = await asyncio.to_thread(
+                        convert_to_mp3,
+                        source,
+                        title=result.title,
+                        artist=getattr(result, "artist", None),
+                        album=getattr(result, "album", None),
+                        cover_path=cover_path,
+                        timeout=self._fix_timeout(),
+                    )
+                    async with self._upload_budget() as cm:
+                        up_cm = cm
+                        info = await asyncio.to_thread(probe, source)
+                        info = replace(
+                            info,
+                            kind=KIND_AUDIO,
+                            thumb_path=cover_path,
+                            title=result.title or info.title,
+                            performer=getattr(result, "artist", None) or info.performer,
+                            album=getattr(result, "album", None) or info.album,
+                        )
+                else:
+                    if not delivery.as_document:
+                        # "Send as file" delivers the bytes untouched; everything
+                        # sent as playable video must be H.264/AAC MP4 with the
+                        # moov up front or clients fail with IO_UNSPECIFIED. This
+                        # runs OUTSIDE the upload budget with its own smaller
+                        # one: a slow conversion is killed and the original is
+                        # sent, and it never eats the time the upload needs.
+                        source = await self._make_streamable(source)
+                    async with self._upload_budget() as cm:
+                        up_cm = cm
+                        info = await asyncio.to_thread(probe_with_thumb, source)
                 parts = await asyncio.to_thread(splitter.split_file, source)
                 groups.append(_FileGroup(info=info, parts=parts))
 
@@ -293,6 +334,7 @@ class DownloadPipeline:
                             media=send_info,
                             as_document=delivery.as_document or not playable,
                             title=result.title,
+                            performer=getattr(result, "artist", None) or send_info.performer,
                             progress=upload_progress,
                         )
                         last_media_message = message
@@ -401,15 +443,21 @@ class DownloadPipeline:
             else:
                 quality_label = None
                 duration_seconds = None
+                is_audio = False
                 if len(groups) == 1:
                     info = groups[0].info
-                    quality_label = _quality_label(info.height, as_document=delivery.as_document)
+                    if is_audio_requested:
+                        is_audio = True
+                        quality_label = "MP3"
+                    else:
+                        quality_label = _quality_label(info.height, as_document=delivery.as_document)
                     duration_seconds = info.duration or None
                 summary = texts.format_download_summary(
                     quality_label=quality_label,
                     duration_seconds=duration_seconds,
                     size_bytes=sum(delivered_sizes) or None,
                     elapsed_seconds=time.monotonic() - request_started,
+                    is_audio=is_audio,
                 )
                 await _update_progress(progress, summary, is_terminal=True)
         except TimeoutError as exc:
@@ -523,6 +571,9 @@ class DownloadPipeline:
             width=group.info.width,
             height=group.info.height,
             thumb_path=group.info.thumb_path,
+            title=group.info.title,
+            performer=group.info.performer,
+            album=group.info.album,
         )
         if as_document:
             return send_info, captions.doc_part_label(index, total, part.name), True
@@ -651,9 +702,14 @@ class DownloadPipeline:
         )
         quality_label = None
         duration_seconds = None
+        is_audio = False
         if len(cached.items) == 1:
             item = cached.items[0]
-            quality_label = _quality_label(item.height, as_document=delivery.as_document)
+            if item.kind in (KIND_AUDIO, "audio"):
+                is_audio = True
+                quality_label = "MP3"
+            else:
+                quality_label = _quality_label(item.height, as_document=delivery.as_document)
             duration_seconds = item.duration or None
         summary = texts.format_download_summary(
             quality_label=quality_label,
@@ -662,6 +718,7 @@ class DownloadPipeline:
             # not reported here - never a guessed/stale number.
             size_bytes=None,
             elapsed_seconds=time.monotonic() - request_started,
+            is_audio=is_audio,
         )
         await _update_progress(progress, summary, is_terminal=True)
         return True

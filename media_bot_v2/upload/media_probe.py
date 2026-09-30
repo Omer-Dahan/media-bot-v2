@@ -42,6 +42,9 @@ class MediaInfo:
     width: int = 0
     height: int = 0
     thumb_path: Path | None = None
+    title: str | None = None
+    performer: str | None = None
+    album: str | None = None
 
     def with_thumb(self, thumb_path: Path | None) -> MediaInfo:
         return replace(self, thumb_path=thumb_path)
@@ -60,7 +63,7 @@ def probe(path: Path) -> MediaInfo:
                 "-v",
                 "error",
                 "-show_entries",
-                "format=duration:stream=codec_type,width,height:stream_tags=rotate:stream_side_data=rotation:stream_disposition=attached_pic",
+                "format=duration:format_tags:stream=codec_type,width,height:stream_tags=rotate:stream_side_data=rotation:stream_disposition=attached_pic",
                 "-of",
                 "json",
                 str(path),
@@ -82,7 +85,12 @@ def probe(path: Path) -> MediaInfo:
         None,
     )
     has_audio = any(s.get("codec_type") == "audio" for s in streams)
-    duration = _to_int((data.get("format") or {}).get("duration"))
+    format_data = data.get("format") or {}
+    duration = _to_int(format_data.get("duration"))
+    tags = format_data.get("tags") or {}
+    title = (tags.get("title") or "").strip() or None
+    performer = (tags.get("artist") or tags.get("performer") or "").strip() or None
+    album = (tags.get("album") or "").strip() or None
 
     if video is not None:
         width, height = _to_int(video.get("width")), _to_int(video.get("height"))
@@ -92,7 +100,13 @@ def probe(path: Path) -> MediaInfo:
             width, height = height, width
         return MediaInfo(kind=KIND_VIDEO, duration=duration, width=width, height=height)
     if has_audio:
-        return MediaInfo(kind=KIND_AUDIO, duration=duration)
+        return MediaInfo(
+            kind=KIND_AUDIO,
+            duration=duration,
+            title=title,
+            performer=performer,
+            album=album,
+        )
     return MediaInfo()
 
 
