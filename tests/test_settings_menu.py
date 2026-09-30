@@ -73,6 +73,14 @@ def test_toggle_title_len_cycles_through_all_values():
         assert setting.title_length == value
 
 
+def test_toggle_title_len_unlimited_answer_describes_actual_truncation():
+    setting = Setting(quality="high", format="video", subtitles=0, title_length=4000)
+    answer = settings_menu.apply_toggle(setting, settings_menu.TOGGLE_TITLE_LEN)
+    assert setting.title_length == 0
+    assert "Telegraph" not in answer
+    assert "750" in answer
+
+
 def test_build_settings_buttons_reflects_current_values():
     setting = Setting(quality="medium", format="document", subtitles=1, title_length=0)
     rows = settings_menu.build_settings_buttons(setting)

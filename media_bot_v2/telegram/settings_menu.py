@@ -108,7 +108,7 @@ def apply_toggle(setting: Setting, toggle_key: str) -> str:
         if setting.title_length == 4000:
             return "📋 בחרת בתיאור מלא!\nהתיאור יישלח בהודעה נפרדת מתחת למדיה."
         if setting.title_length == 0:
-            return "🌐 התיאור יישלח כדף Telegraph!\nהקישור יישלח בהודעה נפרדת מתחת למדיה."
+            return "📋 בחרת ב'ללא הגבלה'!\nהתיאור יקוצר עד 750 תווים כדי להתאים למגבלת הכיתוב בטלגרם."
         return f"✅ אורך תיאור: {setting.title_length} תווים"
 
     raise ValueError(f"Unknown toggle: {toggle_key}")

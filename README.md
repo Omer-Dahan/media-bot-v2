@@ -3,8 +3,8 @@
 <br>
 
 ### High-Performance Telegram Media Download Bot
-**Ultra-fast downloads from YouTube, TikTok, Instagram, and direct links — powered by Telethon MTProto.**<br>
-Ground-up rewrite engineered for maximum throughput: parallel multi-connection uploads, adaptive provider fallbacks, seamless DB continuity, and an intuitive Hebrew interface.
+**Downloads from YouTube, TikTok, Instagram, and direct links — powered by Telethon MTProto.**<br>
+Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallbacks, schema-compatible DB continuity, and an intuitive Hebrew interface.
 
 <br>
 
@@ -121,7 +121,7 @@ Comprehensive SSRF protection with redirect hop address inspection, path travers
 <td valign="top">
 
 ### 💳 Fair Volume Billing
-Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful upload. Split files never cost extra; failed deliveries charge zero.
+Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful upload. On a partial delivery (e.g. a multi-part split where only some parts land) only the parts actually delivered are charged; if nothing was delivered, there is no charge.
 
 </td>
 </tr>
@@ -129,7 +129,7 @@ Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`)
 <td valign="top">
 
 ### 🛑 Active Task Cancellation
-Inline `[ ❌ ביטול ]` button stops in-flight downloads immediately, terminating worker thread sockets and cleaning up temporary disk fragments cooperatively.
+Inline `[ ❌ ביטול ]` button sets a cancellation token and closes the underlying HTTP response, stopping in-flight downloads cooperatively and cleaning up temporary disk fragments. On the yt-dlp path (YouTube), the worker thread notices the token within roughly 1-2 seconds rather than instantly.
 
 </td>
 <td valign="top">
@@ -209,7 +209,7 @@ stateDiagram-v2
     EngineDispatch --> CacheCheck: Compute deterministic cache key
     CacheCheck --> CacheServe: Key exists in video_cache -> Resend from archive
     CacheCheck --> Downloading: Cache miss -> Acquire concurrency slot
-    Downloading --> GuardValidation: Preflight HEAD check & content sniffing
+    Downloading --> GuardValidation: SSRF guard; direct-link engine also does a preflight HEAD check & body sniffing
     GuardValidation --> Transcode: Probe media info, fix streamable MP4, or split >2GB
     Transcode --> Uploading: Multi-lane parallel upload over MTProto TCP
     Uploading --> ArchiveCopy: Send copy to private ARCHIVE_CHANNEL
@@ -241,7 +241,8 @@ cp .env.example .env
 # 4 · Verify local environment readiness
 uv run python -m media_bot_v2.preflight
 
-# 5 · Run the complete test suite (870+ tests)
+# 5 · Run the complete test suite (906 passing, 2 skipped as of this writing —
+#     the count grows over time, so treat it as a floor, not a fixed target)
 uv run pytest -q
 ```
 
@@ -269,7 +270,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 ┌─────────────────────────────────────────────────────────────┐
 │ 🎬 סרטון יוטיוב (03:45)                                    │
 │                                                             │
-│ 📊 התקדמות: (45.2MB/98.0MB) 46% ████░░░░░░                 │
+│ 📊 התקדמות: (45.0MB/100.0MB) 45% 🌑🌑🌑🌑🌑🌒🌕🌕🌕🌕      │
 │ ⚡ מהירות: 5.4MB/s                                          │
 │ ⏱️ זמן משוער: 10 שניות                                      │
 ├─────────────────────────────────────────────────────────────┤
@@ -277,12 +278,23 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-1. **User Ingestion**: The user sends any supported media link in a private chat.
-2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד (MP3)`). Direct links, TikTok, and Instagram start downloading immediately.
+> The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters; it fills so that full moons always land next to the label, and the last cell only turns 🌕 at exactly 100%.
+
+1. **User Ingestion**: The user sends any supported media link in a **private chat only** — the bot does not respond in groups or channels.
+2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, and Instagram start downloading immediately.
 3. **Live Progress Feedback**: The status message updates in place with a real-time progress bar, speed counter, and ETA. The inline `[ ❌ ביטול ]` button allows the user to abort the transfer cooperatively at any time.
 4. **Delivery & Archiving**: The completed media is delivered with formatted captions, streamable flags, and optional separate subtitle files. The message is quietly archived to the configured `ARCHIVE_CHANNEL`.
 5. **Instant Cache Hits**: Subsequent requests for the same URL and quality are served instantly from the archive channel without re-downloading or consuming credits.
 6. **Error Recovery**: If a transient network glitch occurs, the progress message displays the failure reason and attaches a `[ 🔄 נסה שוב ]` button for immediate re-execution.
+
+### Commands & Settings
+
+- **Commands**: `/start`, `/help`, `/about`, `/ping`, `/settings`.
+- **Settings menu** (`/settings`, persistent per-user): video quality (`1080p` / `720p` / `480p`), delivery format (video vs. document), subtitles on/off, and description length (a cycle of `100` → `250` → `500` → `1000` → full-description-as-separate-message → unlimited-but-truncated → back to `100`).
+- **Full description**: choosing the "full description" option sends the complete description as its own follow-up message below the media, instead of inside the caption.
+- **Playlists**: a YouTube playlist download is trimmed to however many items the user's remaining credits can afford; a trimmed delivery says so explicitly rather than silently dropping items.
+- **`SESSION_NAME=main` is hard-blocked**: this collides with the legacy bot's live session file, so `media_bot_v2.config.Settings` raises a `ValidationError` at startup (not just a warning) if `SESSION_NAME` is left at `main`.
+- **Hard limits**: 2000MiB per delivered file (Telegram bot API ceiling; larger files are split) and 4GiB per source download.
 
 ---
 
@@ -352,9 +364,10 @@ media-bot-v2/
 ├── 📂 media_bot_v2/              # 🧠 Core Python package
 │   ├── 📄 bootstrap.py           # 🚀 Application entrypoint & dependency assembly
 │   ├── 📄 config.py              # ⚙️ Pydantic-settings environment schema
+│   ├── 📄 executor.py            # 🧵 Dedicated thread pool (THREAD_POOL_SIZE ceiling)
 │   ├── 📄 logging_setup.py       # 📝 Rotating JSON structured logger
 │   ├── 📄 pipeline.py            # 🔄 Core pipeline: download -> split -> upload -> charge
-│   ├── 📄 preflight.py           # 🔍 Read-only environment & database readiness checker
+│   ├── 📄 preflight.py           # 🔍 Environment & database readiness checker (creates provider_health if missing; otherwise read-only)
 │   │
 │   ├── 📂 cache/                 # 💾 Caching & Deduplication Layer
 │   │   └── 📄 video_cache.py     # Database cache store & cache key generator
@@ -417,9 +430,10 @@ media-bot-v2/
 ├── 📂 spec/                      # 📐 Technical Specifications & Legacy Audit
 │   ├── 📄 DESIGN-PARITY.md       # Parity checklist with legacy implementation
 │   ├── 📄 INVENTORY.md           # Old bot inventory & audit decisions
-│   └── 📄 SPEC.md                # System specification & cutover roadmap
+│   ├── 📄 SPEC.md                # System specification & cutover roadmap
+│   └── 📂 research/              # Provider/engine feasibility research notes
 │
-└── 📂 tests/                     # 🧪 Comprehensive Test Suite (877 passing tests)
+└── 📂 tests/                     # 🧪 Comprehensive Test Suite (906 passing, 2 skipped as of this writing)
 ```
 
 </details>
@@ -452,7 +466,7 @@ media-bot-v2/
 | `POTOKEN_PROVIDER_URL` | YouTube | Health-check URL for external PO token provider service | `None` |
 | `YOUTUBE_COOKIES_FILE` | YouTube | Path to Netscape cookies file for age-gated YouTube content | `None` |
 | `YOUTUBE_PLAYER_CLIENT` | YouTube | Override yt-dlp player client (`mweb` without cookies, `web,default` with cookies) | `None` |
-| `YOUTUBE_JS_RUNTIMES` | YouTube | Comma-separated JS runtimes for `yt-dlp-ejs` challenges | `deno,node` |
+| `YOUTUBE_JS_RUNTIMES` | YouTube | Comma-separated JS runtimes for `yt-dlp-ejs` challenges | `None` (engine falls back to `deno,node`; `bun` is only used if explicitly listed here) |
 | `YOUTUBE_REMOTE_COMPONENTS`| YouTube | Remote solver component loading for `yt-dlp-ejs` | `None` |
 | `TIKTOK_COOKIES_FILE` | TikTok | Path to cookie file for TikTok private/regional access | `None` |
 | `INSTAGRAM_COOKIES_FILE` | Instagram | Path to cookie file for Instagram gated content | `None` |
@@ -465,7 +479,9 @@ media-bot-v2/
 | `PROVIDER_FAILURE_THRESHOLD`| Providers| Consecutive failures before temporarily suppressing a provider | `3` |
 | `PROVIDER_COOLDOWN_SECONDS`| Providers| Cooldown duration before retrying a suppressed provider | `300` (5 min) |
 | `WORKERS` | Concurrency | Global maximum concurrent downloads across all users | `100` |
-| `USER_WORKERS` | Concurrency | Maximum concurrent downloads per individual user | `2` |
+| `USER_WORKERS` | Concurrency | Maximum concurrent downloads per individual user | `5` |
+| `THREAD_POOL_SIZE` | Concurrency | Real ceiling on concurrent blocking work (download, ffprobe, mp3 conversion, split, upload-part I/O) — see the note below | `48` |
+| `UPLOAD_CONCURRENCY_LIMIT` | Concurrency | Maximum number of uploads allowed to run at once, process-wide (separate from `WORKERS`/`USER_WORKERS`, which gate downloads) | `20` |
 | `REQUEST_TIMEOUT` | Timeouts | Total time budget for a complete download operation in seconds | `600.0` (10 min) |
 | `UPLOAD_TIMEOUT` | Timeouts | Dedicated time budget for Telegram upload phase in seconds | `600.0` (10 min) |
 | `CONVERT_TIMEOUT` | Timeouts | Dedicated budget for streamable conversion & MP3 transcoding | `180.0` (3 min) |
@@ -473,7 +489,7 @@ media-bot-v2/
 | `UPLOAD_CONNECTIONS` | Speed | Real concurrent TCP connections to Telegram DC per upload (1..5) | `5` |
 
 > [!NOTE]
-> **Concurrency & Threading**: In `media-bot-v2`, concurrency is managed via `asyncio.Semaphore` using `WORKERS` (global cap) and `USER_WORKERS` (per-user cap), while synchronous CPU/network tasks run in worker threads via `asyncio.to_thread`. Legacy configurations referencing `THREAD_POOL_SIZE` are safely ignored.
+> **Concurrency & Threading**: `WORKERS` and `USER_WORKERS` are `asyncio.Semaphore` caps on how many requests may be *in flight* at once. The real ceiling on the blocking work inside a request (download, ffprobe, mp3 conversion, splitting, upload-part I/O) is **`THREAD_POOL_SIZE`** — it sizes a dedicated `ThreadPoolExecutor` (`media_bot_v2/executor.py`, initialized in `bootstrap.py`) that all of that work runs through via `run_in_thread`. Raising `WORKERS`/`USER_WORKERS` without also raising `THREAD_POOL_SIZE` changes nothing, since work queues behind the thread pool regardless of how many requests are "in flight". Uploads are additionally capped separately by `UPLOAD_CONCURRENCY_LIMIT`.
 
 > [!IMPORTANT]
 > **Archive Channel Format**: `ARCHIVE_CHANNEL` must be set as a negative numeric ID (e.g. `-1003534083142`) or a public `@username`. Passing a plain string number causes Telethon to resolve it via `GetContactsRequest` (treating it as a phone number), which fails for bots. The bot automatically converts numeric strings to integers on load.
@@ -484,19 +500,18 @@ media-bot-v2/
 
 `media-bot-v2` incorporates key architectural decisions derived from production analysis of the legacy codebase:
 
-- **Telethon MTProto Exclusivity**: Standardized entirely on `Telethon` (async MTProto). Unlike Pyrogram/Kurigram, Telethon uses `bytes` for callback data. All callbacks are centralized through [`media_bot_v2/telegram/callback_data.py`](file:///tmp/v2-readme/media_bot_v2/telegram/callback_data.py) for safe encoding/decoding.
-- **Zero-Downtime Database Continuity**: Shares the exact same MySQL production schema (`users`, `settings`, `payments`, `video_cache`) with zero data migrations or table renames. A single v2-only table (`provider_health`) is created on startup without altering legacy structures.
+- **Telethon MTProto Exclusivity**: Standardized entirely on `Telethon` (async MTProto). Unlike Pyrogram/Kurigram, Telethon uses `bytes` for callback data. All callbacks are centralized through [`media_bot_v2/telegram/callback_data.py`](media_bot_v2/telegram/callback_data.py) for safe encoding/decoding.
+- **Schema-Compatible Database Continuity**: Shares the exact same MySQL production schema (`users`, `settings`, `payments`, `video_cache`) with zero data migrations or table renames — no schema migration is needed to cut over. Cutover itself is **not** zero-downtime: the old bot must be stopped before `media-bot-v2` starts, since both cannot hold the same `BOT_TOKEN` session concurrently (see the Single Session Consumer Rule above). A single v2-only table (`provider_health`) is created by `media_bot_v2.preflight`'s `check_provider_health_table` check, not automatically on bot startup.
 - **Adaptive Provider Fallback with Cooldowns**: External extractors are monitored in real time. The `order_for()` query dynamically prioritizes providers with the highest success rate and lowest latency, temporarily cooling down failing providers for 5 minutes.
 - **Multi-Connection Uploads without Auth Duplication**: Speed is maximized by opening up to 5 real TCP connections to the Telegram DC. Each extra connection reuses the main client's in-memory `AuthKey` (`client._sender.auth_key`) with its own session/seqno, avoiding secondary session files that caused `AUTH_KEY_DUPLICATED` session revocation in the old bot.
 - **Post-Upload Volume Billing**: Solved the legacy pre-charge bug where users were billed before large file splits that subsequently failed. Credits are calculated strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful delivery.
 - **Leak-Proof Error Classification**: Error messages presented to the user are whitelisted and translated to clean Hebrew. Raw system paths, server IPs, internal hostnames, and API keys are strictly masked and restricted to internal logs.
-- **Dual-Model Verification**: Code construction and architectural verification were conducted across independent model evaluations to ensure defensive design and robust regression test coverage.
 
 ---
 
 ## ⚠️ Known Limitations
 
-In accordance with architectural reviews documented in [`docs/LESSONS.md`](file:///tmp/v2-readme/docs/LESSONS.md), the following minor cosmetic behaviors are retained:
+In accordance with architectural reviews documented in [`docs/LESSONS.md`](docs/LESSONS.md), the following minor cosmetic behaviors are retained:
 
 1. **RTL Dual-Message Display during Consecutive Floods**: If multiple Telegram operations encounter consecutive flood waits simultaneously, two terminal fallbacks (edit vs. respond) can race, resulting in a failure notice appearing next to a delayed success delivery.
 2. **Stale Progress Indicator after Flooded Cleanup**: If deleting the progress message is flooded after a file has already been successfully delivered, the message may remain visible at "Uploading... 95%".
@@ -508,9 +523,9 @@ In accordance with architectural reviews documented in [`docs/LESSONS.md`](file:
 
 ## 📜 License & Credits
 
-This project is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](file:///tmp/v2-readme/pyproject.toml#L7)).
+This project is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](pyproject.toml)).
 
-`media-bot-v2` is an independent, ground-up rewrite engineered for high performance, reliability, and robust concurrency.
+`media-bot-v2` is an independent, ground-up rewrite focused on reliability and robust concurrency.
 
 <div align="center">
 
