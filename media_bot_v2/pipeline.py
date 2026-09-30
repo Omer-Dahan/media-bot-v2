@@ -719,6 +719,7 @@ class DownloadPipeline:
             size_bytes=None,
             elapsed_seconds=time.monotonic() - request_started,
             is_audio=is_audio,
+            from_cache=True,
         )
         await _update_progress(progress, summary, is_terminal=True)
         return True

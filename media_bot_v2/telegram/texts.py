@@ -31,32 +31,32 @@ START = """
 שלחו קישור ונתחיל ⬇️😄
 """
 
-HELP = """
-🤖 **מדריך שימוש בבוט ההורדות**
-הבוט מאפשר הורדה של סרטונים, שירים וקבצים מיוטיוב, טיקטוק, אינסטגרם וגם מקישורי הורדה ישירה.
+HELP = """🤖 **מדריך שימוש בבוט ההורדות**
 
-🔹 איך מורידים?
-• פשוט שלחו קישור לתוכן הרצוי
-• הבוט יזהה אוטומטית את האתר והפורמט
-• 📤 הקובץ יישלח אליכם ישירות לטלגרם
+ברוכים הבאים! הבוט מאפשר להוריד סרטונים, שירים וקבצים במהירות ובאיכות גבוהה ישירות לטלגרם.
 
-🔹 פקודות זמינות:
-/start: הודעת התחל.
-/help, /about: מידע ועזרה.
-/settings: הגדרת איכות, פורמט וכתוביות.
-/ping: בדיקת מהירות תגובה.
+🔹 **מה אפשר להוריד?**
+• 📺 **יוטיוב:** סרטונים בכל האיכויות הזמינות, או חילוץ שמע לקובץ MP3.
+• 🎵 **טיקטוק:** סרטונים באיכות מקורית וללא סימן מים.
+• 📸 **אינסטגרם:** סרטוני Reels, פוסטים וסרטונים ציבוריים.
+• 📁 **קישורים ישירים:** הורדה מהירה של קבצי מדיה מכל קישור ישיר נתמך.
 
-🔹 מה אפשר להוריד?
-  • 🎥 סרטונים
-  • 🎵 אודיו ושירים
-  • 📁 קבצים מקישורי הורדה ישירה
+🔹 **איך משתמשים?**
+• פשוט שולחים קישור לתוכן הרצוי בצ'אט.
+• ביוטיוב תוכלו לבחור את איכות הווידאו או להוריד כשמע בלבד.
+• **ביטול בזמן אמת:** בזמן ההורדה מופיע כפתור "ביטול" לעצירת הבקשה בכל רגע.
+• **ניסיון חוזר:** אם הורדה נכשלה, יופיע כפתור "נסה שוב" להפעלה חוזרת בלחיצה אחת.
 
-ℹ️ הערות חשובות:
-• איכות ההורדה נבחרת אוטומטית לפי הזמינות
-• קישורים פרטיים, מוגנים או בתשלום עשויים לא לעבוד
-• יש להשתמש בתוכן באחריות ובהתאם לזכויות יוצרים
-• לכל משתמש יש מכסת הורדות כדי שהבוט יישאר מהיר וזמין לכולם
-"""
+💡 **טיפים לאיכות מרבית:**
+• להורדה באיכות המקורית ללא דחיסה של טלגרם, הגדירו בהגדרות שליחה כקובץ.
+• שימו לב: קישורים פרטיים או כאלה הדורשים התחברות אינם נתמכים.
+• קבצים שהורדו בעבר יישלחו אליכם מיד מהמטמון ללא צורך בהמתנה.
+
+⌨️ **פקודות זמינות:**
+• /start - התחלת שימוש והצגת הודעת הפתיחה
+• /help - פתיחת מדריך זה
+• /settings - בחירת איכות ברירת מחדל, פורמט, כתוביות ובדיקת קרדיטים
+• /ping - בדיקת מהירות התגובה של הבוט"""
 
 ABOUT = """
 🤖 **בוט הורדות מדיה**
@@ -106,6 +106,7 @@ PROCESSING = "מעבד..."
 UPLOADING = "מעלה לטלגרם..."
 DOWNLOAD_FROM_CACHE = "נמצא במטמון, שולח..."
 DOWNLOAD_DONE = "✅ **הושלם**"
+CACHE_DELIVERY_SUMMARY = "⚡ נשלח מהמטמון (מיידי)"
 DOWNLOAD_FAILED = "❌ ההורדה נכשלה. נסה שוב או שלח קישור אחר."
 FLOOD_WAIT_FAILED = "❌ טלגרם הגבילה את הפעילות עקב עומס זמני. אנא נסה שוב מאוחר יותר."
 FLOOD_WAIT_MESSAGE = "⏳ עומס זמני בשרתי טלגרם, אנא המתן {seconds} שניות..."
@@ -129,14 +130,15 @@ DOWNLOADING_QUALITY = "🔄 מוריד באיכות {name}..."
 DOWNLOADING_AUDIO = "🔄 מוריד שמע..."
 
 YOUTUBE_LINK_EXPIRED = "⏰ פג תוקף הקישור לבחירת איכות.\n➡️ שלח את קישור היוטיוב שוב ובחר איכות מחדש."
-YOUTUBE_QUEUE_WAIT = "⏳ יש עומס הורדות כרגע, הבקשה שלך בתור..."
+QUEUE_WAIT = "⏳ ממתין לעיבוד..."
+YOUTUBE_QUEUE_WAIT = QUEUE_WAIT
 YOUTUBE_JS_RUNTIME_MISSING = (
     "⚠️ הורדות יוטיוב עלולות להיכשל: לא נמצא JavaScript runtime בשרת (Node.js או Deno). "
     "יש להתקין Node.js (גרסה 22+) או Deno (גרסה 2.3+) ולוודא שהם נגישים ב-PATH."
 )
 
 PING_MESSAGE = "בודק פינג..."
-PING_RESULT = "פינג: {ms} מילישניות"
+PING_RESULT = "🟢 הבוט פעיל · זמן תגובה: {ms}ms"
 
 DIRECT_FILE_TOO_LARGE = (
     "❌ הקובץ גדול מדי ({size}). מגבלת ההורדה המרבית היא {max_size} - "
@@ -225,12 +227,15 @@ def format_download_summary(
     size_bytes: int | None = None,
     elapsed_seconds: float | None = None,
     is_audio: bool = False,
+    from_cache: bool = False,
 ) -> str:
     """`DOWNLOAD_DONE` plus whichever of quality/format, duration, size, and
     total request time are actually known - never a guessed or placeholder
     value, and never a credits balance (that stays in /settings only, per
     the owner's standing decision - see SETTINGS_CREDITS)."""
     lines = [DOWNLOAD_DONE]
+    if from_cache:
+        lines.append(CACHE_DELIVERY_SUMMARY)
     if is_audio or quality_label == "MP3":
         lines.append("🎵 נשלח: MP3")
     elif quality_label:
@@ -245,7 +250,10 @@ def format_download_summary(
         lines.append(f"📦 {' · '.join(detail_parts)}")
 
     if elapsed_seconds is not None and elapsed_seconds >= 0:
-        lines.append(f"⏱️ הושלם ב-{_elapsed_text(elapsed_seconds)}")
+        if from_cache:
+            lines.append(f"⏱️ נמסר ב-{_elapsed_text(elapsed_seconds)}")
+        else:
+            lines.append(f"⏱️ הושלם ב-{_elapsed_text(elapsed_seconds)}")
 
     return "\n".join(lines)
 

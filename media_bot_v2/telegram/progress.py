@@ -65,6 +65,8 @@ def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None =
         texts.DOWNLOAD_FROM_CACHE,
         "נמצא במטמון",
         texts.YOUTUBE_QUEUE_WAIT,
+        texts.QUEUE_WAIT,
+        "⏳ ממתין",
         "⏳ עומס זמני בשרתי טלגרם",
         texts.PING_MESSAGE,
     )):

@@ -402,7 +402,7 @@ def register_handlers(
 
             async def on_wait() -> None:
                 if progress is not None:
-                    await progress.update(texts.YOUTUBE_QUEUE_WAIT, is_terminal=False)
+                    await progress.update(texts.QUEUE_WAIT, is_terminal=False)
 
             async with limiter.slot(job_user_id, on_wait=on_wait):
                 await _run_cancellable(
@@ -478,7 +478,7 @@ def register_handlers(
     async def ping_handler(event: events.NewMessage.Event) -> None:
         start = time.monotonic()
         message = await call_with_flood_retry(event.respond, texts.PING_MESSAGE)
-        elapsed_ms = round((time.monotonic() - start) * 1000, 2)
+        elapsed_ms = max(1, round((time.monotonic() - start) * 1000))
         await call_with_flood_retry(message.edit, texts.PING_RESULT.format(ms=elapsed_ms))
 
     @client.on(events.NewMessage(pattern="/settings"))
