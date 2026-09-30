@@ -18,9 +18,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlparse
-
-import requests
+from urllib.parse import urlparse
 
 from media_bot_v2.engines.base import (
     BaseEngine,
@@ -34,6 +32,8 @@ from media_bot_v2.engines.content_check import (
     reject_if_not_media_body,
     reject_if_not_media_content_type,
 )
+from media_bot_v2.engines.safe_filename import safe_basename_from_url_path, within_directory
+from media_bot_v2.engines.ssrf_guard import SSRFBlockedError, safe_request
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress_format import format_progress
 
@@ -118,25 +118,28 @@ class DirectEngine(BaseEngine):
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
         filename = _filename_from_url(url)
-        dest_path = dest_dir / filename
+        dest_path = within_directory(dest_dir, filename, fallback="download.bin")
         loop = asyncio.get_running_loop() if self._progress is not None else None
-        await asyncio.to_thread(
-            _preflight_and_stream_to_file,
-            url,
-            dest_path,
-            self._max_download_size,
-            cancel_token,
-            self._progress,
-            loop,
-        )
+        try:
+            await asyncio.to_thread(
+                _preflight_and_stream_to_file,
+                url,
+                dest_path,
+                self._max_download_size,
+                cancel_token,
+                self._progress,
+                loop,
+            )
+        except SSRFBlockedError as exc:
+            logger.warning("Blocked SSRF attempt for %s: %s", url, exc)
+            raise UnsupportedUrlError(texts.UNSUPPORTED_URL) from exc
         if cancel_token is not None and cancel_token.is_set():
             return DownloadResult(file_paths=[])
-        return DownloadResult(file_paths=[str(dest_path)], title=filename)
+        return DownloadResult(file_paths=[str(dest_path)], title=dest_path.name)
 
 
 def _filename_from_url(url: str) -> str:
-    name = Path(urlparse(url).path).name
-    return unquote(name) or "download.bin"
+    return safe_basename_from_url_path(urlparse(url).path, default_stem="download", default_ext=".bin")
 
 
 def _preflight_and_stream_to_file(
@@ -148,11 +151,11 @@ def _preflight_and_stream_to_file(
     loop=None,
 ) -> None:
     try:
-        with requests.head(url, allow_redirects=True, timeout=10) as head_resp:
+        with safe_request("HEAD", url, timeout=10) as head_resp:
             if head_resp.status_code < 400:
                 reject_if_not_media_content_type(head_resp)
                 _reject_if_declared_size_too_large(head_resp, url, max_size)
-    except (DownloadTooLargeError, UnsupportedUrlError):
+    except (DownloadTooLargeError, UnsupportedUrlError, SSRFBlockedError):
         raise
     except Exception as exc:  # noqa: BLE001
         logger.debug("Preflight HEAD request failed for %s: %s; proceeding to GET", url, exc)
@@ -168,7 +171,7 @@ def _stream_to_file(
     progress=None,
     loop=None,
 ) -> None:
-    with requests.get(url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
+    with safe_request("GET", url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
         reject_if_not_media_content_type(response)
         _reject_if_declared_size_too_large(response, url, max_size)

@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError
+from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError, UnsupportedUrlError
 from media_bot_v2.engines.direct import DirectEngine
 
 FILE_CONTENT = b"hello from a local test server\n" * 100
@@ -114,6 +114,7 @@ def test_matches_http_and_https_urls():
     assert not engine.matches("not a url")
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_download_streams_file_to_disk(local_server, tmp_path):
     engine = DirectEngine()
     result = await engine.download(f"{local_server}/test-file.bin", dest_dir=tmp_path)
@@ -124,6 +125,7 @@ async def test_download_streams_file_to_disk(local_server, tmp_path):
     assert downloaded.read_bytes() == FILE_CONTENT
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_download_raises_on_http_error(local_server, tmp_path):
     import requests
 
@@ -131,6 +133,7 @@ async def test_download_raises_on_http_error(local_server, tmp_path):
         await DirectEngine().download(f"{local_server}/does-not-exist", dest_dir=tmp_path)
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_download_stops_and_deletes_file_when_exceeding_max_size(local_server, tmp_path):
     """Covers finding 5: an oversized (or endless) response must not be
     allowed to fill the disk - it should stop as soon as it crosses the
@@ -143,12 +146,14 @@ async def test_download_stops_and_deletes_file_when_exceeding_max_size(local_ser
     assert not any(tmp_path.iterdir())  # no partial file left on disk
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_download_allows_file_under_max_size(local_server, tmp_path):
     engine = DirectEngine(max_download_size=len(FILE_CONTENT) + 1)
     result = await engine.download(f"{local_server}/test-file.bin", dest_dir=tmp_path)
     assert Path(result.file_paths[0]).read_bytes() == FILE_CONTENT
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_download_rejects_declared_content_length_before_writing_any_bytes(
     local_server, tmp_path
 ):
@@ -162,6 +167,7 @@ async def test_download_rejects_declared_content_length_before_writing_any_bytes
     assert not any(tmp_path.iterdir())  # no file was ever opened for writing
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_reports_progress_bar_and_monotonic_percent_with_content_length(
     monkeypatch, local_server, tmp_path
 ):
@@ -186,6 +192,7 @@ async def test_reports_progress_bar_and_monotonic_percent_with_content_length(
     assert percents[-1] == 100
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_reports_size_and_speed_without_bar_when_no_content_length(
     monkeypatch, local_server, tmp_path
 ):
@@ -206,6 +213,7 @@ async def test_reports_size_and_speed_without_bar_when_no_content_length(
     assert any("📥 הורד" in t for t in reporter.texts)
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_size_cap_enforced_with_progress_attached(monkeypatch, local_server, tmp_path):
     """Attaching a progress reporter must not weaken the existing size-cap
     enforcement - same error, same cleanup, as without a reporter."""
@@ -222,6 +230,7 @@ async def test_size_cap_enforced_with_progress_attached(monkeypatch, local_serve
     assert not any(tmp_path.iterdir())
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_cancel_mid_stream_stops_and_reports_no_progress_after(
     monkeypatch, local_server, tmp_path
 ):
@@ -255,6 +264,7 @@ async def test_cancel_mid_stream_stops_and_reports_no_progress_after(
     assert len(reporter.texts) == settled_count, "no progress update after cancellation settled"
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_progress_reporter_failure_does_not_crash_download(
     monkeypatch, local_server, tmp_path
 ):
@@ -269,3 +279,71 @@ async def test_progress_reporter_failure_does_not_crash_download(
     result = await engine.download(f"{local_server}/large", dest_dir=tmp_path)
 
     assert Path(result.file_paths[0]).read_bytes() == LARGE_CONTENT
+
+
+# --- Finding A: path traversal via a percent-encoded filename -------------
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+@pytest.mark.parametrize(
+    "malicious_path",
+    [
+        "/..%2F..%2Fescaped.bin",
+        "/%2Fetc%2Fpasswd",
+        "/..%5C..%5Cescaped.bin",  # ..\..\ (Windows-style separator)
+        "/%2Fetc%2F%2E%2E%2Fescaped.bin",
+        "/etc%2Fpasswd",
+        "/foo%00bar.bin",  # embedded control/NUL char
+        "/" + "%2E" * 50 + "escaped.bin",  # long run of encoded dots
+    ],
+)
+async def test_download_confines_malicious_filename_inside_dest_dir(
+    local_server, tmp_path, malicious_path
+):
+    """Covers finding A: a `%2F`/`..` payload in the URL path must never
+    place the downloaded file outside dest_dir - the file must land inside
+    tmp_path, and nothing must exist outside it."""
+    engine = DirectEngine()
+    result = await engine.download(f"{local_server}{malicious_path}", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    written = Path(result.file_paths[0]).resolve()
+    assert written.parent == tmp_path.resolve()
+    assert written.is_relative_to(tmp_path.resolve())
+    assert written.read_bytes() == FILE_CONTENT
+    # Nothing was written outside dest_dir (e.g. two levels up).
+    assert not (tmp_path.parent.parent / "escaped.bin").exists()
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_download_empty_decoded_name_falls_back_to_default(local_server, tmp_path):
+    """`%2F%2F` decodes to an empty name after basename extraction - must
+    fall back to a default filename inside dest_dir, not an empty/invalid
+    path."""
+    engine = DirectEngine()
+    result = await engine.download(f"{local_server}/%2F%2F", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    written = Path(result.file_paths[0])
+    assert written.name  # non-empty
+    assert written.parent.resolve() == tmp_path.resolve()
+    assert written.exists()
+
+
+# --- Finding B: SSRF ---------------------------------------------------
+
+
+async def test_download_blocks_loopback_target(local_server, tmp_path):
+    """The real guard (no bypass fixture here) must refuse to fetch from
+    127.0.0.1 - exactly what `local_server` is - proving the engine itself
+    enforces the SSRF guard end-to-end, not just the guard in isolation."""
+    engine = DirectEngine()
+    with pytest.raises(UnsupportedUrlError):
+        await engine.download(f"{local_server}/test-file.bin", dest_dir=tmp_path)
+    assert not any(tmp_path.iterdir())
+
+
+async def test_download_blocks_disallowed_scheme(tmp_path):
+    engine = DirectEngine()
+    with pytest.raises(UnsupportedUrlError):
+        await engine.download("file:///etc/passwd", dest_dir=tmp_path)

@@ -172,8 +172,9 @@ def test_split_video_falls_back_to_raw_bytes_when_resegmenting_never_fits(tmp_pa
 
 
 def test_split_video_cleans_up_partial_parts_on_ffmpeg_failure(tmp_path, monkeypatch):
-    """Covers finding 6: if ffmpeg crashes mid-split, any segments it
-    already wrote must not be left behind as disk garbage."""
+    """Covers finding 6 (and finding C's work-dir cleanup): if ffmpeg
+    crashes mid-split, any segments it already wrote - and the temporary
+    working directory itself - must not be left behind as disk garbage."""
     monkeypatch.setattr(splitter, "_probe_duration_seconds", lambda path: 10.0)
 
     def fake_run(cmd, **kwargs):
@@ -191,4 +192,107 @@ def test_split_video_cleans_up_partial_parts_on_ffmpeg_failure(tmp_path, monkeyp
     with pytest.raises(subprocess.CalledProcessError):
         splitter._segment_video(video, limit=1000, margin=0.7)
 
-    assert not any(tmp_path.glob("clip.part*"))
+    # Nothing survives except the original source file - no stray parts,
+    # no leftover `.splittmp-*` working directory.
+    assert [p.name for p in tmp_path.iterdir()] == ["clip.mp4"]
+
+
+# --- Finding C: '[...]' and '%' in the source filename ---------------------
+
+
+@pytest.mark.parametrize(
+    "filename",
+    [
+        "Clip [abc123XYZ].mp4",  # yt-dlp's title pattern - glob char-class bug
+        "100% real.mp4",  # literal '%' - corrupts ffmpeg's own %03d template
+        "כתובית ארוכה בעברית עם רווחים.mp4",  # Hebrew + spaces
+        "[weird] 50% mix עברית.mp4",  # all three at once
+    ],
+)
+def test_split_video_handles_dangerous_filenames(tmp_path, filename):
+    video_path = tmp_path / filename
+    subprocess.run(
+        [
+            "ffmpeg",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=duration=6:size=64x64:rate=10",
+            "-pix_fmt",
+            "yuv420p",
+            "-g",
+            "5",
+            "-keyint_min",
+            "5",
+            str(video_path),
+        ],
+        check=True,
+        capture_output=True,
+    )
+    full_size = video_path.stat().st_size
+    assert full_size > 0
+    limit = max(full_size // 2, 1024)
+
+    parts = splitter.split_file(video_path, limit=limit)
+
+    assert len(parts) > 1
+    assert not video_path.exists()
+    # No leftover working directory next to the parts.
+    assert not any(p.name.startswith(".splittmp-") for p in tmp_path.iterdir())
+    for part in parts:
+        assert part.exists()
+        assert 0 < part.stat().st_size <= limit
+        probe = subprocess.run(
+            ["ffprobe", "-v", "error", "-show_entries", "format=duration", str(part)],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        assert probe.returncode == 0
+    # Parts reassemble in the numerically-correct order (not lexicographic).
+    reassembled_size = sum(p.stat().st_size for p in parts)
+    assert reassembled_size > 0
+
+
+def test_numbered_parts_sorts_numerically_not_lexicographically(tmp_path):
+    """Covers finding C's 'parse parts by correct numeric sort' requirement
+    directly: with more than 10 parts, a lexicographic sort of unpadded
+    numbers would put 'part10' before 'part2'."""
+    for i in [0, 1, 2, 10, 11]:
+        (tmp_path / f"part{i:03d}.mp4").write_bytes(f"part{i}".encode())
+
+    parts = splitter._numbered_parts(tmp_path, ".mp4")
+
+    assert [p.name for p in parts] == [
+        "part000.mp4",
+        "part001.mp4",
+        "part002.mp4",
+        "part010.mp4",
+        "part011.mp4",
+    ]
+
+
+# --- Finding E: _split_raw must not read a whole `limit`-sized block into memory ---
+
+
+def test_split_raw_memory_does_not_scale_with_part_size(tmp_path):
+    """Covers finding E: with the old single `src.read(limit)` call, a large
+    `limit` meant a same-sized spike in RSS. Reading in bounded
+    `_RAW_COPY_BLOCK_SIZE` blocks keeps the spike roughly block-sized
+    regardless of `limit`."""
+    resource = pytest.importorskip("resource")
+
+    limit = 48 * 1024 * 1024  # bigger than _RAW_COPY_BLOCK_SIZE (8MB)
+    f = tmp_path / "archive.bin"
+    f.write_bytes(os.urandom(limit + (limit // 2)))  # 1.5x limit -> 2 parts
+
+    baseline_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+    parts = splitter._split_raw(f, limit=limit)
+    after_kb = resource.getrusage(resource.RUSAGE_SELF).ru_maxrss
+
+    assert len(parts) == 2
+    growth_kb = after_kb - baseline_kb
+    # A naive single read(limit) would grow RSS by ~limit (48MB = 49152KB).
+    # Block-bounded reads should stay well under half that.
+    assert growth_kb < (limit // 1024) // 2, f"RSS grew {growth_kb}KB, expected well under {(limit // 1024) // 2}KB"

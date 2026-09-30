@@ -12,10 +12,12 @@ import http.server
 import re
 import threading
 import time
+from pathlib import Path
 
 import pytest
 
 from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError
+from media_bot_v2.engines.ssrf_guard import SSRFBlockedError
 from media_bot_v2.providers.base import ProviderResult
 from media_bot_v2.providers.downloader import download_provider_media
 
@@ -107,6 +109,7 @@ def _slideshow_result(local_server: str, count: int) -> ProviderResult:
     )
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_single_item_under_limit_succeeds(local_server, tmp_path):
     result = await download_provider_media(
         _slideshow_result(local_server, 1), tmp_path, max_size=len(ITEM_CONTENT) + 1
@@ -114,6 +117,7 @@ async def test_single_item_under_limit_succeeds(local_server, tmp_path):
     assert len(result.file_paths) == 1
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_cumulative_slideshow_size_is_enforced_across_items(local_server, tmp_path):
     """Each item is well under max_size on its own, but five of them together
     exceed it - this must fail even though no single file ever does."""
@@ -126,6 +130,7 @@ async def test_cumulative_slideshow_size_is_enforced_across_items(local_server, 
         )
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_cumulative_slideshow_under_limit_downloads_all_items(local_server, tmp_path):
     item_count = 5
     max_size = len(ITEM_CONTENT) * item_count + 1
@@ -136,6 +141,7 @@ async def test_cumulative_slideshow_under_limit_downloads_all_items(local_server
     assert len(result.file_paths) == item_count
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_no_limit_means_no_cumulative_enforcement(local_server, tmp_path):
     result = await download_provider_media(
         _slideshow_result(local_server, 5), tmp_path, max_size=None
@@ -147,6 +153,7 @@ def _single_url_result(url: str) -> ProviderResult:
     return ProviderResult(provider="direct", media_urls=[url], title="v", media_type="video")
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_reports_progress_bar_and_monotonic_percent_with_content_length(
     monkeypatch, local_server, tmp_path
 ):
@@ -175,6 +182,7 @@ async def test_reports_progress_bar_and_monotonic_percent_with_content_length(
     assert percents[-1] == 100
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_reports_size_and_speed_without_bar_when_no_content_length(
     monkeypatch, local_server, tmp_path
 ):
@@ -198,6 +206,7 @@ async def test_reports_size_and_speed_without_bar_when_no_content_length(
     assert any("📥 הורד" in t for t in reporter.texts)
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_size_cap_enforced_with_progress_attached(monkeypatch, local_server, tmp_path):
     """Attaching a progress reporter must not weaken the existing size-cap
     enforcement - same error, same cleanup, as without a reporter."""
@@ -216,6 +225,7 @@ async def test_size_cap_enforced_with_progress_attached(monkeypatch, local_serve
     assert not any(tmp_path.iterdir())
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_cancel_mid_stream_stops_and_reports_no_progress_after(
     monkeypatch, local_server, tmp_path
 ):
@@ -252,6 +262,7 @@ async def test_cancel_mid_stream_stops_and_reports_no_progress_after(
     assert len(reporter.texts) == settled_count, "no progress update after cancellation settled"
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_progress_reporter_failure_does_not_crash_download(
     monkeypatch, local_server, tmp_path
 ):
@@ -269,3 +280,64 @@ async def test_progress_reporter_failure_does_not_crash_download(
         progress=_RaisingProgressReporter(),
     )
     assert len(result.file_paths) == 1
+
+
+# --- Finding A: path traversal via a filename the provider hands back ------
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+@pytest.mark.parametrize(
+    "malicious_path",
+    [
+        "/..%2F..%2Fescaped.bin",
+        "/%2Fetc%2Fpasswd",
+        "/..%5C..%5Cescaped.bin",
+        "/%2Fetc%2F%2E%2E%2Fescaped.bin",
+    ],
+)
+async def test_provider_media_url_confines_filename_inside_dest_dir(
+    local_server, tmp_path, malicious_path
+):
+    """A provider-returned media URL with a `%2F`/`..` payload in its path
+    must never place the file outside dest_dir - covers the same class of
+    bug as direct.py, but on the provider-fallback path (downloader.py:49,66
+    in the finding)."""
+    result = _single_url_result(f"{local_server}{malicious_path}")
+    dl_result = await download_provider_media(result, tmp_path, max_size=None)
+
+    assert len(dl_result.file_paths) == 1
+    written = Path(dl_result.file_paths[0]).resolve()
+    assert written.parent == tmp_path.resolve()
+    assert written.read_bytes() == ITEM_CONTENT
+    assert not (tmp_path.parent.parent / "escaped.bin").exists()
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_provider_result_with_no_title_and_traversal_url_falls_back_safely(
+    local_server, tmp_path
+):
+    """No title (so the filename comes straight from the URL) and a `%2F%2F`
+    path that decodes to an empty name - must still land inside dest_dir."""
+    result = ProviderResult(
+        provider="tikwm", media_urls=[f"{local_server}/%2F%2F"], title=None, media_type="video"
+    )
+    dl_result = await download_provider_media(result, tmp_path, max_size=None)
+
+    assert len(dl_result.file_paths) == 1
+    written = Path(dl_result.file_paths[0])
+    assert written.name
+    assert written.parent.resolve() == tmp_path.resolve()
+
+
+# --- Finding B: SSRF - a compromised/malicious provider pointing inward ----
+
+
+async def test_provider_media_url_pointing_at_loopback_is_blocked(local_server, tmp_path):
+    """A provider is an untrusted-ish third party from the bot's point of
+    view: if it (or an attacker controlling it) returns a media URL that
+    points at loopback/internal addresses, the download must not proceed -
+    the guard runs on the provider's URL too, not just direct user links."""
+    result = _single_url_result(f"{local_server}/with-length")
+    with pytest.raises(SSRFBlockedError):
+        await download_provider_media(result, tmp_path, max_size=None)
+    assert not any(tmp_path.iterdir())

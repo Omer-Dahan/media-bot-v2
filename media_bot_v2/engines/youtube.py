@@ -54,6 +54,8 @@ from media_bot_v2.engines.ytdlp_support import (
     DownloadGuard,
     DownloadTooLargeSignal,
     remove_partial_files,
+    rename_to_safe_display_name,
+    safe_outtmpl,
     too_large_error,
 )
 from media_bot_v2.providers.downloader import download_provider_media
@@ -416,9 +418,11 @@ def format_progress_text(d: dict) -> str | None:
 def _extract_file_paths(entry: dict) -> list[str]:
     downloads = entry.get("requested_downloads")
     if downloads:
-        return [d["filepath"] for d in downloads if d.get("filepath")]
-    filename = entry.get("filepath") or entry.get("_filename")
-    return [filename] if filename else []
+        paths = [d["filepath"] for d in downloads if d.get("filepath")]
+    else:
+        filename = entry.get("filepath") or entry.get("_filename")
+        paths = [filename] if filename else []
+    return [rename_to_safe_display_name(entry, p) for p in paths]
 
 
 def _extract_subtitle_paths(entry: dict) -> list[str]:
@@ -431,7 +435,7 @@ def _extract_subtitle_paths(entry: dict) -> list[str]:
     for sub in (requested or {}).values():
         filepath = sub.get("filepath") if isinstance(sub, dict) else None
         if filepath and filepath not in paths and Path(filepath).exists():
-            paths.append(filepath)
+            paths.append(rename_to_safe_display_name(entry, filepath))
     return paths
 
 
@@ -726,7 +730,7 @@ class YouTubeEngine(BaseEngine):
         guard = guard or DownloadGuard(self._max_download_size, cancel_token)
         opts: dict = {
             "format": build_format_selector(self._quality),
-            "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
+            "outtmpl": safe_outtmpl(dest_dir),
             "merge_output_format": "mp4",
             "noplaylist": not is_playlist_request,
             "quiet": True,

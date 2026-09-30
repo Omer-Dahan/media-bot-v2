@@ -25,6 +25,7 @@ from typing import TYPE_CHECKING
 import yt_dlp
 
 from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError
+from media_bot_v2.engines.safe_filename import build_safe_named_file
 from media_bot_v2.telegram import texts
 
 if TYPE_CHECKING:
@@ -110,6 +111,46 @@ class DownloadGuard:
             self.check_cancelled()
 
         return _filter
+
+
+def safe_outtmpl(dest_dir: Path) -> str:
+    """yt-dlp output template that is always filesystem-safe to write,
+    whatever the video's title contains (finding D).
+
+    The stock `%(title).150s [%(id)s].%(ext)s` template truncates by
+    *character* count, not bytes: a long Hebrew or emoji-heavy title can
+    still blow past the 255-byte NAME_MAX and make yt-dlp fail the download
+    with `OSError: [Errno 36] File name too long` before a single byte is
+    written. `id` alone is always short and filesystem-safe, so the
+    download itself can never fail on the name - `rename_to_safe_display_name`
+    below renames the finished file to a human-readable, still byte-capped
+    name afterwards, for delivery.
+    """
+    return str(dest_dir / "%(id)s.%(ext)s")
+
+
+def rename_to_safe_display_name(entry: dict, path_str: str) -> str:
+    """Rename a file yt-dlp wrote under `safe_outtmpl`'s id-based name to a
+    human-readable `<title> [<id>]<tail>` name, with the title truncated to
+    a safe UTF-8 byte budget (finding D) - never the id or the real
+    extension/subtitle-language tail, which come after the id verbatim in
+    whatever yt-dlp originally produced."""
+    path = Path(path_str)
+    video_id = str(entry.get("id") or "")
+    if not video_id or not path.name.startswith(video_id):
+        return path_str  # unexpected shape - leave untouched rather than guess
+    tail = path.name[len(video_id):]  # e.g. ".mp4" or ".he.srt"
+    title = entry.get("title") or "video"
+    new_name = build_safe_named_file(title, suffix=f" [{video_id}]{tail}")
+    if new_name == path.name:
+        return path_str
+    new_path = path.with_name(new_name)
+    try:
+        path.rename(new_path)
+    except OSError:
+        logger.warning("Could not rename %s to safe display name %s", path, new_path)
+        return path_str
+    return str(new_path)
 
 
 def remove_partial_files(dest_dir: Path) -> None:

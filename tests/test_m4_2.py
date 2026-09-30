@@ -405,6 +405,7 @@ async def test_tiktok_local_real_download_over_limit_reports_size_and_limit(
     assert _files(tmp_path) == []
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_youtube_provider_fallback_over_limit_reports_size_and_limit(server, tmp_path):
     """Third YouTube route: a fallback provider's media URL is oversize."""
     _, _, health = _setup_test_db()
@@ -506,6 +507,7 @@ async def test_playlist_where_every_item_is_oversize_raises_too_large(
     assert _no_partials(tmp_path)
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_direct_engine_cancel_removes_truncated_file_and_stops_transfer(server, tmp_path):
     engine = DirectEngine()
     token = CancellationToken()
@@ -759,6 +761,7 @@ _MEDIA_BODIES = {
 }
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 @pytest.mark.parametrize("key", sorted(_HTML_LIKE_BODIES))
 async def test_direct_engine_rejects_non_media_and_leaves_nothing(server, tmp_path, key):
     server.bodies[key] = _HTML_LIKE_BODIES[key]
@@ -768,6 +771,7 @@ async def test_direct_engine_rejects_non_media_and_leaves_nothing(server, tmp_pa
     assert _files(tmp_path) == []
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 @pytest.mark.parametrize("key", sorted(_MEDIA_BODIES))
 async def test_direct_engine_accepts_real_media(server, tmp_path, key):
     server.bodies[key] = _MEDIA_BODIES[key]
@@ -775,6 +779,7 @@ async def test_direct_engine_accepts_real_media(server, tmp_path, key):
     assert Path(result.file_paths[0]).read_bytes() == _MEDIA_BODIES[key][1]
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 @pytest.mark.parametrize("key", sorted(_HTML_LIKE_BODIES))
 async def test_provider_downloader_rejects_non_media_and_leaves_nothing(server, tmp_path, key):
     server.bodies[key] = _HTML_LIKE_BODIES[key]
@@ -786,6 +791,7 @@ async def test_provider_downloader_rejects_non_media_and_leaves_nothing(server, 
     assert _files(tmp_path) == []
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 @pytest.mark.parametrize("key", sorted(_MEDIA_BODIES))
 async def test_provider_downloader_accepts_real_media(server, tmp_path, key):
     server.bodies[key] = _MEDIA_BODIES[key]
@@ -796,6 +802,7 @@ async def test_provider_downloader_accepts_real_media(server, tmp_path, key):
     assert Path(result.file_paths[0]).read_bytes() == _MEDIA_BODIES[key][1]
 
 
+@pytest.mark.usefixtures("bypass_ssrf_guard")
 async def test_provider_returning_a_web_page_falls_through_to_next_provider(server, tmp_path):
     """A provider whose media URL serves a captcha/error page counts as failed
     (not billed, not delivered) and the next provider gets its turn."""

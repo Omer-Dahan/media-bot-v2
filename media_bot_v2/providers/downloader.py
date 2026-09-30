@@ -3,12 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-import re
 import time
 from pathlib import Path
-from urllib.parse import unquote, urlparse
-
-import requests
+from urllib.parse import urlparse
 
 from media_bot_v2.engines.base import (
     CancellationToken,
@@ -21,6 +18,12 @@ from media_bot_v2.engines.content_check import (
     reject_if_not_media_body,
     reject_if_not_media_content_type,
 )
+from media_bot_v2.engines.safe_filename import (
+    build_safe_named_file,
+    safe_basename_from_url_path,
+    within_directory,
+)
+from media_bot_v2.engines.ssrf_guard import safe_request
 from media_bot_v2.providers.base import ProviderResult
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress_format import format_progress
@@ -28,7 +31,6 @@ from media_bot_v2.telegram.progress_format import format_progress
 _CHUNK_SIZE = 1024 * 1024
 _DEFAULT_TIMEOUT = 30
 _PROGRESS_THROTTLE_SECONDS = 2.0
-_SAFE_FILENAME_RE = re.compile(r'[\\/*?:"<>|]')
 
 
 def _report_stream_progress(
@@ -67,11 +69,7 @@ def _report_stream_progress(
     asyncio.run_coroutine_threadsafe(coro, loop)
 
 
-def _sanitize_title(title: str | None) -> str:
-    if not title:
-        return "download"
-    sanitized = _SAFE_FILENAME_RE.sub("_", title).strip()
-    return sanitized[:100] or "download"
+_DEFAULT_EXT_BY_MEDIA_TYPE = {"video": ".mp4", "audio": ".mp3", "photo": ".jpg"}
 
 
 def _filename_for_item(result: ProviderResult, url: str, index: int, total: int) -> str:
@@ -85,24 +83,17 @@ def _filename_for_item(result: ProviderResult, url: str, index: int, total: int)
 
     # Single item or non-photo
     parsed = urlparse(url)
-    url_name = unquote(Path(parsed.path).name)
-    url_ext = Path(url_name).suffix.lower()
-
-    if not url_ext:
-        if result.media_type == "video":
-            url_ext = ".mp4"
-        elif result.media_type == "audio":
-            url_ext = ".mp3"
-        elif result.media_type == "photo":
-            url_ext = ".jpg"
-        else:
-            url_ext = ".bin"
+    default_ext = _DEFAULT_EXT_BY_MEDIA_TYPE.get(result.media_type, ".bin")
 
     if result.title:
-        base_name = _sanitize_title(result.title)
-        return f"{base_name}{url_ext}"
+        # The URL, if it has a recognizable extension, still decides the
+        # extension; the title (untrusted, provider- or user-supplied) only
+        # supplies the stem, and is never used to build a path (finding A).
+        url_name = safe_basename_from_url_path(parsed.path, default_ext="")
+        url_ext = Path(url_name).suffix.lower() or default_ext
+        return build_safe_named_file(result.title, suffix=url_ext)
 
-    return url_name or f"download{url_ext}"
+    return safe_basename_from_url_path(parsed.path, default_stem="download", default_ext=default_ext)
 
 
 def _stream_url_to_file(
@@ -133,7 +124,7 @@ def _stream_url_to_file(
     if headers:
         req_headers.update(headers)
 
-    with requests.get(url, stream=True, timeout=timeout, headers=req_headers) as response:
+    with safe_request("GET", url, stream=True, timeout=timeout, headers=req_headers) as response:
         response.raise_for_status()
         reject_if_not_media_content_type(response)
         if cancel_token is not None:
@@ -237,7 +228,7 @@ async def download_provider_media(
         if cancel_token is not None and cancel_token.is_set():
             break
         filename = _filename_for_item(result, media_url, idx, total_items)
-        dest_path = dest_dir / filename
+        dest_path = within_directory(dest_dir, filename, fallback=f"download_{idx:03d}.bin")
         bytes_written = await asyncio.to_thread(
             _stream_url_to_file,
             media_url,

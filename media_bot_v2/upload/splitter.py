@@ -16,12 +16,19 @@ carried forward (spec/INVENTORY.md section 4).
 from __future__ import annotations
 
 import json
+import re
+import shutil
 import subprocess
+import uuid
 from pathlib import Path
 
 import filetype
 
 TG_NORMAL_MAX_SIZE = 2000 * 1024 * 1024
+
+# Bounded read size for _split_raw regardless of the part-size `limit`
+# (finding E): a 2000MB limit must not mean a 2000MB `read()` call.
+_RAW_COPY_BLOCK_SIZE = 8 * 1024 * 1024
 
 
 def needs_split(file_path: Path, *, limit: int = TG_NORMAL_MAX_SIZE) -> bool:
@@ -85,22 +92,57 @@ def _split_video(file_path: Path, *, limit: int) -> list[Path]:
     )
 
 
+_PART_NUM_RE = re.compile(r"^part(\d+)$")
+
+
+def _numbered_parts(work_dir: Path, ext: str) -> list[Path]:
+    """Collect ffmpeg's `part000<ext>`, `part001<ext>`, ... from work_dir,
+    sorted numerically (not lexicographically - %03d only stays sort-order-
+    correct up to 999 segments; this holds for any count)."""
+    numbered = []
+    for candidate in work_dir.iterdir():
+        if candidate.suffix != ext:
+            continue
+        match = _PART_NUM_RE.match(candidate.stem)
+        if match:
+            numbered.append((int(match.group(1)), candidate))
+    numbered.sort(key=lambda pair: pair[0])
+    return [path for _, path in numbered]
+
+
 def _segment_video(file_path: Path, *, limit: int, margin: float) -> list[Path]:
-    stem = file_path.stem
+    """Run ffmpeg's segment muxer into a dedicated, ASCII-only-named working
+    directory, then move the results next to file_path under names built
+    from its real stem.
+
+    Two bugs this sidesteps entirely rather than patching around (finding
+    C): a source title containing `[...]` (yt-dlp's `%(title)s [%(id)s]`
+    pattern always has this) made the old `glob(f"{stem}.part*")` call
+    interpret the brackets as a character class and find nothing; and a
+    literal `%` in the title corrupted ffmpeg's own `%03d` template
+    specifier. Neither can happen now: ffmpeg only ever sees a fixed
+    `part%03d<ext>` template we own, and matching the results back up uses
+    directory listing + regex, never glob, so the original (untouched,
+    human-readable) stem is free to contain any character without breaking
+    either step.
+    """
     ext = file_path.suffix or ".mp4"
-    segment_template = str(file_path.parent / f"{stem}.part%03d{ext}")
+    stem = file_path.stem
+    work_dir = file_path.parent / f".splittmp-{uuid.uuid4().hex}"
+    work_dir.mkdir(parents=True, exist_ok=True)
+    segment_template = str(work_dir / f"part%03d{ext}")
 
-    duration = _probe_duration_seconds(file_path)
-    total_size = file_path.stat().st_size
-    segment_time = max(duration * limit / total_size * margin, 1.0)
-
-    # Every part is its own MP4: put its moov up front so each one streams.
-    faststart = (
-        ["-segment_format_options", "movflags=+faststart"]
-        if ext.lower() in {".mp4", ".m4v", ".mov"}
-        else []
-    )
     try:
+        duration = _probe_duration_seconds(file_path)
+        total_size = file_path.stat().st_size
+        segment_time = max(duration * limit / total_size * margin, 1.0)
+
+        # Every part is its own MP4: put its moov up front so each one streams.
+        faststart = (
+            ["-segment_format_options", "movflags=+faststart"]
+            if ext.lower() in {".mp4", ".m4v", ".mov"}
+            else []
+        )
         subprocess.run(
             [
                 "ffmpeg",
@@ -123,16 +165,24 @@ def _segment_video(file_path: Path, *, limit: int, margin: float) -> list[Path]:
             check=True,
             capture_output=True,
         )
-    except subprocess.CalledProcessError:
-        # ffmpeg can crash after writing one or more segments - leaving those
-        # behind would both waste disk and confuse the next glob() call.
-        for leftover in file_path.parent.glob(f"{stem}.part*{ext}"):
-            leftover.unlink(missing_ok=True)
+
+        raw_parts = _numbered_parts(work_dir, ext)
+        if not raw_parts:
+            raise RuntimeError(f"ffmpeg produced no parts for {file_path}")
+
+        parts = []
+        for index, raw_part in enumerate(raw_parts):
+            dest = file_path.parent / f"{stem}.part{index:03d}{ext}"
+            raw_part.rename(dest)
+            parts.append(dest)
+    except BaseException:
+        # Covers both an ffmpeg crash mid-split (partial segments left in
+        # work_dir) and any failure after: work_dir is ours alone, so a
+        # blanket rmtree can never delete anything but our own leftovers.
+        shutil.rmtree(work_dir, ignore_errors=True)
         raise
 
-    parts = sorted(file_path.parent.glob(f"{stem}.part*{ext}"))
-    if not parts:
-        raise RuntimeError(f"ffmpeg produced no parts for {file_path}")
+    work_dir.rmdir()  # empty now - every raw part was moved out above
     return parts
 
 
@@ -161,16 +211,27 @@ def _ensure_parts_within_limit(
 
 
 def _split_raw(file_path: Path, *, limit: int) -> list[Path]:
+    """Chunk file_path into `limit`-sized parts, reading and writing in
+    bounded `_RAW_COPY_BLOCK_SIZE` blocks (finding E) - a single
+    `src.read(limit)` call means a 2000MB part size is a 2000MB read into
+    memory in one shot; this caps it regardless of `limit`."""
     parts: list[Path] = []
     with open(file_path, "rb") as src:
         index = 0
         while True:
-            chunk = src.read(limit)
-            if not chunk:
+            block = src.read(min(_RAW_COPY_BLOCK_SIZE, limit))
+            if not block:
                 break
             part_path = file_path.with_name(f"{file_path.name}.part{index:03d}")
             with open(part_path, "wb") as dst:
-                dst.write(chunk)
+                dst.write(block)
+                written = len(block)
+                while written < limit:
+                    block = src.read(min(_RAW_COPY_BLOCK_SIZE, limit - written))
+                    if not block:
+                        break
+                    dst.write(block)
+                    written += len(block)
             parts.append(part_path)
             index += 1
     return parts

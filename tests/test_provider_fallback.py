@@ -88,6 +88,8 @@ def _mock_streaming_get(content: bytes = b"fake-video-bytes-data"):
     mock_resp.headers = {"Content-Length": str(len(content))}
     mock_resp.iter_content.return_value = [content]
     mock_resp.raise_for_status.return_value = None
+    mock_resp.is_redirect = False
+    mock_resp.is_permanent_redirect = False
     mock_resp.__enter__.return_value = mock_resp
     mock_resp.__exit__.return_value = None
     return mock_resp
@@ -109,7 +111,10 @@ async def test_tiktok_fallback_from_failing_provider_to_next_in_line(tmp_path):
         max_download_size=100 * 1024 * 1024,
     )
 
-    with patch("media_bot_v2.providers.downloader.requests.get", return_value=_mock_streaming_get()):
+    with (
+        patch("media_bot_v2.engines.ssrf_guard.requests.request", return_value=_mock_streaming_get()),
+        patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"),
+    ):
         result = await engine.download("https://www.tiktok.com/@user/video/123", dest_dir=tmp_path)
 
     # Both providers were called; p1 failed, p2 succeeded
@@ -142,7 +147,10 @@ async def test_tiktok_full_pipeline_with_provider(tmp_path):
     uploader = _FakeUploader()
     progress = _FakeProgress()
 
-    with patch("media_bot_v2.providers.downloader.requests.get", return_value=_mock_streaming_get()):
+    with (
+        patch("media_bot_v2.engines.ssrf_guard.requests.request", return_value=_mock_streaming_get()),
+        patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"),
+    ):
         await pipeline.run(
             user_id=1,
             url="https://www.tiktok.com/@user/video/123",
@@ -229,7 +237,9 @@ async def test_youtube_falls_back_to_provider_when_local_engine_fails(tmp_path):
         yt_engine,
         "_download_sync",
         side_effect=YouTubeDownloadError("שגיאת פענוח ביוטיוב: חסר JS runtime"),
-    ), patch("media_bot_v2.providers.downloader.requests.get", return_value=_mock_streaming_get()):
+    ), patch(
+        "media_bot_v2.engines.ssrf_guard.requests.request", return_value=_mock_streaming_get()
+    ), patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"):
         result = await yt_engine.download(
             "https://www.youtube.com/watch?v=dQw4w9WgXcQ", dest_dir=tmp_path
         )

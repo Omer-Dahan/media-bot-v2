@@ -37,6 +37,8 @@ from media_bot_v2.engines.ytdlp_support import (
     DownloadGuard,
     DownloadTooLargeSignal,
     remove_partial_files,
+    rename_to_safe_display_name,
+    safe_outtmpl,
     too_large_error,
 )
 from media_bot_v2.telegram import texts
@@ -210,9 +212,11 @@ def format_progress_text(d: dict) -> str | None:
 def _extract_file_paths(entry: dict) -> list[str]:
     downloads = entry.get("requested_downloads")
     if downloads:
-        return [d["filepath"] for d in downloads if d.get("filepath")]
-    filename = entry.get("filepath") or entry.get("_filename")
-    return [filename] if filename else []
+        paths = [d["filepath"] for d in downloads if d.get("filepath")]
+    else:
+        filename = entry.get("filepath") or entry.get("_filename")
+        paths = [filename] if filename else []
+    return [rename_to_safe_display_name(entry, p) for p in paths]
 
 
 def _result_from_info(info: dict, dest_dir: Path) -> DownloadResult:
@@ -233,7 +237,7 @@ def _result_from_info(info: dict, dest_dir: Path) -> DownloadResult:
             for p in sorted(dest_dir.rglob("*"))
             if p.is_file() and not p.name.endswith((".part", ".ytdl"))
         ]
-        file_paths.extend(found)
+        file_paths.extend(rename_to_safe_display_name(info, p) for p in found)
 
     if not file_paths:
         raise InstagramDownloadError(classify_instagram_error(None))
@@ -301,7 +305,7 @@ class InstagramEngine(BaseEngine):
     ) -> dict:
         guard = guard or DownloadGuard(self._max_download_size, cancel_token)
         opts: dict = {
-            "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
+            "outtmpl": safe_outtmpl(dest_dir),
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,

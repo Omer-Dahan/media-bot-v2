@@ -16,6 +16,19 @@ os.environ.setdefault("OWNER", "123456789")
 import pytest
 
 
+@pytest.fixture
+def bypass_ssrf_guard(monkeypatch):
+    """Disables the SSRF guard's address check (media_bot_v2/engines/ssrf_guard.py)
+    for tests that deliberately talk to a local test-only HTTP server
+    (127.0.0.1) to exercise download mechanics unrelated to SSRF - loopback
+    is exactly what the guard blocks by design. The guard itself is covered
+    directly, without this fixture, by test_ssrf_guard.py and the dedicated
+    SSRF tests in test_direct_engine.py / test_downloader.py."""
+    from media_bot_v2.engines import ssrf_guard
+
+    monkeypatch.setattr(ssrf_guard, "assert_safe_url", lambda url: None)
+
+
 @pytest.fixture(autouse=True)
 def _no_real_youtube_lookup(monkeypatch):
     """The quality menu looks up the real title/duration through yt-dlp.

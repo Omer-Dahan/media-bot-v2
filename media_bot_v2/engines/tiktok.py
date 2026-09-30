@@ -29,6 +29,7 @@ from media_bot_v2.engines.ytdlp_support import (
     DownloadGuard,
     DownloadTooLargeSignal,
     remove_partial_files,
+    safe_outtmpl,
     too_large_error,
 )
 from media_bot_v2.providers.downloader import download_provider_media
@@ -192,7 +193,7 @@ class TikTokEngine(BaseEngine):
         else:
             hooks = [guard.check]
         ydl_opts = {
-            "outtmpl": str(dest_dir / "%(title).150s [%(id)s].%(ext)s"),
+            "outtmpl": safe_outtmpl(dest_dir),
             "quiet": True,
             "no_warnings": True,
             "noprogress": True,

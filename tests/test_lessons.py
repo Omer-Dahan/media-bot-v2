@@ -201,22 +201,30 @@ async def test_lesson2_direct_oversized_zim_rejected_on_head_before_get(tmp_path
     head_resp = MagicMock()
     head_resp.status_code = 200
     head_resp.headers = {"Content-Length": str(100 * 1024 * 1024 * 1024)}  # 100GB
+    head_resp.is_redirect = False
+    head_resp.is_permanent_redirect = False
     head_resp.__enter__.return_value = head_resp
     head_resp.__exit__.return_value = None
 
     engine = DirectEngine(max_download_size=max_size)
 
+    calls: list[str] = []
+
+    def _fake_request(method, url, *, allow_redirects, **kwargs):
+        calls.append(method)
+        if method == "HEAD":
+            return head_resp
+        raise AssertionError("GET should never be called - rejected before streaming")
+
     with (
-        patch("media_bot_v2.engines.direct.requests.head", return_value=head_resp) as mock_head,
-        patch("media_bot_v2.engines.direct.requests.get") as mock_get,
+        patch("media_bot_v2.engines.ssrf_guard.requests.request", side_effect=_fake_request),
+        patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"),
         pytest.raises(DownloadTooLargeError) as exc_info,
     ):
         await engine.download(zim_url, dest_dir=tmp_path)
 
     # HEAD was called
-    mock_head.assert_called_once()
-    # GET was NEVER called - rejected before streaming
-    mock_get.assert_not_called()
+    assert calls == ["HEAD"]
     # No files left on disk
     assert not any(tmp_path.iterdir())
 
@@ -380,12 +388,15 @@ async def test_lesson6_incompatible_provider_skipped_without_recording_failure(t
     mock_resp.headers = {"Content-Length": "10"}
     mock_resp.iter_content.return_value = [b"1234567890"]
     mock_resp.raise_for_status.return_value = None
+    mock_resp.is_redirect = False
+    mock_resp.is_permanent_redirect = False
     mock_resp.__enter__.return_value = mock_resp
     mock_resp.__exit__.return_value = None
 
     with (
         caplog.at_level(logging.INFO),
-        patch("media_bot_v2.providers.downloader.requests.get", return_value=mock_resp),
+        patch("media_bot_v2.engines.ssrf_guard.requests.request", return_value=mock_resp),
+        patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"),
     ):
         result = await engine.download("https://www.tiktok.com/@user/video/123", dest_dir=tmp_path)
 
@@ -485,6 +496,9 @@ class _SlowStreamingSource:
             "Content-Type": "application/octet-stream",
         }
 
+    is_redirect = False
+    is_permanent_redirect = False
+
     def raise_for_status(self) -> None:
         pass
 
@@ -513,15 +527,19 @@ async def test_lesson8_active_transfer_actually_stops_on_timeout_with_byte_count
     direct_engine = DirectEngine()
 
     source = _SlowStreamingSource(total_bytes=20 * 1024 * 1024)
+    calls: list[str] = []
 
-    with (
+    def _fake_request(method, url, *, allow_redirects, **kwargs):
         # No real network: the preflight HEAD is stubbed to fail (the engine
         # then proceeds to the GET, as it does for servers that reject HEAD).
-        patch(
-            "media_bot_v2.engines.direct.requests.head",
-            side_effect=ConnectionError("offline"),
-        ) as mock_head,
-        patch("media_bot_v2.engines.direct.requests.get", return_value=source),
+        calls.append(method)
+        if method == "HEAD":
+            raise ConnectionError("offline")
+        return source
+
+    with (
+        patch("media_bot_v2.engines.ssrf_guard.requests.request", side_effect=_fake_request),
+        patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"),
         pytest.raises(TimeoutError),
     ):
         await pipeline.run(
@@ -532,7 +550,7 @@ async def test_lesson8_active_transfer_actually_stops_on_timeout_with_byte_count
             progress=progress,
         )
 
-    mock_head.assert_called_once()
+    assert "HEAD" in calls
 
     # Transfer was stopped far before transferring all 20MB, and it was the
     # cancellation path (not the context manager exiting) that closed the source.
@@ -815,10 +833,15 @@ async def test_m4_1_finding10_direct_engine_rejects_html_content_type(tmp_path):
     mock_resp = MagicMock()
     mock_resp.headers = {"Content-Type": "text/html; charset=utf-8", "Content-Length": "500"}
     mock_resp.raise_for_status.return_value = None
+    mock_resp.is_redirect = False
+    mock_resp.is_permanent_redirect = False
     mock_resp.__enter__.return_value = mock_resp
     mock_resp.__exit__.return_value = None
 
-    with patch("media_bot_v2.engines.direct.requests.get", return_value=mock_resp):
+    with (
+        patch("media_bot_v2.engines.ssrf_guard.requests.request", return_value=mock_resp),
+        patch("media_bot_v2.engines.ssrf_guard.assert_safe_url"),
+    ):
         with pytest.raises(UnsupportedUrlError) as exc_info:
             await engine.download("https://example.com/page.html", dest_dir=tmp_path)
         assert "HTML" in str(exc_info.value)
