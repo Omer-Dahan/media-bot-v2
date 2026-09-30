@@ -11,7 +11,7 @@ Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallback
 <a href="#-quick-start"><img src="https://img.shields.io/badge/🚀_Quick_Start-06B6D4?style=for-the-badge&logoColor=white" alt="Quick Start"></a>
 <a href="#-features"><img src="https://img.shields.io/badge/✨_Features-D98324?style=for-the-badge&logoColor=white" alt="Features"></a>
 <a href="#-architecture"><img src="https://img.shields.io/badge/🧠_Architecture-0D1117?style=for-the-badge&logoColor=white" alt="Architecture"></a>
-<a href="#-deploying-to-the-server"><img src="https://img.shields.io/badge/⚙️_Server_Deploy-22C55E?style=for-the-badge&logoColor=white" alt="Server Deploy"></a>
+<a href="#️-deploying-to-the-server"><img src="https://img.shields.io/badge/⚙️_Server_Deploy-22C55E?style=for-the-badge&logoColor=white" alt="Server Deploy"></a>
 
 <br><br>
 
@@ -44,7 +44,7 @@ Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallback
 <td valign="top" width="33%">
 
 **Production & Operations**
-- [⚙️ Deploying to the Server](#-deploying-to-the-server)
+- [⚙️ Deploying to the Server](#️-deploying-to-the-server)
 - [🧱 Project Structure](#-project-structure)
 - [🔧 Configuration Matrix](#-configuration-matrix)
 
