@@ -60,6 +60,6 @@ class BaseProvider(ABC):
     async def fetch(self, url: str) -> ProviderResult:
         """Extract direct media URL(s) and metadata.
 
-        Runs network requests in worker threads via asyncio.to_thread to avoid
-        blocking the event loop.
+        Runs network requests in worker threads via the dedicated thread pool
+        (media_bot_v2.executor.run_in_thread) to avoid blocking the event loop.
         """

@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
-import asyncio
 import html
 import logging
 import re
 
 import requests
 
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.providers.base import BaseProvider, ProviderFetchError, ProviderResult
 from media_bot_v2.providers.tikwm import matches_tiktok_url
 
@@ -31,7 +31,7 @@ class TikDownloaderProvider(BaseProvider):
         return matches_tiktok_url(url)
 
     async def fetch(self, url: str) -> ProviderResult:
-        return await asyncio.to_thread(self._fetch_sync, url)
+        return await run_in_thread(self._fetch_sync, url)
 
     def _fetch_sync(self, url: str) -> ProviderResult:
         endpoint = "https://tikdownloader.io/api/ajaxSearch"

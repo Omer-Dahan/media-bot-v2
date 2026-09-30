@@ -559,7 +559,7 @@ async def fetch_title_duration(url: str, *, opts: dict, timeout: float) -> tuple
             return ydl.extract_info(url, download=False)
 
     try:
-        info = await asyncio.wait_for(asyncio.to_thread(_extract), timeout=timeout)
+        info = await asyncio.wait_for(run_in_thread(_extract), timeout=timeout)
     except Exception:
         logger.info("Title/duration lookup failed or timed out for %s", url, exc_info=True)
         return None, None

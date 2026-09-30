@@ -2,12 +2,12 @@
 
 from __future__ import annotations
 
-import asyncio
 import logging
 
 import requests
 
 from media_bot_v2.engines.youtube import matches_youtube_url
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.providers.base import (
     BaseProvider,
     ProviderFetchError,
@@ -44,7 +44,7 @@ class CobaltProvider(BaseProvider):
         return matches_youtube_url(url) or matches_tiktok_url(url)
 
     async def fetch(self, url: str) -> ProviderResult:
-        return await asyncio.to_thread(self._fetch_sync, url)
+        return await run_in_thread(self._fetch_sync, url)
 
     def _fetch_sync(self, url: str) -> ProviderResult:
         if not self.instance_url:
