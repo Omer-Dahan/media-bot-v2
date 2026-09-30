@@ -38,3 +38,50 @@ def test_main_calls_check_js_runtime():
         mock_check_js.assert_called_once()
         mock_client.start.assert_called_once_with(bot_token="t")
         mock_client.run_until_disconnected.assert_called_once()
+
+
+def test_log_archive_channel_warns_when_unset(caplog):
+    from media_bot_v2.bootstrap import log_archive_channel
+
+    with caplog.at_level("WARNING", logger="media_bot_v2.bootstrap"):
+        log_archive_channel(None)
+    assert any("ARCHIVE_CHANNEL is not configured" in r.message for r in caplog.records)
+
+
+def test_log_archive_channel_logs_numeric_id(caplog):
+    from media_bot_v2.bootstrap import log_archive_channel
+
+    with caplog.at_level("INFO", logger="media_bot_v2.bootstrap"):
+        log_archive_channel(-1003534083142)
+    assert any(
+        "-1003534083142" in r.message and "numeric ID" in r.message for r in caplog.records
+    )
+
+
+def test_log_archive_channel_logs_username(caplog):
+    from media_bot_v2.bootstrap import log_archive_channel
+
+    with caplog.at_level("INFO", logger="media_bot_v2.bootstrap"):
+        log_archive_channel("@my_archive")
+    assert any("@my_archive" in r.message and "username" in r.message for r in caplog.records)
+
+
+def test_main_logs_archive_channel_at_startup():
+    from unittest.mock import patch
+
+    from media_bot_v2.bootstrap import main
+
+    with (
+        patch("media_bot_v2.bootstrap.load_settings") as mock_settings,
+        patch("media_bot_v2.bootstrap.configure_logging"),
+        patch("media_bot_v2.bootstrap.check_js_runtime"),
+        patch("media_bot_v2.bootstrap.log_archive_channel") as mock_log_archive,
+        patch("media_bot_v2.bootstrap.build_session_factory"),
+        patch("media_bot_v2.bootstrap.build_client"),
+        patch("media_bot_v2.bootstrap.register_handlers"),
+    ):
+        mock_settings.return_value = Settings(
+            app_id=1, app_hash="h", bot_token="t", archive_channel=-1003534083142, _env_file=None
+        )
+        main()
+        mock_log_archive.assert_called_once_with(-1003534083142)

@@ -89,7 +89,7 @@ class CachedItem:
 
 @dataclass
 class CacheEntry:
-    archive_chat: str
+    archive_chat: int | str
     message_ids: list[int]
     title: str | None
     items: list[CachedItem] = field(default_factory=list)
@@ -120,7 +120,7 @@ class VideoCacheStore:
         self,
         cache_key: str,
         *,
-        archive_chat: str,
+        archive_chat: int | str,
         message_ids: list[int],
         title: str | None,
         items: list[CachedItem] | None = None,
@@ -157,7 +157,14 @@ def _decode_entry(file_id_json: str, meta_json: str) -> CacheEntry | None:
         return None
     archive_chat = payload.get("archive_chat")
     message_ids = payload.get("message_ids")
-    if not isinstance(archive_chat, str) or not isinstance(message_ids, list):
+    # `-100...`-style channel IDs are stored (and round-trip through JSON) as
+    # `int`, not `str` - see config.py's `_normalize_archive_channel`; `bool`
+    # is excluded even though it's technically an `int` subclass, since a
+    # cached `true`/`false` here could only mean corrupted data.
+    valid_archive_chat = isinstance(archive_chat, str) or (
+        isinstance(archive_chat, int) and not isinstance(archive_chat, bool)
+    )
+    if not valid_archive_chat or not isinstance(message_ids, list):
         return None
     if not all(isinstance(mid, int) for mid in message_ids):
         return None

@@ -27,7 +27,13 @@ import time
 from collections.abc import Awaitable, Callable
 from typing import Any
 
-from telethon.errors import MessageNotModifiedError, RPCError, ServerError
+from telethon.errors import (
+    EntityBoundsInvalidError,
+    MessageNotModifiedError,
+    ReplyMarkupInvalidError,
+    RPCError,
+    ServerError,
+)
 from telethon.tl.types import ReplyInlineMarkup
 
 from media_bot_v2.telegram import texts
@@ -46,6 +52,19 @@ logger = logging.getLogger(__name__)
 # previously attached inline keyboard on edit, rather than leaving it (the
 # `buttons` kwarg's default, `None`, means "unchanged", not "cleared").
 _CLEAR_BUTTONS = ReplyInlineMarkup([])
+
+
+def _buttons_for_new_message(buttons: Any) -> Any:
+    """`_CLEAR_BUTTONS` (or any other empty inline markup) is only valid on
+    `edit`, to clear a keyboard that already exists on that message -
+    Telegram rejects it outright (`ReplyMarkupInvalidError`) as the
+    `reply_markup` of a brand-new message via `respond`/`send_message`.
+    Every call site that falls back to sending a *new* message must run its
+    `buttons` through this first; call sites that `edit` the existing
+    message keep passing `buttons` through unchanged."""
+    if isinstance(buttons, ReplyInlineMarkup) and not buttons.rows:
+        return None
+    return buttons
 
 
 def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None = None) -> bool:
@@ -193,11 +212,12 @@ async def _deferred_terminal_retry(
 
         if not delivered and hasattr(message, "respond") and callable(message.respond):
             try:
-                if buttons is not None:
+                send_buttons = _buttons_for_new_message(buttons)
+                if send_buttons is not None:
                     new_msg = await call_with_flood_retry(
                         message.respond,
                         text,
-                        buttons=buttons,
+                        buttons=send_buttons,
                         max_retries=max_retries,
                         max_wait_seconds=max_wait_seconds,
                         sleep_func=sleeper,
@@ -438,6 +458,41 @@ class MessageProgressReporter:
                     break
                 except FLOOD_WAIT_ERRORS as exc:
                     flood_exc = exc
+                except (EntityBoundsInvalidError, ReplyMarkupInvalidError) as exc:
+                    # A content problem (invalid markdown entities or a bad
+                    # reply_markup), not a Telegram-side/account-side
+                    # failure - retrying the exact same content would fail
+                    # identically, but the message itself is still
+                    # perfectly editable. Retry once, stripped to plain
+                    # text (parse_mode=None, so no entities can be
+                    # generated) and no buttons, rather than latching
+                    # `_uneditable` and silently dropping every progress
+                    # update for the rest of the request: that is what
+                    # happened in production on 2026-09-30, where one bad
+                    # `EntityBoundsInvalidError` on a mid-download edit
+                    # froze the progress bar for the remainder of both the
+                    # download and the upload.
+                    logger.warning(
+                        "Progress edit rejected for content (%s: %s); retrying as plain text without buttons",
+                        type(exc).__name__,
+                        exc,
+                    )
+                    try:
+                        await self._message.edit(text, parse_mode=None)
+                    except MessageNotModifiedError:
+                        pass
+                    except Exception:
+                        logger.debug("Plain-text retry after content error also failed", exc_info=True)
+                        break
+                    success = True
+                    self._last_text = text
+                    self._last_buttons = None
+                    self._last_applied_seq = seq
+                    self._uneditable = False
+                    self._logged_uneditable = False
+                    if terminal:
+                        self.mark_terminal_delivered()
+                    break
                 except RPCError as exc:
                     if _is_permanent_edit_error(exc):
                         self._uneditable = True
@@ -497,11 +552,12 @@ class MessageProgressReporter:
                 respond_exc = None
                 if hasattr(old_message, "respond") and callable(old_message.respond):
                     try:
-                        if buttons is not None:
+                        send_buttons = _buttons_for_new_message(buttons)
+                        if send_buttons is not None:
                             new_message = await call_with_flood_retry(
                                 old_message.respond,
                                 text,
-                                buttons=buttons,
+                                buttons=send_buttons,
                                 max_retries=self._max_retries,
                                 max_wait_seconds=self._max_wait_seconds,
                                 sleep_func=self._sleep,

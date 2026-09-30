@@ -142,7 +142,7 @@ class Uploader(Protocol):
     async def send_subtitle(self, path: Path) -> Any: ...
     async def send_description(self, text: str, *, reply_to: Any) -> Any: ...
     async def send_cached(
-        self, archive_chat: str, message_ids: list[int], *, captions: list[str] | None = None
+        self, archive_chat: int | str, message_ids: list[int], *, captions: list[str] | None = None
     ) -> Any: ...
 
 
@@ -182,7 +182,7 @@ class DownloadPipeline:
         progress: ProgressReporter,
         cache: VideoCacheStore | None = None,
         cache_key: str | None = None,
-        archive_channel: str | None = None,
+        archive_channel: int | str | None = None,
         delivery: DeliveryOptions | None = None,
         audio_only: bool = False,
     ) -> None:

@@ -45,6 +45,23 @@ def test_put_then_get_round_trips(session_factory):
     assert entry.title == "My Video"
 
 
+def test_put_then_get_round_trips_a_numeric_archive_chat(session_factory):
+    """M11.9: ARCHIVE_CHANNEL now normalizes a numeric channel ID (e.g.
+    -1003534083142) to `int` rather than `str` (see config.py). JSON has no
+    separate int/str-of-digits distinction on the wire the way Python does,
+    so this specifically guards the round trip through `json.dumps`/
+    `json.loads` - an `int` must come back as an `int`, not get rejected by
+    the `isinstance(archive_chat, str)` guard `_decode_entry` used to have."""
+    store = VideoCacheStore(session_factory)
+    key = compute_cache_key("abc123", "720")
+    store.put(key, archive_chat=-1003534083142, message_ids=[10, 11], title="My Video")
+
+    entry = store.get(key)
+    assert entry is not None
+    assert entry.archive_chat == -1003534083142
+    assert isinstance(entry.archive_chat, int)
+
+
 def test_put_overwrites_an_existing_entry_for_the_same_key(session_factory):
     store = VideoCacheStore(session_factory)
     key = compute_cache_key("abc123", "720")

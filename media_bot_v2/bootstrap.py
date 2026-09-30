@@ -68,6 +68,23 @@ def start_client_with_flood_retry(
             sleeper(wait_seconds)
 
 
+def log_archive_channel(archive_channel: int | str | None) -> None:
+    """Startup-time visibility into what `ARCHIVE_CHANNEL` resolved to - a
+    misconfigured or missing archive channel otherwise only ever surfaces as
+    a "Archive copy failed" warning deep in per-download logs, one per
+    request, long after the operator could have noticed at boot."""
+    if archive_channel is None:
+        logger.warning(
+            "ARCHIVE_CHANNEL is not configured; archive copy and the v2 cache will be skipped for every download"
+        )
+    else:
+        logger.info(
+            "Archive channel configured: %r (%s)",
+            archive_channel,
+            "numeric ID" if isinstance(archive_channel, int) else "username",
+        )
+
+
 def main() -> None:
     settings = load_settings()
     configure_logging(
@@ -77,6 +94,7 @@ def main() -> None:
         log_to_console=settings.log_to_console,
     )
     check_js_runtime()
+    log_archive_channel(settings.archive_channel)
 
     session_factory = build_session_factory(settings.db_dsn)
     credits_service = CreditsService(

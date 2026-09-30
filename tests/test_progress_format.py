@@ -296,10 +296,13 @@ def test_bar_line_opens_with_hebrew_label_then_embedded_ltr_run():
     assert EMBED_LTR in bar_line and POP_EMBED in bar_line
     # Hebrew label precedes the embedded numeric/bar run
     assert bar_line.index("התקדמות") < bar_line.index(EMBED_LTR)
-    # wrapped in backticks (Markdown inline code / monospace - finding 0.3):
-    # a proportional font renders BAR_FILLED/BAR_EMPTY at uneven widths,
-    # breaking the bar's alignment on some Android/iOS clients.
-    assert "`" in bar_line
+    # NOT wrapped in backticks (Markdown inline code): that turns this run
+    # into a `MessageEntityCode` whose offset/length is fixed against the
+    # text as sent - production hit `EntityBoundsInvalidError` on edit from
+    # exactly this (2026-09-30), which then froze all further progress
+    # updates for the message. See progress_format.py's `format_progress`
+    # for the full incident note.
+    assert "`" not in bar_line
     inside = bar_line.partition(EMBED_LTR)[2].partition(POP_EMBED)[0]
     # *typed* (logical/source) order inside the embedded run is size, then
     # percent, then bar - the reverse of reading order. This is what the

@@ -53,7 +53,7 @@ class TelethonUploader:
         client: TelegramClient,
         *,
         chat_id: int,
-        archive_channel: str | None,
+        archive_channel: int | str | None,
         workers: int = 1,
         connections: int = 1,
         adaptive: bool = False,
@@ -245,7 +245,7 @@ class TelethonUploader:
         )
 
     async def send_cached(
-        self, archive_chat: str, message_ids: list[int], *, captions: list[str] | None = None
+        self, archive_chat: int | str, message_ids: list[int], *, captions: list[str] | None = None
     ) -> list[Any]:
         """Re-send archived messages to the requesting chat, one per id, with
         the caption built for this user. Raises if any archived message is

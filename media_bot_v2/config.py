@@ -51,7 +51,36 @@ class Settings(BaseSettings):
     mb_per_credit: int = Field(default=200, gt=0, validation_alias="MB_PER_CREDIT")
 
     # --- Archive channel ---
-    archive_channel: str | None = Field(default=None, validation_alias="ARCHIVE_CHANNEL")
+    # `int | str | None`, not `str | None`: Telethon resolves a numeric-ish
+    # string (any string of digits, optionally with a leading `-`, e.g. the
+    # `-100...` supergroup/channel IDs Telegram uses) as a *phone number*
+    # via `GetContactsRequest` - which bots are not allowed to call, so a
+    # numeric channel ID passed as a plain string always fails with
+    # "Cannot get entity by phone number as a bot". `_normalize_archive_channel`
+    # below converts a digit string to `int` (which Telethon resolves as a
+    # peer ID, correctly) and leaves an `@username` as `str`; anything else
+    # is a configuration error raised at startup, not a silent failure
+    # discovered later in an archive-copy warning log.
+    archive_channel: int | str | None = Field(default=None, validation_alias="ARCHIVE_CHANNEL")
+
+    @field_validator("archive_channel", mode="before")
+    @classmethod
+    def _normalize_archive_channel(cls, value: object) -> int | str | None:
+        if value is None or isinstance(value, int):
+            return value
+        text = str(value).strip()
+        if not text:
+            return None
+        if text.startswith("@"):
+            return text
+        digits = text.removeprefix("-")
+        if digits.isdigit():
+            return int(text)
+        raise ValueError(
+            f"ARCHIVE_CHANNEL={text!r} אינו בפורמט נתמך. "
+            "השתמשו במזהה מספרי של ערוץ/סופרגרופ (למשל -1003534083142) "
+            "או בשם משתמש של ערוץ ציבורי שמתחיל ב-@ (למשל @my_channel)."
+        )
 
     # --- Local storage for in-flight downloads (deleted after each upload) ---
     download_dir: str = Field(default="downloads", validation_alias="DOWNLOAD_DIR")

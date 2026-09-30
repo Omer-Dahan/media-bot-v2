@@ -219,7 +219,7 @@ def register_handlers(
     credits_service: CreditsService,
     free_download: int,
     pipeline: DownloadPipeline,
-    archive_channel: str | None,
+    archive_channel: int | str | None,
     upload_workers: int = 1,
     upload_connections: int = 1,
     max_download_size: int,

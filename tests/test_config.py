@@ -184,3 +184,68 @@ def test_flood_sleep_threshold_defaults_to_zero_and_accepts_custom(monkeypatch):
 
 
 
+
+
+# =============================================================================
+# M11.9: ARCHIVE_CHANNEL normalization.
+#
+# Telethon resolves any string of digits (optionally with a leading "-",
+# e.g. the "-100..." IDs Telegram uses for channels/supergroups) as a
+# *phone number* via GetContactsRequest - which bots cannot call, so a
+# numeric channel ID passed through as a plain string always failed in
+# production with "Cannot get entity by phone number as a bot". A numeric
+# ARCHIVE_CHANNEL must become an `int` so Telethon resolves it as a peer ID
+# instead; an "@username" stays a `str`; anything else is a clear
+# configuration error raised at startup.
+# =============================================================================
+
+
+def _base_env(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+
+
+def test_archive_channel_unset_is_none(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.delenv("ARCHIVE_CHANNEL", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.archive_channel is None
+
+
+def test_archive_channel_numeric_string_becomes_int(monkeypatch):
+    """The exact value from the production incident: a channel ID must be
+    converted to `int`, not left as the `str` Telethon misparses as a phone
+    number."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ARCHIVE_CHANNEL", "-1003534083142")
+    settings = Settings(_env_file=None)
+    assert settings.archive_channel == -1003534083142
+    assert isinstance(settings.archive_channel, int)
+
+
+def test_archive_channel_username_stays_string(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ARCHIVE_CHANNEL", "@my_archive_channel")
+    settings = Settings(_env_file=None)
+    assert settings.archive_channel == "@my_archive_channel"
+    assert isinstance(settings.archive_channel, str)
+
+
+def test_archive_channel_invalid_format_raises_clear_error(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ARCHIVE_CHANNEL", "not-a-valid-channel-id")
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    message = str(excinfo.value)
+    assert "ARCHIVE_CHANNEL" in message
+    assert "@" in message  # points the operator at the supported formats
+
+
+def test_archive_channel_positive_numeric_id_also_becomes_int(monkeypatch):
+    """Not every valid channel/user peer ID carries a leading '-'."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("ARCHIVE_CHANNEL", "123456789")
+    settings = Settings(_env_file=None)
+    assert settings.archive_channel == 123456789
+    assert isinstance(settings.archive_channel, int)

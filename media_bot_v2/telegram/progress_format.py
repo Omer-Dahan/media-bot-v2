@@ -107,11 +107,20 @@ def format_progress(
         # Typed in reverse (size, percent, bar) - see the module docstring:
         # one LTR-embedded run reverses once against the RTL label, so its
         # *contents* must be pre-reversed for "bar" to land closest to the
-        # label. Also wrapped in backticks (Markdown inline code - this
-        # bot's messages use Telethon's default `parse_mode="md"`, not HTML)
-        # so the bar renders in a monospace font: proportional fonts on some
-        # Android/iOS clients give █/░ uneven widths, breaking bar alignment.
-        lines.append(f"📊 התקדמות: `{EMBED_LTR}{size_part} {percent_int}% {bar}{POP_EMBED}`")
+        # label. NOT wrapped in backticks (Markdown inline code): that turns
+        # this run into a `MessageEntityCode` whose offset/length is fixed
+        # against the text as *we* send it - if Telegram strips or otherwise
+        # normalizes characters in transit (observed in production for this
+        # exact line, 2026-09-30: `EditMessageRequest` rejected with
+        # `EntityBoundsInvalidError`, "length is zero or out of the
+        # boundaries of the string"), the entity now points past the end of
+        # the text Telegram actually stored, and every subsequent edit to
+        # that message is rejected too. A bare LTR-embedded run has no
+        # entity to invalidate, so it can't reproduce that failure - the bar
+        # loses monospace alignment on proportional fonts, which is a purely
+        # cosmetic tradeoff against a bug that froze progress updates for
+        # the rest of the request.
+        lines.append(f"📊 התקדמות: {EMBED_LTR}{size_part} {percent_int}% {bar}{POP_EMBED}")
     elif transferred is not None:
         lines.append(f"📥 הורד: {LRM}{human_size(transferred)} (סך כולל לא ידוע)")
 
