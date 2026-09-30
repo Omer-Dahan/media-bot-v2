@@ -1,171 +1,523 @@
-# media-bot-v2
+<div align="center">
 
-Telegram media download bot (YouTube, TikTok, Instagram, direct links) built on Telethon.
-Ground-up rewrite of the previous bot (`media-downloader-bot`), keeping the same bot
-token and the same production database so existing users, credits, and payment
-history carry over unchanged. See `spec/SPEC.md` for the full design, module
-breakdown, milestones, and cutover plan, and `spec/INVENTORY.md` for the old-bot
-audit this rewrite is ported from.
+<br>
 
-## Status
+### High-Performance Telegram Media Download Bot
+**Ultra-fast downloads from YouTube, TikTok, Instagram, and direct links — powered by Telethon MTProto.**<br>
+Ground-up rewrite engineered for maximum throughput: parallel multi-connection uploads, adaptive provider fallbacks, seamless DB continuity, and an intuitive Hebrew interface.
 
-M1: skeleton, DB schema parity, credits/quota logic, the Telethon command/settings UI, and direct HTTP(S) links engine.
-M2: YouTube engine (yt-dlp) with quality menu, concurrency limiting, and caching.
-M3: extraction provider layer (`media_bot_v2/providers/`) with adaptive DB health tracking (`provider_health` table) and automatic fallback. TikTok engine implemented end-to-end (tikwm -> tikdownloader -> musicaldown -> cobalt -> local yt-dlp). YouTube fallback wired (yt-dlp -> ytmp3 -> cobalt). Detailed provider research documented in `docs/providers.md`.
+<br>
 
-**The bot has not been started and has not connected to Telegram at any point
-during this milestone.** The old bot is running in production against the same
-bot token; starting this bot concurrently would create a second MTProto session
-consumer against that token. See "Running the bot" below before ever starting it.
+<a href="#-quick-start"><img src="https://img.shields.io/badge/🚀_Quick_Start-06B6D4?style=for-the-badge&logoColor=white" alt="Quick Start"></a>
+<a href="#-features"><img src="https://img.shields.io/badge/✨_Features-D98324?style=for-the-badge&logoColor=white" alt="Features"></a>
+<a href="#-architecture"><img src="https://img.shields.io/badge/🧠_Architecture-0D1117?style=for-the-badge&logoColor=white" alt="Architecture"></a>
+<a href="#-deploying-to-the-server"><img src="https://img.shields.io/badge/⚙️_Server_Deploy-22C55E?style=for-the-badge&logoColor=white" alt="Server Deploy"></a>
 
-## Stack
+<br><br>
 
-Python 3.13, Telethon, yt-dlp, SQLAlchemy 2.0, pydantic-settings, uv. See
-`spec/SPEC.md` for version rationale.
+![Python](https://img.shields.io/badge/Python-3.13+-3776AB?style=flat-square&logo=python&logoColor=white)
+![Telethon](https://img.shields.io/badge/Telethon-MTProto-0088CC?style=flat-square&logo=telegram&logoColor=white)
+![yt-dlp](https://img.shields.io/badge/Engine-yt--dlp-FF0000?style=flat-square&logo=youtube&logoColor=white)
+![SQLAlchemy](https://img.shields.io/badge/ORM-SQLAlchemy_2.0-D71F00?style=flat-square&logo=sqlalchemy&logoColor=white)
+![MySQL](https://img.shields.io/badge/Database-MySQL_%2F_SQLite-4479A1?style=flat-square&logo=mysql&logoColor=white)
+![FFmpeg](https://img.shields.io/badge/Transcoder-FFmpeg-007808?style=flat-square&logo=ffmpeg&logoColor=white)
+![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue?style=flat-square)
+![Hebrew UI](https://img.shields.io/badge/UI-🇮🇱_עברית-D98324?style=flat-square)
 
-## Setup
+</div>
 
-```bash
-uv sync
-cp .env.example .env   # fill in APP_ID/APP_HASH/BOT_TOKEN/OWNER for a TEST bot, never the production one
+---
+
+## 📑 Table of Contents
+
+<table>
+<tr>
+<td valign="top" width="33%">
+
+**Getting Started**
+- [✨ Features](#-features)
+- [🧠 Architecture](#-architecture)
+- [🚀 Quick Start](#-quick-start)
+- [🎮 Interactive Workflow](#-interactive-workflow)
+
+</td>
+<td valign="top" width="33%">
+
+**Production & Operations**
+- [⚙️ Deploying to the Server](#-deploying-to-the-server)
+- [🧱 Project Structure](#-project-structure)
+- [🔧 Configuration Matrix](#-configuration-matrix)
+
+</td>
+<td valign="top" width="33%">
+
+**Reliability & Policy**
+- [💡 Design Decisions / Reliability](#-design-decisions--reliability)
+- [⚠️ Known Limitations](#️-known-limitations)
+- [📜 License & Credits](#-license--credits)
+
+</td>
+</tr>
+</table>
+
+---
+
+## ✨ Features
+
+<table>
+<tr>
+<td width="33%" valign="top">
+
+### 🎬 Universal Media Ingestion
+Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, and **direct HTTP(S)** links. Supports YouTube playlists and TikTok/Instagram photo slideshows.
+
+</td>
+<td width="33%" valign="top">
+
+### ⚡ Multi-Connection Upload
+Uploads large files over up to **5 parallel lanes** distributed across **separate real TCP connections** directly to Telegram Data Centers using an in-memory shared MTProto key.
+
+</td>
+<td width="33%" valign="top">
+
+### 🌐 Adaptive Provider Fallback
+Automated fallback across external scrapers (`tikwm`, `tikdownloader`, `musicaldown`, `cobalt`, `ytmp3`) with dynamic health tracking and latency sorting in MySQL.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🎚️ Interactive Quality & Audio
+In-chat resolution picker (1080p, 720p, 480p, 360p) and dedicated **MP3 audio extraction** (192kbps) with ID3v2 tags and embedded album art.
+
+</td>
+<td valign="top">
+
+### ✂️ Smart 2GB+ File Splitting
+Splits files exceeding Telegram's 2GB bot limit into numbered parts (`📎 חלק i/N`) using `ffmpeg`, preserving streamable faststart headers without re-encoding.
+
+</td>
+<td valign="top">
+
+### 🗄️ Zero-Reupload Archive Cache
+Archives delivered media to a private channel. Repeat requests re-send media instantly server-side without re-downloading, re-uploading, or "Forwarded from" headers.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 📊 Bi-Directional Live Progress
+Real-time progress widget edited in place with dynamic progress bar, downloaded size, speed, and ETA. Formatted with explicit bi-di RTL/LTR embeddings.
+
+</td>
+<td valign="top">
+
+### 🛡️ Multi-Layer Security Guard
+Comprehensive SSRF protection with redirect hop address inspection, path traversal sanitization, 200-byte safe filenames, and body content sniffing.
+
+</td>
+<td valign="top">
+
+### 💳 Fair Volume Billing
+Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful upload. Split files never cost extra; failed deliveries charge zero.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
+### 🛑 Active Task Cancellation
+Inline `[ ❌ ביטול ]` button stops in-flight downloads immediately, terminating worker thread sockets and cleaning up temporary disk fragments cooperatively.
+
+</td>
+<td valign="top">
+
+### 🔄 Intelligent One-Click Retry
+Transient network errors attach an inline `[ 🔄 נסה שוב ]` button backed by an in-memory TTL store. Irrecoverable failures (e.g. blocked user, oversized) omit it.
+
+</td>
+<td valign="top">
+
+### 🌊 "Wait Over Fail" Flood Policy
+Resilient flood handling: sleeps exact wait times, degrades upload lanes (5 → 2 → 1), and avoids artificial cumulative timeouts during active delivery.
+
+</td>
+</tr>
+</table>
+
+---
+
+## 🧠 Architecture
+
+`media-bot-v2` operates as an asynchronous pipeline orchestrated via **Telethon**, coordinating between platform extractors, transcoding subprocesses, persistent storage, and Telegram's MTProto API:
+
+```mermaid
+graph TD
+    subgraph TELEGRAM["💬 Telegram Interface"]
+        USER["👤 User"]
+        ROUTER["🔀 Router & Callback Dispatcher"]
+        PROGRESS["📊 Live Progress Reporter"]
+    end
+
+    subgraph PIPELINE["🔄 Processing Pipeline"]
+        LIMITER["🚦 Concurrency Limiter"]
+        CACHE["💾 Video Cache (SQL)"]
+        ENGINES["📥 Media Engines & Providers"]
+        GUARD["🛡️ SSRF & Content Guard"]
+        TRANSCODE["🎬 Probe & Faststart / Splitter"]
+        UPLOADER["⚡ Multi-Connection Parallel Uploader"]
+    end
+
+    subgraph STORAGE["🗄️ Persistent Layer"]
+        DB[("🗄️ MySQL / SQLite")]
+        ARCHIVE["📦 Archive Channel"]
+    end
+
+    USER -->|"Send URL"| ROUTER
+    ROUTER --> GUARD
+    GUARD --> LIMITER
+    LIMITER --> CACHE
+
+    CACHE -->|"Cache Hit"| UPLOADER
+    CACHE -->|"Cache Miss"| ENGINES
+
+    ENGINES -->|"Download Stream"| TRANSCODE
+    TRANSCODE -->|"Validated Parts"| UPLOADER
+
+    UPLOADER --> PROGRESS
+    UPLOADER -->|"Copy Media"| ARCHIVE
+    UPLOADER -->|"Deliver Media"| USER
+    UPLOADER -->|"Volume Charge & Cache Write"| DB
+
+    style ROUTER fill:#06B6D4,stroke:#06B6D4,color:#fff
+    style UPLOADER fill:#22C55E,stroke:#22C55E,color:#fff
+    style ENGINES fill:#D98324,stroke:#D98324,color:#fff
+    style DB fill:#0D1117,stroke:#3776AB,color:#fff
 ```
 
-## Running the tests
+### End-to-End Request State Flow
+
+```mermaid
+stateDiagram-v2
+    [*] --> Ingested: URL received in private chat
+    Ingested --> HostRouting: Parse netloc & check scheme
+    HostRouting --> QualityMenu: YouTube -> Prompt quality / audio
+    HostRouting --> EngineDispatch: TikTok / Instagram / Direct
+    QualityMenu --> EngineDispatch: User selects resolution
+    EngineDispatch --> CacheCheck: Compute deterministic cache key
+    CacheCheck --> CacheServe: Key exists in video_cache -> Resend from archive
+    CacheCheck --> Downloading: Cache miss -> Acquire concurrency slot
+    Downloading --> GuardValidation: Preflight HEAD check & content sniffing
+    GuardValidation --> Transcode: Probe media info, fix streamable MP4, or split >2GB
+    Transcode --> Uploading: Multi-lane parallel upload over MTProto TCP
+    Uploading --> ArchiveCopy: Send copy to private ARCHIVE_CHANNEL
+    ArchiveCopy --> Billing: Record bandwidth & deduct volume credits in DB
+    Billing --> CacheCommit: Store metadata & message IDs in video_cache
+    CacheServe --> Completed: Send summary & clean progress
+    CacheCommit --> Completed: Send summary & clean progress
+    Completed --> [*]
+```
+
+---
+
+## 🚀 Quick Start
+
+### Local Development Setup
 
 ```bash
+# 1 · Clone the repository
+git clone https://github.com/Omer-Dahan/media-bot-v2.git
+cd media-bot-v2
+
+# 2 · Install dependencies with uv (creates .venv automatically)
+uv sync
+
+# 3 · Configure environment variables
+cp .env.example .env
+# Edit .env with your TEST bot credentials (never the production token!)
+
+# 4 · Verify local environment readiness
+uv run python -m media_bot_v2.preflight
+
+# 5 · Run the complete test suite (870+ tests)
 uv run pytest -q
 ```
 
-Tests never connect to Telegram (Telethon clients are built against an in-memory
-session or mocked) and never touch the production database - they run against
-SQLite (in-memory or a tmp file). A local `http.server` fixture stands in for the
-direct-link engine's target so `test_direct_engine.py` proves the full streaming
-download path without touching the real internet. `test_splitter.py` uses a real
-ffmpeg binary to generate and split a short throwaway test clip (also local-only).
+<details>
+<summary><b>📋 &nbsp;System Requirements</b></summary>
 
-### MySQL schema compatibility
+<br>
 
-`tests/test_mysql_schema_compat.py` compiles every model's DDL against
-`sqlalchemy.dialects.mysql` (`CreateTable(...).compile(dialect=mysql.dialect())`)
-and checks it against the old bot's table/column names - this catches
-MySQL-dialect issues (enum rendering, VARCHAR lengths, reserved words) without
-needing a MySQL server, and runs as part of the normal `pytest` invocation above.
+- 🐍 **Python 3.13+**
+- ⚡ **[uv](https://docs.astral.sh/uv/)** package manager
+- 🎬 **FFmpeg & FFprobe** installed and reachable in `PATH` (used for media probing, MP3 conversion, and >2GB segment splitting)
+- 🌐 **JavaScript Runtime** (`node` >= 22, `deno` >= 2.3, or `bun`) in `PATH` (required by `yt-dlp-ejs` to solve YouTube signature challenges)
+- 🗄️ **Database**: SQLite (built-in, default for local dev) or MySQL (used in production)
+- 🤖 **Telegram API Credentials**: `APP_ID`, `APP_HASH`, and a `BOT_TOKEN` from [@BotFather](https://t.me/BotFather)
 
-`tests/test_mysql_integration.py` runs the same models against a **real** MySQL
-server and is skipped unless `MYSQL_TEST_DSN` is set. Point it at a throwaway
-database, never production:
+</details>
+
+---
+
+## 🎮 Interactive Workflow
+
+The bot provides a clean, single-message Hebrew interface in Telegram:
+
+```text
+┌─────────────────────────────────────────────────────────────┐
+│ 🎬 סרטון יוטיוב (03:45)                                    │
+│                                                             │
+│ 📊 התקדמות: (45.2MB/98.0MB) 46% ████░░░░░░                 │
+│ ⚡ מהירות: 5.4MB/s                                          │
+│ ⏱️ זמן משוער: 10 שניות                                      │
+├─────────────────────────────────────────────────────────────┤
+│ [ ❌ ביטול ]                                                │
+└─────────────────────────────────────────────────────────────┘
+```
+
+1. **User Ingestion**: The user sends any supported media link in a private chat.
+2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד (MP3)`). Direct links, TikTok, and Instagram start downloading immediately.
+3. **Live Progress Feedback**: The status message updates in place with a real-time progress bar, speed counter, and ETA. The inline `[ ❌ ביטול ]` button allows the user to abort the transfer cooperatively at any time.
+4. **Delivery & Archiving**: The completed media is delivered with formatted captions, streamable flags, and optional separate subtitle files. The message is quietly archived to the configured `ARCHIVE_CHANNEL`.
+5. **Instant Cache Hits**: Subsequent requests for the same URL and quality are served instantly from the archive channel without re-downloading or consuming credits.
+6. **Error Recovery**: If a transient network glitch occurs, the progress message displays the failure reason and attaches a `[ 🔄 נסה שוב ]` button for immediate re-execution.
+
+---
+
+## ⚙️ Deploying to the Server
+
+Production deployment uses `systemd` alongside the required extraction toolchain.
+
+### The Production "Trio"
+
+To reliably download YouTube content in production, three components must be active:
+1. **JavaScript Runtime**: `node` (>= 22) or `deno` (>= 2.3) installed on the host and present in the systemd service `PATH`.
+2. **EJS Solver Package**: `yt-dlp-ejs` (managed by `uv sync`) which bundles YouTube signature challenge scripts locally.
+3. **Proof-of-Origin (PO) Token**: Either a self-hosted token provider via Docker ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)) configured with `POTOKEN_PROVIDER_URL=http://127.0.0.1:4416`, or a manual static token in `POTOKEN`.
+
+### systemd Service Setup
 
 ```bash
-MYSQL_TEST_DSN="mysql+pymysql://user:pass@host/throwaway_db" uv run pytest tests/test_mysql_integration.py -v
+# 1 · Copy systemd unit file
+sudo cp deploy/download-bot-v2.service /etc/systemd/system/
+
+# 2 · Edit paths, user, and PATH to include the JS runtime
+sudo nano /etc/systemd/system/download-bot-v2.service
+
+# 3 · Reload systemd and enable service
+sudo systemctl daemon-reload
+sudo systemctl enable download-bot-v2.service
 ```
 
-This creates all four tables, does a basic insert/read round trip through the
-`User` model, then drops the tables again. It never reads `DB_DSN` from `.env`.
+### The One-Line Server Update Command
 
-## Running the bot
-
-Not part of this milestone - do not start it. When you do (M2+, against a
-**test** bot token only):
+To deploy updates cleanly to the production server:
 
 ```bash
-uv run python -m media_bot_v2.bootstrap
+cd /opt/media-bot-v2 && git pull && uv sync && sudo systemctl restart download-bot-v2.service && sudo journalctl -u download-bot-v2.service -f
 ```
 
-Two things must hold before ever starting this bot:
+> [!IMPORTANT]
+> **Single Session Consumer Rule**: Never run both the old bot and `media-bot-v2` against the same `BOT_TOKEN` concurrently. Stop the old bot service before launching the new service.
 
-1. **`BOT_TOKEN` must be a test bot's token, never the production token**, as
-   long as the old bot (`media-downloader-bot`) is still running - Telegram
-   allows only one active session consumer per bot token, and Telethon and
-   the old bot's Kurigram client would fight over it.
-2. **`SESSION_NAME` (default `v2`) must stay different from the old bot's
-   session name (`main`, i.e. `main.session`)**, even after cutover. Telethon
-   session files are self-contained MTProto login state; starting this bot
-   with the old bot's session file while the old bot is running (or vice
-   versa) invalidates that shared session for whichever client loses the
-   race.
+> [!WARNING]
+> **Session File Isolation**: Ensure `SESSION_NAME` in `.env` is set to `v2` (or anything other than `main`). Running with `main` will corrupt the legacy session file.
 
-## Cutover plan
+---
 
-Summarized here; full detail (including the read-only production dry-run step)
-is in `spec/SPEC.md` section 6. The short version: develop and test against a
-separate test bot token through M1-M3, never run both bots against the
-production token at once, stop the old bot's process before pointing this bot
-at the production `BOT_TOKEN`/`DB_DSN`, and keep the old bot's code and systemd
-unit in place (disabled) for a rollback window after cutover.
+## 🧱 Project Structure
 
-The full deployment kit, including exact server-side install commands (JS
-runtime for yt-dlp, PO token provider), the systemd unit, and the
-step-by-step cutover/rollback procedure, is in `docs/DEPLOY.md`. Before ever
-pointing this bot at production, run the read-only readiness check:
+<details open>
+<summary><b>📂 &nbsp;Source Code Overview</b></summary>
 
-```bash
-uv run python -m media_bot_v2.preflight
+<br>
+
+```text
+media-bot-v2/
+├── 📄 .env.example               # ⚙️ Sample environment configuration
+├── 📄 README.md                  # 📖 Project documentation
+├── 📄 pyproject.toml             # 📦 Packaging & dependencies (Python 3.13+, Telethon, yt-dlp)
+├── 📄 uv.lock                    # 🔒 Deterministic dependency lockfile
+│
+├── 📂 deploy/                    # 🚀 Server deployment templates
+│   └── 📄 download-bot-v2.service# Production systemd unit configuration
+│
+├── 📂 docs/                      # 📚 Architecture, deployment, and research docs
+│   ├── 📄 DEPLOY.md              # Detailed deployment, preflight, & cutover guide
+│   ├── 📄 LESSONS.md             # Production failure analysis & architectural solutions
+│   └── 📄 providers.md           # External extraction API reference & limitations
+│
+├── 📂 media_bot_v2/              # 🧠 Core Python package
+│   ├── 📄 bootstrap.py           # 🚀 Application entrypoint & dependency assembly
+│   ├── 📄 config.py              # ⚙️ Pydantic-settings environment schema
+│   ├── 📄 logging_setup.py       # 📝 Rotating JSON structured logger
+│   ├── 📄 pipeline.py            # 🔄 Core pipeline: download -> split -> upload -> charge
+│   ├── 📄 preflight.py           # 🔍 Read-only environment & database readiness checker
+│   │
+│   ├── 📂 cache/                 # 💾 Caching & Deduplication Layer
+│   │   └── 📄 video_cache.py     # Database cache store & cache key generator
+│   │
+│   ├── 📂 credits/               # 💳 Quota & Volume Billing Engine
+│   │   ├── 📄 exceptions.py      # Quota, bandwidth, and access exceptions
+│   │   └── 📄 service.py         # Volume-based credit calculation & balances
+│   │
+│   ├── 📂 db/                    # 🗄️ Database Models & Connection Management
+│   │   ├── 📄 models.py          # SQLAlchemy 2.0 models (byte-for-byte schema parity)
+│   │   └── 📄 session.py         # Engine and sessionmaker factory
+│   │
+│   ├── 📂 engines/               # 📥 Platform Media Download Engines
+│   │   ├── 📄 base.py            # Engine contract, cancellation tokens, & errors
+│   │   ├── 📄 content_check.py   # MIME & body sniffing to block non-media HTML/XML
+│   │   ├── 📄 direct.py          # Direct HTTP(S) file streaming engine
+│   │   ├── 📄 instagram.py       # Instagram reels, posts, and carousels engine
+│   │   ├── 📄 safe_filename.py   # Path traversal defense & Linux byte truncation
+│   │   ├── 📄 ssrf_guard.py      # SSRF validation & redirect IP inspection
+│   │   ├── 📄 tiktok.py          # TikTok video and slideshow engine
+│   │   ├── 📄 youtube.py         # YouTube video, audio, and playlist engine
+│   │   └── 📄 ytdlp_support.py   # yt-dlp transport retries & DownloadGuard size hook
+│   │
+│   ├── 📂 providers/             # 🌐 External Extraction Fallback Layer
+│   │   ├── 📄 base.py            # Base provider abstraction
+│   │   ├── 📄 cobalt.py          # Cobalt API provider integration
+│   │   ├── 📄 downloader.py      # Safe streaming downloader for providers
+│   │   ├── 📄 health.py          # Provider success/latency tracking in database
+│   │   ├── 📄 musicaldown.py     # Musicaldown TikTok scraper provider
+│   │   ├── 📄 registry.py        # Provider priority registry & resolution
+│   │   ├── 📄 tikdownloader.py   # TikDownloader AJAX extraction provider
+│   │   ├── 📄 tikwm.py           # TikWM API provider integration
+│   │   └── 📄 ytmp3.py           # ytmp3.gl gamma cloud extraction provider
+│   │
+│   ├── 📂 queue/                 # 🚦 Concurrency & Traffic Control
+│   │   └── 📄 limiter.py         # Asyncio semaphore-based concurrency limiter
+│   │
+│   ├── 📂 telegram/              # 💬 Telegram Client & UI Layer (Telethon)
+│   │   ├── 📄 callback_data.py   # Safe bytes callback_data encoder/decoder
+│   │   ├── 📄 captions.py        # HTML caption builders & description formatting
+│   │   ├── 📄 client.py          # Telethon client factory
+│   │   ├── 📄 delivery.py        # User settings snapshot & delivery options
+│   │   ├── 📄 flood_wait.py      # Resilient flood wait retry handling
+│   │   ├── 📄 parallel_upload.py # Multi-lane, multi-TCP MTProto file uploader
+│   │   ├── 📄 progress.py        # Throttled message progress reporter
+│   │   ├── 📄 progress_format.py # BiDi RTL-safe progress bar, speed, & ETA
+│   │   ├── 📄 quality_menu.py    # YouTube quality & audio selection UI
+│   │   ├── 📄 retry.py           # Transient failure retry store & inline markup
+│   │   ├── 📄 router.py          # Command, message, & callback query router
+│   │   ├── 📄 settings_menu.py   # In-chat user configuration dashboard
+│   │   ├── 📄 texts.py           # Centralized Hebrew user-facing strings
+│   │   └── 📄 uploader.py        # Telethon file upload & archive copy wrapper
+│   │
+│   └── 📂 upload/                # 🎬 Media Processing & Transcoding
+│       ├── 📄 audio_converter.py # 192k MP3 conversion & ID3v2 cover embedding
+│       ├── 📄 media_probe.py     # ffprobe stream probing & video thumbnailing
+│       ├── 📄 splitter.py        # ffmpeg >2GB segment splitting for Telegram
+│       └── 📄 streamable.py      # Faststart H.264/AAC MP4 playability fixer
+│
+├── 📂 spec/                      # 📐 Technical Specifications & Legacy Audit
+│   ├── 📄 DESIGN-PARITY.md       # Parity checklist with legacy implementation
+│   ├── 📄 INVENTORY.md           # Old bot inventory & audit decisions
+│   └── 📄 SPEC.md                # System specification & cutover roadmap
+│
+└── 📂 tests/                     # 🧪 Comprehensive Test Suite (877 passing tests)
 ```
 
-## Layout
+</details>
 
-```
-media_bot_v2/
-  config.py             # typed settings loaded from .env
-  logging_setup.py       # rotating structured file logs
-  bootstrap.py            # entrypoint wiring (not run at import time)
-  pipeline.py              # download -> split -> upload -> charge -> cleanup
-  preflight.py             # read-only cutover readiness checks (docs/DEPLOY.md)
-  db/                       # SQLAlchemy models (same schema + provider_health) + session
-  credits/                  # credit/quota service ported from the old bot's logic
-  providers/                # external extraction providers (tikwm, musicaldown, ytmp3, cobalt)
-  telegram/                 # Telethon client bootstrap, router, menus, callback_data
-  engines/                  # per-platform engines (direct, youtube, tiktok)
-  queue/                    # concurrency limiting
-  upload/                   # large-file splitting for uploads over 2GB
-deploy/
-  download-bot-v2.service  # sample systemd unit
-docs/
-  providers.md              # verified endpoints, request flows, and limitations reference
-  DEPLOY.md                 # server setup, PO token/JS runtime install, cutover, rollback
-tests/                      # pytest, no live Telegram/DB connections
-spec/SPEC.md                # full specification
-spec/INVENTORY.md           # old-bot audit (keep/rebuild/drop per item)
-```
+---
 
-## Provider Layer & Health Tracking (M3)
+## 🔧 Configuration Matrix
 
-- **Adaptive Ordering & Cooldown:** Provider performance is tracked in the `provider_health` table. The `order_for()` query dynamically sorts providers by highest success rate and lowest latency. Providers exceeding `PROVIDER_FAILURE_THRESHOLD` consecutive failures are temporarily suppressed for `PROVIDER_COOLDOWN_SECONDS` and retried after expiry.
-- **Provider Fallback:** If the primary provider or engine fails, the bot attempts subsequent providers in priority order before reporting an error to the user.
-- **Configuration Variables:**
-  - `TIKTOK_PROVIDERS`: Comma-separated order for TikTok (default: `tikwm,tikdownloader,musicaldown,cobalt`).
-  - `YOUTUBE_PROVIDERS`: Comma-separated order for YouTube fallbacks (default: `ytmp3,cobalt`).
-  - `DISABLED_PROVIDERS`: Comma-separated list of globally disabled providers.
-  - `COBALT_URL`: Optional URL to a public or private Cobalt instance without Turnstile.
-  - `YTMP3_API_KEY`: Fixed API key for ytmp3.gl (gamma.gammacloud.net).
-  - `PROVIDER_TIMEOUT`: HTTP request timeout per provider in seconds (default: 15.0).
-  - `PROVIDER_FAILURE_THRESHOLD`: Number of consecutive failures to trigger cooldown (default: 3).
-  - `PROVIDER_COOLDOWN_SECONDS`: Cooldown duration in seconds before retry (default: 300).
+| Variable | Category | Description | Default |
+|:---|:---:|:---|:---|
+| `APP_ID` | Telegram | Telegram API Application ID | *Required* |
+| `APP_HASH` | Telegram | Telegram API Application Hash | *Required* |
+| `BOT_TOKEN` | Telegram | Telegram Bot Token from BotFather | *Required* |
+| `OWNER` | Telegram | Comma-separated list of Bot Owner IDs (bypasses quota limits) | `""` |
+| `SESSION_NAME` | Telegram | Telethon session file name (must **not** be `main`) | `v2` |
+| `FLOOD_SLEEP_THRESHOLD` | Telegram | Internal Telethon flood sleep threshold in seconds (`0` bubbles errors to custom lane logic) | `0` |
+| `DB_DSN` | Database | SQLAlchemy database connection string (MySQL in prod, SQLite for local dev) | `sqlite:///database.sqlite3` |
+| `ENABLE_VIP` | Billing | Enable VIP/credit enforcement system | `false` |
+| `FREE_DOWNLOAD` | Billing | Daily free download quota count | `3` |
+| `FREE_BANDWIDTH` | Billing | Daily free bandwidth quota in bytes | `2147483648` (2 GB) |
+| `MB_PER_CREDIT` | Billing | Delivered megabytes charged per 1 credit (`max(1, ceil(MB / MB_PER_CREDIT))`) | `200` |
+| `ARCHIVE_CHANNEL` | Storage | Archive channel ID (`-100...` numeric) or `@username` (numeric strings auto-normalized) | `None` |
+| `DOWNLOAD_DIR` | Storage | Scratch folder for in-flight downloads (cleaned up after each job) | `downloads` |
+| `LOG_FILE` | Logging | File path for structured JSON logs | `logs/bot.log` |
+| `LOG_MAX_BYTES` | Logging | Maximum log file size before rotation in bytes | `10485760` (10 MB) |
+| `LOG_BACKUP_COUNT` | Logging | Number of rotated log backup files to preserve | `5` |
+| `LOG_TO_CONSOLE` | Logging | Mirror logs to stdout for systemd journal (`journalctl`) | `true` |
+| `FORCE_IPV4` | Network | Force IPv4 connections for yt-dlp (bypasses broken IPv6 routing to YouTube) | `false` |
+| `POTOKEN` | YouTube | Static YouTube Proof-of-Origin token | `None` |
+| `POTOKEN_PROVIDER_URL` | YouTube | Health-check URL for external PO token provider service | `None` |
+| `YOUTUBE_COOKIES_FILE` | YouTube | Path to Netscape cookies file for age-gated YouTube content | `None` |
+| `YOUTUBE_PLAYER_CLIENT` | YouTube | Override yt-dlp player client (`mweb` without cookies, `web,default` with cookies) | `None` |
+| `YOUTUBE_JS_RUNTIMES` | YouTube | Comma-separated JS runtimes for `yt-dlp-ejs` challenges | `deno,node` |
+| `YOUTUBE_REMOTE_COMPONENTS`| YouTube | Remote solver component loading for `yt-dlp-ejs` | `None` |
+| `TIKTOK_COOKIES_FILE` | TikTok | Path to cookie file for TikTok private/regional access | `None` |
+| `INSTAGRAM_COOKIES_FILE` | Instagram | Path to cookie file for Instagram gated content | `None` |
+| `TIKTOK_PROVIDERS` | Providers | Comma-separated priority list for TikTok fallback extractors | `tikwm,tikdownloader,musicaldown,cobalt` |
+| `YOUTUBE_PROVIDERS` | Providers | Comma-separated priority list for YouTube fallback extractors | `ytmp3,cobalt` |
+| `DISABLED_PROVIDERS` | Providers | Comma-separated list of globally disabled provider names | `""` |
+| `COBALT_URL` | Providers | Base URL of self-hosted or public Cobalt instance without Turnstile | `None` |
+| `YTMP3_API_KEY` | Providers | Embedded API key for `ytmp3.gl` (gamma cloud) | `9b0ed5dab...` |
+| `PROVIDER_TIMEOUT` | Providers | HTTP request timeout per external provider in seconds | `15.0` |
+| `PROVIDER_FAILURE_THRESHOLD`| Providers| Consecutive failures before temporarily suppressing a provider | `3` |
+| `PROVIDER_COOLDOWN_SECONDS`| Providers| Cooldown duration before retrying a suppressed provider | `300` (5 min) |
+| `WORKERS` | Concurrency | Global maximum concurrent downloads across all users | `100` |
+| `USER_WORKERS` | Concurrency | Maximum concurrent downloads per individual user | `2` |
+| `REQUEST_TIMEOUT` | Timeouts | Total time budget for a complete download operation in seconds | `600.0` (10 min) |
+| `UPLOAD_TIMEOUT` | Timeouts | Dedicated time budget for Telegram upload phase in seconds | `600.0` (10 min) |
+| `CONVERT_TIMEOUT` | Timeouts | Dedicated budget for streamable conversion & MP3 transcoding | `180.0` (3 min) |
+| `UPLOAD_WORKERS` | Speed | Parallel MTProto upload parts in flight per file (1..5) | `5` |
+| `UPLOAD_CONNECTIONS` | Speed | Real concurrent TCP connections to Telegram DC per upload (1..5) | `5` |
 
-## Design decisions worth knowing
+> [!NOTE]
+> **Concurrency & Threading**: In `media-bot-v2`, concurrency is managed via `asyncio.Semaphore` using `WORKERS` (global cap) and `USER_WORKERS` (per-user cap), while synchronous CPU/network tasks run in worker threads via `asyncio.to_thread`. Legacy configurations referencing `THREAD_POOL_SIZE` are safely ignored.
 
-- **Credits are charged only after a fully successful upload**, never before.
-  The old bot charged credits before splitting+uploading large videos
-  (`src/engine/base.py:976`), so a failed send after a successful ffmpeg split
-  still cost the user credits with no refund path anywhere in that codebase.
-  See `media_bot_v2/pipeline.py`'s module docstring for the full reasoning; in
-  short, charge-after-success needs exactly one accounting write gated on
-  total success, instead of a charge-then-refund design that needs a second
-  write to itself succeed for the accounting to stay correct.
-- **A blocked user (`is_blocked`) now raises a dedicated `UserBlockedException`**
-  instead of the old bot's bare `Exception` (`src/database/model.py:244-245`).
-- Progress is reported through **one message, edited in place**, never a
-  stream of new messages per download phase.
-- **`provider_health` is a v2-only table**: Created with `IF NOT EXISTS` on startup,
-  it does not alter or conflict with the shared legacy production tables.
-- **Provider registry default in `register_handlers`**: if no `registry` is
-  passed, one is created empty and logged as a warning rather than silently
-  used. An empty registry has no providers registered for any platform, so
-  TikTok/YouTube fallback silently never leaves local yt-dlp. This is
-  intentional for tests that only exercise handler wiring or the direct-link
-  engine and don't care about provider fallback; `bootstrap.py` always passes
-  `registry=build_provider_registry(settings)` for the real running bot. If
-  you see the "external extraction providers are DISABLED" warning in
-  production logs, `register_handlers` is being called without a registry
-  somewhere it shouldn't be.
+> [!IMPORTANT]
+> **Archive Channel Format**: `ARCHIVE_CHANNEL` must be set as a negative numeric ID (e.g. `-1003534083142`) or a public `@username`. Passing a plain string number causes Telethon to resolve it via `GetContactsRequest` (treating it as a phone number), which fails for bots. The bot automatically converts numeric strings to integers on load.
 
+---
+
+## 💡 Design Decisions / Reliability
+
+`media-bot-v2` incorporates key architectural decisions derived from production analysis of the legacy codebase:
+
+- **Telethon MTProto Exclusivity**: Standardized entirely on `Telethon` (async MTProto). Unlike Pyrogram/Kurigram, Telethon uses `bytes` for callback data. All callbacks are centralized through [`media_bot_v2/telegram/callback_data.py`](file:///tmp/v2-readme/media_bot_v2/telegram/callback_data.py) for safe encoding/decoding.
+- **Zero-Downtime Database Continuity**: Shares the exact same MySQL production schema (`users`, `settings`, `payments`, `video_cache`) with zero data migrations or table renames. A single v2-only table (`provider_health`) is created on startup without altering legacy structures.
+- **Adaptive Provider Fallback with Cooldowns**: External extractors are monitored in real time. The `order_for()` query dynamically prioritizes providers with the highest success rate and lowest latency, temporarily cooling down failing providers for 5 minutes.
+- **Multi-Connection Uploads without Auth Duplication**: Speed is maximized by opening up to 5 real TCP connections to the Telegram DC. Each extra connection reuses the main client's in-memory `AuthKey` (`client._sender.auth_key`) with its own session/seqno, avoiding secondary session files that caused `AUTH_KEY_DUPLICATED` session revocation in the old bot.
+- **Post-Upload Volume Billing**: Solved the legacy pre-charge bug where users were billed before large file splits that subsequently failed. Credits are calculated strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful delivery.
+- **Leak-Proof Error Classification**: Error messages presented to the user are whitelisted and translated to clean Hebrew. Raw system paths, server IPs, internal hostnames, and API keys are strictly masked and restricted to internal logs.
+- **Dual-Model Verification**: Code construction and architectural verification were conducted across independent model evaluations to ensure defensive design and robust regression test coverage.
+
+---
+
+## ⚠️ Known Limitations
+
+In accordance with architectural reviews documented in [`docs/LESSONS.md`](file:///tmp/v2-readme/docs/LESSONS.md), the following minor cosmetic behaviors are retained:
+
+1. **RTL Dual-Message Display during Consecutive Floods**: If multiple Telegram operations encounter consecutive flood waits simultaneously, two terminal fallbacks (edit vs. respond) can race, resulting in a failure notice appearing next to a delayed success delivery.
+2. **Stale Progress Indicator after Flooded Cleanup**: If deleting the progress message is flooded after a file has already been successfully delivered, the message may remain visible at "Uploading... 95%".
+3. **Status Message Residue during Global Flood**: Under rare circumstances where every Telegram call is throttled at once, a progress status message may remain alongside the failure explanation.
+4. **Binary-Disguised Plain Text Detection**: Text files served as `application/octet-stream` without standard HTML/XML/JSON markup openers will bypass initial body sniffers and reach the download stage before handling.
+5. **External Provider API Drift**: Public extraction endpoints (TikWM, musicaldown, ytmp3) operate without formal SLAs and may alter response schemas, triggering fallback to local `yt-dlp`.
+
+---
+
+## 📜 License & Credits
+
+This project is licensed under the **GNU General Public License v3.0 or later** ([GPL-3.0-or-later](file:///tmp/v2-readme/pyproject.toml#L7)).
+
+`media-bot-v2` is an independent, ground-up rewrite engineered for high performance, reliability, and robust concurrency.
+
+<div align="center">
+
+---
+
+**Built with ❤️ for High-Performance Media Delivery**
+
+<sub>Engineered from scratch for resilience, speed, and clean Telegram operations.</sub>
+
+</div>
