@@ -10,11 +10,16 @@ from media_bot_v2.telegram.progress_format import (
     BAR_WIDTH,
     EMBED_LTR,
     LRM,
+    MOON_HALF,
+    MOON_QUARTER,
+    MOON_THREE_QUARTER,
     POP_EMBED,
     format_progress,
     human_eta,
     render_bar,
 )
+
+_ALL_MOONS = {BAR_EMPTY, MOON_QUARTER, MOON_HALF, MOON_THREE_QUARTER, BAR_FILLED}
 
 PHASE = "⬇️ מוריד..."
 
@@ -105,9 +110,29 @@ def test_render_bar_clamps_out_of_range_input():
 
 
 def test_render_bar_partial_fill_matches_percent():
+    """The last cell is permanently reserved as empty below 100% (see
+    `render_bar`'s docstring), so 50% with width=10 lands on 4 full moons +
+    1 half moon + 5 empty - not a clean 5/5 split."""
     bar = render_bar(50, width=10)
-    assert bar.count(BAR_FILLED) == 5
+    assert len(bar) == 10
+    assert all(ch in _ALL_MOONS for ch in bar)
+    assert bar.count(BAR_FILLED) == 4
+    assert bar.count(MOON_HALF) == 1
     assert bar.count(BAR_EMPTY) == 5
+
+
+def test_render_bar_is_typed_empty_to_full_not_full_to_empty():
+    """`render_bar`'s returned string is typed empty-cells-first,
+    full-cells-last (see its docstring for the bidi reasoning): the
+    *last*-typed character of `format_progress`'s embedded run is what ends
+    up adjacent to the RTL label on screen, and full moons belong there
+    ("fills from the right"), not the empty ones. This is the exact
+    ordering bug the previous bot's `full-first` construction would have
+    reproduced were it copied as-is."""
+    bar = render_bar(50, width=10)
+    assert bar == BAR_EMPTY * 5 + MOON_HALF + BAR_FILLED * 4
+    # every empty cell precedes every full cell (partial sits in between)
+    assert bar.rindex(BAR_EMPTY) < bar.index(BAR_FILLED)
 
 
 def test_render_bar_never_full_below_hundred():
@@ -268,6 +293,11 @@ _BOUNDARY_PERCENTS = (0, 1, 5, 45.1, 49.9, 50, 95, 99, 99.9, 100)
 
 
 def test_bar_and_percent_stay_in_sync_across_boundaries():
+    """Table-driven per M11.12: at every boundary percent the bar has
+    exactly BAR_WIDTH moon cells, the shown percent matches, and the bar
+    never looks complete (10 full moons) below 100% - explicitly including
+    99%, where a naive partial-cell scheme (as the previous bot used) could
+    consume the one remaining slot and leave zero empty cells."""
     total = 1_000_000
     for percent in _BOUNDARY_PERCENTS:
         transferred = percent / 100 * total
@@ -276,14 +306,28 @@ def test_bar_and_percent_stay_in_sync_across_boundaries():
         assert shown_percent == int(percent), f"percent={percent}: text shows {shown_percent}%"
 
         bar_line = text.split("\n")[1]
+        total_moons = sum(bar_line.count(ch) for ch in _ALL_MOONS)
+        assert total_moons == BAR_WIDTH, f"percent={percent}: bar has {total_moons} cells, not {BAR_WIDTH}"
+
         filled = bar_line.count(BAR_FILLED)
         empty = bar_line.count(BAR_EMPTY)
-        assert filled + empty == BAR_WIDTH
 
         if shown_percent < 100:
-            assert empty > 0, f"percent={percent}: bar is fully filled before 100% ({bar_line!r})"
+            assert empty > 0, f"percent={percent}: bar has no empty cell before 100% ({bar_line!r})"
+            assert filled < BAR_WIDTH, f"percent={percent}: bar shows {BAR_WIDTH} full moons before 100% ({bar_line!r})"
         else:
             assert filled == BAR_WIDTH and empty == 0
+
+
+def test_bar_at_99_percent_has_at_least_one_empty_cell():
+    """The explicit case called out in the M11.12 round: the previous bot's
+    algorithm let the partial-moon cell consume the last remaining slot at
+    99%, leaving 9 full moons + 1 near-full partial + zero empty cells -
+    indistinguishable from "done" at a glance. This must not regress."""
+    text = format_progress(PHASE, transferred=99, total=100)
+    bar_line = text.split("\n")[1]
+    assert bar_line.count(BAR_EMPTY) >= 1
+    assert bar_line.count(BAR_FILLED) < BAR_WIDTH
 
 
 # --- RTL: the bar/percent/size and speed/ETA lines carry an LTR override ----
@@ -344,6 +388,36 @@ def test_bar_line_visual_order_holds_at_boundary_percents():
         assert "התקדמות" in label
 
 
+def test_moon_bar_full_cells_land_adjacent_to_the_label_not_empty_cells():
+    """Cross-checked against a real bidi engine (`python-bidi` 0.6.11, same
+    disposable-venv verification method as the rest of this module - not a
+    project dependency): per `_visual_screen_order_ltr_embed`'s derivation,
+    `content`'s *last* character is the one that lands immediately adjacent
+    to the RTL label on screen. For "fills from the right" to actually
+    read correctly, that adjacent character must be a full moon once any
+    progress exists - not an empty one. Naively typing the bar full-first/
+    empty-last (as the previous bot's `moon_progress_bar` did) would put an
+    *empty* cell there instead, making the bar look like it fills away from
+    the label rather than toward it."""
+    total = 1_000_000
+    for percent in (45.1, 49.9, 50, 95, 99, 99.9):
+        transferred = percent / 100 * total
+        text = format_progress(PHASE, transferred=transferred, total=total)
+        bar_line = text.split("\n")[1]
+        content, label = _visual_screen_order_ltr_embed(bar_line)
+        assert content[-1] == BAR_FILLED, (
+            f"percent={percent}: character adjacent to the label is {content[-1]!r}, expected a full moon"
+        )
+        assert "התקדמות" in label
+
+    # At 0%, there is no progress to show adjacent to the label - the
+    # reserved-empty design correctly leaves an empty moon there instead.
+    text = format_progress(PHASE, transferred=0, total=total)
+    bar_line = text.split("\n")[1]
+    content, _label = _visual_screen_order_ltr_embed(bar_line)
+    assert content[-1] == BAR_EMPTY
+
+
 def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():
     text = format_progress(PHASE, transferred=45, total=100, speed=10, eta=5)
     lines = text.split("\n")
@@ -388,3 +462,65 @@ def test_every_line_of_a_full_message_opens_with_a_strong_rtl_character():
     # confirm how Telegram's actual clients (desktop/web/Android/iOS) render
     # the full multi-line message - that still requires an eyeball check in
     # each client against a real in-progress download/upload message.
+
+
+# --- M11.12: moon bar must never produce a Telegram entity -------------------
+
+
+def test_moon_bar_produces_no_telegram_entities():
+    """The 2026-09-30 production incident (see progress.py/format_progress
+    docstrings) came from backticks around the bar turning it into a
+    `MessageEntityCode`, whose offset/length then desynced from what
+    Telegram actually stored and froze every later edit. Run the real
+    Telethon markdown parser (the one `message.edit(text)` uses by default)
+    over the generated text and confirm it never produces an entity, for
+    every boundary percent plus the unknown-total and full-detail shapes."""
+    from telethon.extensions import markdown
+
+    texts_to_check = [
+        format_progress(PHASE, transferred=p / 100 * 1_000_000, total=1_000_000) for p in _BOUNDARY_PERCENTS
+    ] + [
+        format_progress(PHASE, transferred=12 * 1024 * 1024, total=None),
+        format_progress(
+            PHASE,
+            transferred=45 * 1024 * 1024,
+            total=100 * 1024 * 1024,
+            speed=1.5 * 1024 * 1024,
+            eta=36,
+        ),
+    ]
+    for text in texts_to_check:
+        _parsed_text, entities = markdown.parse(text)
+        assert entities == [], f"unexpected entities for {text!r}: {entities}"
+        assert "`" not in text
+
+
+# --- M11.12: monotonicity across a realistic increasing update sequence -----
+
+
+def _moon_level(ch: str) -> int:
+    return {BAR_EMPTY: 0, MOON_QUARTER: 1, MOON_HALF: 2, MOON_THREE_QUARTER: 3, BAR_FILLED: 4}[ch]
+
+
+def _bar_fullness(bar: str) -> int:
+    return sum(_moon_level(ch) for ch in bar)
+
+
+def test_moon_bar_is_monotonic_across_an_increasing_update_sequence():
+    """A real download reports an increasing, sometimes finely-spaced
+    sequence of percentages. The bar's total "fullness" (sum of per-cell
+    moon phase levels) must never decrease across such a sequence, even
+    though the previous bot's naive partial-cell scheme could regress right
+    where its cap kicked in near the top of the range."""
+    total = 1_000_000
+    percents = [p / 10 for p in range(1001)]  # 0.0, 0.1, ..., 100.0
+    prev_fullness = -1
+    for percent in percents:
+        transferred = percent / 100 * total
+        text = format_progress(PHASE, transferred=transferred, total=total)
+        bar_line = text.split("\n")[1]
+        bar = "".join(ch for ch in bar_line if ch in _ALL_MOONS)
+        assert len(bar) == BAR_WIDTH
+        fullness = _bar_fullness(bar)
+        assert fullness >= prev_fullness, f"percent={percent}: bar fullness regressed ({bar!r})"
+        prev_fullness = fullness

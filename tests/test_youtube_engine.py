@@ -32,6 +32,7 @@ from media_bot_v2.engines.youtube import (
     resolve_player_client,
 )
 from media_bot_v2.telegram import texts
+from media_bot_v2.telegram.progress_format import BAR_FILLED
 
 # --- pure helpers -----------------------------------------------------
 
@@ -197,7 +198,7 @@ async def test_ytdlp_progress_hook_forwards_bar_to_progress_reporter():
     assert updates, "hook did not forward the dict to progress.update"
     text = updates[-1]
     assert "45%" in text
-    assert "█" in text
+    assert BAR_FILLED in text
     assert "מהירות" in text
     assert "זמן משוער" in text
 

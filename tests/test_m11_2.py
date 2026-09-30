@@ -9,6 +9,7 @@ import pytest
 
 from media_bot_v2.engines.tiktok import TikTokEngine
 from media_bot_v2.engines.ytdlp_support import DownloadGuard, DownloadTooLargeSignal
+from media_bot_v2.telegram.progress_format import BAR_FILLED
 
 
 class _FakeProgress:
@@ -38,7 +39,7 @@ async def test_tiktok_local_hook_forwards_progress_and_still_enforces_guard():
     assert progress.updates, "hook did not forward progress to the reporter"
     text = progress.updates[-1]
     assert "45%" in text
-    assert "█" in text
+    assert BAR_FILLED in text
     assert "מהירות" in text
 
     # the same hook call must still raise once bytes exceed the size ceiling -

@@ -18,9 +18,10 @@ order.
 The bar/percent/size line needs more than LRM, and is handled differently.
 A bare LRM only sets the *first-strong-character* context used by the W7
 weak-type-resolution rule; it does not open a real directional run. With a
-mix of neutral bar glyphs (█/░ are bidi type ON, not L), digits, and a
-parenthesised size pair, that leaves multiple independent neutral runs for
-the bidi algorithm to resolve on its own - and per UAX#9 N0 (bracket pairs)
+mix of neutral bar glyphs (moon emoji are bidi type ON, same as the block
+glyphs they replaced - not L), digits, and a parenthesised size pair, that
+leaves multiple independent neutral runs for the bidi algorithm to resolve
+on its own - and per UAX#9 N0 (bracket pairs)
 plus L2 (reordering by level) it does NOT keep them together: cross-checked
 against a real bidi engine (`python-bidi` 0.6.11, not a project dependency -
 installed only in a throwaway venv for this verification, never shipped),
@@ -42,24 +43,64 @@ import math
 from media_bot_v2.telegram.texts import human_size
 
 BAR_WIDTH = 10
-BAR_FILLED = "█"  # █
-BAR_EMPTY = "░"  # ░
+BAR_FILLED = "🌕"  # full moon
+BAR_EMPTY = "🌑"  # new moon
+MOON_QUARTER = "🌒"
+MOON_HALF = "🌓"
+MOON_THREE_QUARTER = "🌔"
 LRM = "\u200e"  # left-to-right mark
 EMBED_LTR = "\u202a"  # left-to-right embedding
 POP_EMBED = "\u202c"  # pop directional formatting
 
 
-def render_bar(percent: float, width: int = BAR_WIDTH) -> str:
-    """`width`-character bar, `percent` (0-100, clamped) of it filled.
+def _partial_moon(remainder: float) -> str:
+    """Maps how far into its cell the current fill sits (0-1, exclusive of
+    0) to one of the three waxing phases - same thresholds as the previous
+    bot's moon bar."""
+    if remainder >= 0.67:
+        return MOON_THREE_QUARTER
+    if remainder >= 0.34:
+        return MOON_HALF
+    return MOON_QUARTER
 
-    Floors rather than rounds, and never shows a full bar for anything
-    short of 100 - a rounded fill (e.g. 95% -> round(9.5) -> 10/10) makes
-    the bar look complete while the text still says "95%"."""
+
+def render_bar(percent: float, width: int = BAR_WIDTH) -> str:
+    """`width`-cell moon-phase bar, `percent` (0-100, clamped) of it filled.
+
+    Only `width - 1` cells are ever used to represent progress short of
+    100 - the last cell is always held back as a new moon - so the bar can
+    never read as "basically done" before it actually is. A naive
+    floor+remainder split across all `width` cells (as the previous bot
+    did) lets the fractional/partial cell consume the one remaining slot at
+    high percentages (e.g. 99% -> 9 full + 1 near-full partial + 0 empty
+    cells), which looks indistinguishable from "done" at a glance.
+    Reserving one cell up front guarantees at least one empty cell remains
+    for every percent below 100, without ever letting the bar's fill
+    *decrease* as percent rises (the reservation is constant, not a late
+    correction).
+
+    Returned empty-to-full, not full-to-empty: this string is placed as the
+    *last* thing typed inside `format_progress`'s LTR-embedded run, and
+    that run sits immediately after the Hebrew label - per UAX#9 L2, the
+    run's single reversal (against the RTL label) lands its *last-typed*
+    character adjacent to the label and its *first-typed* character at the
+    far edge (verified against `python-bidi` 0.6.11, see
+    tests/test_progress_format.py). Typing full moons last is what makes
+    them land touching the label ("fills from the right"); typing them
+    first (as the previous bot did) puts the empty cells next to the label
+    instead, which reads as the bar filling from the wrong end."""
     clamped = max(0.0, min(100.0, percent))
     if clamped >= 100:
         return BAR_FILLED * width
-    filled = min(int((clamped * width) // 100), width - 1)
-    return BAR_FILLED * filled + BAR_EMPTY * (width - filled)
+    if width < 2:
+        return BAR_EMPTY * width
+    active_width = width - 1
+    raw = clamped / 100 * active_width
+    filled = int(raw)
+    remainder = raw - filled
+    partial = _partial_moon(remainder) if remainder > 0 else ""
+    empty = width - filled - (1 if partial else 0)
+    return BAR_EMPTY * empty + partial + BAR_FILLED * filled
 
 
 def _is_real_number(value: object) -> bool:
