@@ -29,6 +29,7 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base
 from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
 from media_bot_v2.engines.tiktok import TikTokDownloadError
+from media_bot_v2.engines.youtube import classify_youtube_error
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.callback_data import encode
@@ -528,3 +529,83 @@ def test_is_hopeless_failure_comprehensive():
     assert not is_hopeless_failure(text=texts.DOWNLOAD_FAILED)
     assert not is_hopeless_failure(text="שגיאת רשת בהורדה. נסה שוב בעוד מספר רגעים.")
     assert not is_hopeless_failure(text=texts.FLOOD_WAIT_FAILED)
+
+
+def test_is_hopeless_failure_server_config_and_format_unavailable():
+    """M11.8 fix #8: server-misconfiguration failures (missing JS runtime, PO
+    token, invalid cookies) and "requested format unavailable" must not carry
+    a retry button - retrying the exact same request just repeats the exact
+    same failure. Only genuinely transient failures (network/429/500/timeout)
+    keep the button."""
+    js_runtime_msg = classify_youtube_error("No supported JavaScript runtime could be found")
+    po_token_msg = classify_youtube_error("Missing a required PO token")
+    cookies_msg = classify_youtube_error("cookies are no longer valid")
+    format_msg = classify_youtube_error("Requested format is not available")
+
+    assert is_hopeless_failure(text=js_runtime_msg)
+    assert is_hopeless_failure(text=po_token_msg)
+    assert is_hopeless_failure(text=cookies_msg)
+    assert is_hopeless_failure(text=format_msg)
+
+    # Transient failures (network/429/500/timeout) still get a retry button.
+    network_msg = classify_youtube_error("Connection reset by peer")
+    assert not is_hopeless_failure(text=network_msg)
+    assert not is_hopeless_failure(text="שגיאת רשת בהורדה מיוטיוב. נסה שוב בעוד מספר רגעים.")
+    assert not is_hopeless_failure(exc=TikTokDownloadError("HTTP error 500"))
+    assert not is_hopeless_failure(exc=TikTokDownloadError("HTTP error 429"))
+
+
+@pytest.mark.asyncio
+async def test_early_failure_before_execute_download_resets_is_running():
+    """M11.8 fix #7: an unexpected exception in the retry handler's own
+    message/progress setup - before _execute_download is ever reached - used
+    to leave `is_running` stuck forever (only the finally around
+    _execute_download cleared it), so the button replied "already running"
+    until the store's TTL expired. It must always be released, and the same
+    button must work again on a second click."""
+    pipeline = _ControllablePipeline()
+    pipeline.fail_with = TikTokDownloadError("Temporary error")
+    _, retry_store, url_handler, retry_handler = _setup_test_env(pipeline)
+
+    user_id = 700
+    target_url = "https://www.tiktok.com/@user/video/early_failure"
+    event = _FakeEvent(target_url, sender_id=user_id)
+    await url_handler(event)
+
+    msg = event.messages[0]
+    retry_id = _extract_retry_id(msg.edit_kwargs[-1].get("buttons"))
+    assert retry_id is not None
+
+    # Simulate an early, unexpected crash in the retry handler's own setup
+    # (message edit) - before the download is ever started.
+    real_edit = msg.edit
+    calls = {"n": 0}
+
+    async def _flaky_edit(text: str = "", *args: Any, **kwargs: Any) -> _FakeMessage:
+        calls["n"] += 1
+        if calls["n"] == 1:
+            raise RuntimeError("simulated early crash before download starts")
+        return await real_edit(text, *args, **kwargs)
+
+    msg.edit = _flaky_edit
+
+    pipeline.fail_with = None
+    click1 = _FakeCallbackClick(
+        data=encode("retry", retry_id), chat_id=user_id, message=msg, sender_id=user_id
+    )
+    await retry_handler(click1)
+
+    # The crash happened before _execute_download - pipeline was never called
+    # a second time, and is_running must not be stuck.
+    assert len(pipeline.calls) == 1
+    ctx = retry_store.get(retry_id)
+    assert ctx is not None, "retry context must survive an early setup failure"
+    assert ctx.is_running is False
+
+    # A second click must now succeed in triggering the request.
+    click2 = _FakeCallbackClick(
+        data=encode("retry", retry_id), chat_id=user_id, message=msg, sender_id=user_id
+    )
+    await retry_handler(click2)
+    assert len(pipeline.calls) == 2
+    assert len(retry_store) == 0

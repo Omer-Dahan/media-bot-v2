@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import re
+import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
@@ -22,10 +23,48 @@ from media_bot_v2.engines.content_check import (
 )
 from media_bot_v2.providers.base import ProviderResult
 from media_bot_v2.telegram import texts
+from media_bot_v2.telegram.progress_format import format_progress
 
 _CHUNK_SIZE = 1024 * 1024
 _DEFAULT_TIMEOUT = 30
+_PROGRESS_THROTTLE_SECONDS = 2.0
 _SAFE_FILENAME_RE = re.compile(r'[\\/*?:"<>|]')
+
+
+def _report_stream_progress(
+    progress,
+    loop,
+    state: dict,
+    start_time: float,
+    *,
+    transferred: int,
+    total: int | None,
+) -> None:
+    """Forward a throttled progress update from the worker thread doing the
+    streaming GET to the event loop, mirroring
+    engines.youtube.YouTubeEngine._make_progress_hook so a provider fallback
+    download (no yt-dlp progress_hooks here) looks like the same bot. Purely
+    fire-and-forget - a slow or failing progress edit must never block or
+    fail the download itself."""
+    now = time.monotonic()
+    if now - state["last_forward"] < _PROGRESS_THROTTLE_SECONDS:
+        return
+    state["last_forward"] = now
+    elapsed = now - start_time
+    speed = transferred / elapsed if elapsed > 0 else None
+    eta = (total - transferred) / speed if (total is not None and speed) else None
+    text = format_progress(
+        f"⬇️ {texts.DOWNLOADING}",
+        transferred=transferred,
+        total=total,
+        speed=speed,
+        eta=eta,
+    )
+    try:
+        coro = progress.update(text, is_terminal=False)
+    except TypeError:
+        coro = progress.update(text)
+    asyncio.run_coroutine_threadsafe(coro, loop)
 
 
 def _sanitize_title(title: str | None) -> str:
@@ -75,6 +114,8 @@ def _stream_url_to_file(
     *,
     downloaded_so_far: int = 0,
     cancel_token: CancellationToken | None = None,
+    progress=None,
+    loop=None,
 ) -> int:
     """Stream url to dest_path, return the number of bytes written.
 
@@ -101,24 +142,34 @@ def _stream_url_to_file(
                 return 0
             cancel_token.on_cancel(response.close)
 
+        # Parsed once regardless of max_size: also the total shown in the
+        # progress bar below (omitted rather than shown as a fake total when
+        # the server sent no Content-Length).
+        declared_total: int | None = None
+        declared_header = response.headers.get("Content-Length")
+        if declared_header is not None:
+            try:
+                declared_total = int(declared_header)
+            except ValueError:
+                declared_total = None
+
         # Reject early if server declared Content-Length exceeds the remaining budget
-        if max_size is not None:
-            declared = response.headers.get("Content-Length")
-            if declared is not None:
-                try:
-                    decl_size = int(declared)
-                    if downloaded_so_far + decl_size > max_size:
-                        raise DownloadTooLargeError(
-                            texts.format_download_too_large(downloaded_so_far + decl_size, max_size),
-                            file_size=downloaded_so_far + decl_size,
-                            max_size=max_size,
-                            url=url,
-                        )
-                except ValueError:
-                    pass
+        if (
+            max_size is not None
+            and declared_total is not None
+            and downloaded_so_far + declared_total > max_size
+        ):
+            raise DownloadTooLargeError(
+                texts.format_download_too_large(downloaded_so_far + declared_total, max_size),
+                file_size=downloaded_so_far + declared_total,
+                max_size=max_size,
+                url=url,
+            )
 
         total_bytes = 0
         head = b""
+        report_state = {"last_forward": 0.0}
+        start_time = time.monotonic()
         try:
             with open(dest_path, "wb") as f:
                 for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
@@ -140,6 +191,15 @@ def _stream_url_to_file(
                             url=url,
                         )
                     f.write(chunk)
+                    if progress is not None and loop is not None:
+                        _report_stream_progress(
+                            progress,
+                            loop,
+                            report_state,
+                            start_time,
+                            transferred=total_bytes,
+                            total=declared_total,
+                        )
             if cancel_token is not None and cancel_token.is_set():
                 # Cancelled mid-stream: a truncated file must not survive as a result.
                 dest_path.unlink(missing_ok=True)
@@ -164,11 +224,13 @@ async def download_provider_media(
     max_size: int | None = None,
     timeout: float = _DEFAULT_TIMEOUT,
     cancel_token: CancellationToken | None = None,
+    progress=None,
 ) -> DownloadResult:
     """Stream all media URLs in ProviderResult to dest_dir, returning DownloadResult."""
     dest_dir.mkdir(parents=True, exist_ok=True)
     downloaded_paths: list[str] = []
 
+    loop = asyncio.get_running_loop() if progress is not None else None
     total_items = len(result.media_urls)
     total_downloaded = 0
     for idx, media_url in enumerate(result.media_urls, start=1):
@@ -185,6 +247,8 @@ async def download_provider_media(
             timeout,
             downloaded_so_far=total_downloaded,
             cancel_token=cancel_token,
+            progress=progress,
+            loop=loop,
         )
         if cancel_token is not None and cancel_token.is_set():
             break

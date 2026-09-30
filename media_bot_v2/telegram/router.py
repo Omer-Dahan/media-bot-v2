@@ -390,7 +390,7 @@ def register_handlers(
                     extract_instagram_id(job_url) or job_url, "instagram", delivery.send_as
                 )
             else:  # direct
-                engine = direct_engine
+                engine = DirectEngine(max_download_size=max_download_size, progress=progress)
                 cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
 
             uploader = TelethonUploader(
@@ -654,49 +654,60 @@ def register_handlers(
             return
 
         retry_ctx.is_running = True
-        await _safe_answer_callback(event)
-
-        message = None
         try:
-            message = await call_with_flood_retry(
-                event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
-            )
-        except MessageNotModifiedError:
-            try:
-                message = await call_with_flood_retry(event.get_message)
-            except (RPCError, ConnectionError, TimeoutError, OSError):
-                message = getattr(event, "message", None)
-        except (RPCError, ConnectionError, TimeoutError, OSError):
-            logger.debug("Failed to edit failure message on retry", exc_info=True)
+            await _safe_answer_callback(event)
 
-        if message is None:
-            try:
-                await call_with_flood_retry(event.edit, buttons=None)
-            except (RPCError, ConnectionError, TimeoutError, OSError):
-                logger.debug("Failed to remove buttons on retry message", exc_info=True)
+            message = None
             try:
                 message = await call_with_flood_retry(
-                    event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                    event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
                 )
+            except MessageNotModifiedError:
+                try:
+                    message = await call_with_flood_retry(event.get_message)
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    message = getattr(event, "message", None)
             except (RPCError, ConnectionError, TimeoutError, OSError):
-                logger.debug("Failed to send replacement status message on retry", exc_info=True)
-                message = getattr(event, "message", None) or event
+                logger.debug("Failed to edit failure message on retry", exc_info=True)
 
-        old_id = retry_ctx.retry_id
-        old_url = retry_ctx.url
-        old_platform = retry_ctx.platform
-        old_quality = retry_ctx.quality
-        old_user_id = retry_ctx.user_id
-        old_chat_id = retry_ctx.chat_id
+            if message is None:
+                try:
+                    await call_with_flood_retry(event.edit, buttons=None)
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    logger.debug("Failed to remove buttons on retry message", exc_info=True)
+                try:
+                    message = await call_with_flood_retry(
+                        event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                    )
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    logger.debug("Failed to send replacement status message on retry", exc_info=True)
+                    message = getattr(event, "message", None) or event
 
-        progress = make_progress(
-            message,
-            user_id=old_user_id,
-            chat_id=old_chat_id,
-            url=old_url,
-            platform=old_platform,
-            quality=old_quality,
-        )
+            old_id = retry_ctx.retry_id
+            old_url = retry_ctx.url
+            old_platform = retry_ctx.platform
+            old_quality = retry_ctx.quality
+            old_user_id = retry_ctx.user_id
+            old_chat_id = retry_ctx.chat_id
+
+            progress = make_progress(
+                message,
+                user_id=old_user_id,
+                chat_id=old_chat_id,
+                url=old_url,
+                platform=old_platform,
+                quality=old_quality,
+            )
+        except Exception:
+            # Anything failing before the download itself starts (message
+            # edit/respond, progress setup) must not leave is_running stuck:
+            # with no _execute_download call, nothing will ever reach the
+            # finally below to clear it, and the button would report "already
+            # running" for up to the store's TTL. The retry context itself is
+            # kept (not removed) so the same button works on a second click.
+            logger.exception("Early failure in retry handler before download started for retry_id=%s", retry_id)
+            retry_ctx.is_running = False
+            return
 
         try:
             await _execute_download(

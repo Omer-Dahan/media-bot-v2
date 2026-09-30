@@ -47,6 +47,16 @@ HOPELESS_TEXTS = (
     "הגבלה גיאוגרפית",
     "פרטי, נמחק",
     "הפלייליסט אינו זמין",
+    # Server-configuration failures (missing JS runtime, PO token, invalid
+    # cookies): only the operator can fix these, and retrying the exact same
+    # request just repeats the exact same failure - no retry button.
+    "חסר בשרת runtime של JavaScript",
+    "דורש PO token",
+    "קובץ ה-cookies אינו תקין",
+    # Requested quality/format unavailable for this video: retrying at the
+    # same quality will fail again - the message already points the user at
+    # the quality menu instead.
+    "הפורמט המבוקש אינו זמין",
 )
 
 

@@ -106,6 +106,7 @@ class TikTokEngine(BaseEngine):
                     dest_dir=dest_dir,
                     max_size=self._max_download_size,
                     cancel_token=cancel_token,
+                    progress=self._progress,
                 )
                 elapsed = time.monotonic() - start_time
                 self._health_tracker.record_success(provider.name, "tiktok", elapsed)
