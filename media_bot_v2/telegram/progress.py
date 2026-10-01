@@ -34,7 +34,7 @@ from telethon.errors import (
     RPCError,
     ServerError,
 )
-from telethon.tl.types import ReplyInlineMarkup
+from telethon.tl.types import ReplyInlineMarkup, ReplyKeyboardHide
 
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.flood_wait import (
@@ -47,21 +47,30 @@ from media_bot_v2.telegram.progress_format import format_progress
 
 logger = logging.getLogger(__name__)
 
-# An explicit empty inline markup - the only `buttons` value Telethon passes
-# through unchanged (see `build_reply_markup`) that actually clears a
-# previously attached inline keyboard on edit, rather than leaving it (the
-# `buttons` kwarg's default, `None`, means "unchanged", not "cleared").
-_CLEAR_BUTTONS = ReplyInlineMarkup([])
+# The sentinel used to clear a message's inline keyboard on edit. An empty
+# `ReplyInlineMarkup([])` looks like the obvious choice (it is the only
+# `buttons` value Telethon's `build_reply_markup` passes through unchanged
+# without re-typing it - see that function), but live Telegram rejects it
+# with `ReplyMarkupInvalidError`: an inline keyboard markup must carry at
+# least one row, empty or not (production incident 2026-09-30/10-01, where
+# this fired on essentially every successful download's final edit and was
+# only ever papered over by the plain-text safety net below).
+# `ReplyKeyboardHide` has no such "must be non-empty" constraint - it is a
+# real "there is no keyboard here" marker - and clears the message's inline
+# buttons the same way.
+_CLEAR_BUTTONS = ReplyKeyboardHide()
 
 
 def _buttons_for_new_message(buttons: Any) -> Any:
-    """`_CLEAR_BUTTONS` (or any other empty inline markup) is only valid on
-    `edit`, to clear a keyboard that already exists on that message -
-    Telegram rejects it outright (`ReplyMarkupInvalidError`) as the
-    `reply_markup` of a brand-new message via `respond`/`send_message`.
-    Every call site that falls back to sending a *new* message must run its
-    `buttons` through this first; call sites that `edit` the existing
-    message keep passing `buttons` through unchanged."""
+    """`_CLEAR_BUTTONS` is only valid on `edit`, to clear a keyboard that
+    already exists on that message - Telegram rejects it outright
+    (`ReplyMarkupInvalidError`) as the `reply_markup` of a brand-new message
+    via `respond`/`send_message`. Every call site that falls back to sending
+    a *new* message must run its `buttons` through this first; call sites
+    that `edit` the existing message keep passing `buttons` through
+    unchanged."""
+    if isinstance(buttons, ReplyKeyboardHide):
+        return None
     if isinstance(buttons, ReplyInlineMarkup) and not buttons.rows:
         return None
     return buttons

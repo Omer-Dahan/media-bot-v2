@@ -133,7 +133,7 @@ def test_provider_settings_defaults(monkeypatch):
     assert settings.youtube_providers == "ytmp3,cobalt"
     assert settings.disabled_providers == ""
     assert settings.cobalt_url is None
-    assert settings.ytmp3_api_key == "9b0ed5dab31616027ad7154140b0272d"
+    assert settings.ytmp3_api_key is None
     assert settings.provider_timeout == 15.0
     assert settings.provider_failure_threshold == 3
     assert settings.provider_cooldown_seconds == 300

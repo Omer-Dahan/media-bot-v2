@@ -33,6 +33,7 @@ from media_bot_v2.engines.ytdlp_support import (
     too_large_error,
 )
 from media_bot_v2.executor import run_in_thread
+from media_bot_v2.providers.base import mask_secrets
 from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
@@ -123,14 +124,19 @@ class TikTokEngine(BaseEngine):
                 raise
             except Exception as exc:  # noqa: BLE001 - any provider failure must fall through to next candidate
                 elapsed = time.monotonic() - start_time
+                # Provider errors routinely embed the full request URL
+                # (`requests` puts it straight into connection/HTTP exception
+                # messages) - mask any query-string secret before this
+                # reaches a log line or the provider_health.last_error column.
+                safe_exc_text = mask_secrets(str(exc))
                 logger.warning(
                     "TikTok provider %s failed for %s (took %.2fs): %s",
                     provider.name,
                     url,
                     elapsed,
-                    exc,
+                    safe_exc_text,
                 )
-                self._health_tracker.record_failure(provider.name, "tiktok", str(exc))
+                self._health_tracker.record_failure(provider.name, "tiktok", safe_exc_text)
                 tracker.record(provider.name, summarize_provider_failure(exc))
 
         if cancel_token is not None and cancel_token.is_set():

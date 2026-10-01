@@ -170,7 +170,7 @@ async def test_ytmp3_provider_fetch_runs_on_the_dedicated_pool():
         return _mock_response({"error": 0, "downloadURL": "https://x/video.mp4", "title": "t"})
 
     with patch("media_bot_v2.providers.ytmp3.requests.get", side_effect=fake_get):
-        await YTmp3Provider().fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
+        await YTmp3Provider(api_key="test-key").fetch("https://www.youtube.com/watch?v=dQw4w9WgXcQ")
 
     assert names and all(n.startswith("media-bot-worker") for n in names)
 

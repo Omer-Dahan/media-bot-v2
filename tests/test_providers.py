@@ -251,7 +251,7 @@ async def test_ytmp3_four_step_conversion_flow():
 
 
 async def test_ytmp3_refuses_copyright_commercial_music():
-    provider = YTmp3Provider()
+    provider = YTmp3Provider(api_key="test_api_key")
 
     auth_resp = MagicMock()
     auth_resp.json.return_value = {"error": 0, "key": "bearer_token_abc"}

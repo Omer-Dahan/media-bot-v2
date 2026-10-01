@@ -129,10 +129,12 @@ class Settings(BaseSettings):
         validation_alias="DISABLED_PROVIDERS",
     )
     cobalt_url: str | None = Field(default=None, validation_alias="COBALT_URL")
-    ytmp3_api_key: str = Field(
-        default="9b0ed5dab31616027ad7154140b0272d",
-        validation_alias="YTMP3_API_KEY",
-    )
+    # No default: this key belongs to the ytmp3.gl/gammacloud.net service,
+    # not to this codebase - a committed fallback here is a leaked secret the
+    # moment the repo is public. Unset means the provider is skipped
+    # entirely (see build_provider_registry below), not attempted with an
+    # empty key.
+    ytmp3_api_key: str | None = Field(default=None, validation_alias="YTMP3_API_KEY")
     provider_timeout: float = Field(default=15.0, validation_alias="PROVIDER_TIMEOUT")
     provider_failure_threshold: int = Field(default=3, validation_alias="PROVIDER_FAILURE_THRESHOLD")
     provider_cooldown_seconds: int = Field(default=300, validation_alias="PROVIDER_COOLDOWN_SECONDS")

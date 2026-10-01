@@ -18,7 +18,7 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from telethon.errors import EntityBoundsInvalidError, ReplyMarkupInvalidError
 from telethon.extensions import markdown
-from telethon.tl.types import ReplyInlineMarkup
+from telethon.tl.types import ReplyInlineMarkup, ReplyKeyboardHide
 
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress import _CLEAR_BUTTONS, MessageProgressReporter
@@ -154,6 +154,41 @@ async def test_reply_markup_invalid_on_edit_retries_as_plain_text():
     assert message.edit.call_count == 2
     # The retry drops the offending buttons entirely, not just the text formatting.
     assert "buttons" not in message.edit.call_args_list[1].kwargs
+
+
+def test_clear_buttons_sentinel_is_not_an_empty_inline_markup():
+    """M11.15 root-cause fix: an empty ReplyInlineMarkup([]) looks like the
+    obvious way to clear a message's keyboard on edit (it's the only
+    `buttons` value Telethon's build_reply_markup passes through unchanged),
+    but live Telegram rejects it with ReplyMarkupInvalidError - an inline
+    keyboard markup must carry at least one row. This fired on essentially
+    every successful download's final edit in production (2026-09-30/10-01)
+    and was only ever papered over by the plain-text safety net below, never
+    actually fixed. ReplyKeyboardHide has no "must be non-empty" shape."""
+    assert isinstance(_CLEAR_BUTTONS, ReplyKeyboardHide)
+    assert not isinstance(_CLEAR_BUTTONS, ReplyInlineMarkup)
+
+
+async def test_clear_buttons_sentinel_is_accepted_on_the_first_try():
+    """Proves the root cause is actually fixed, not just safety-netted: a
+    fake `edit` that reproduces live Telegram's real validation (rejecting
+    an empty ReplyInlineMarkup, accepting everything else) must succeed on
+    the very first call for a terminal update with clear_buttons_on_terminal
+    - no ReplyMarkupInvalidError, no plain-text retry needed."""
+
+    def fake_edit(text, buttons=None, **kwargs):
+        if isinstance(buttons, ReplyInlineMarkup) and not buttons.rows:
+            raise ReplyMarkupInvalidError(None)
+
+    message = MagicMock()
+    message.edit = AsyncMock(side_effect=fake_edit)
+    reporter = MessageProgressReporter(message, clear_buttons_on_terminal=True)
+
+    await reporter.update(texts.DOWNLOAD_DONE)
+
+    assert reporter.terminal_delivered
+    assert message.edit.call_count == 1
+    assert isinstance(message.edit.call_args.kwargs["buttons"], ReplyKeyboardHide)
 
 
 async def test_content_error_does_not_permanently_disable_non_terminal_updates():

@@ -398,6 +398,11 @@ async def test_video_download_pipeline_behavior_unchanged(tmp_path, credits_serv
 
     with (
         patch("media_bot_v2.pipeline.ensure_streamable", side_effect=lambda p, **kw: p),
+        # The real file is dummy bytes, not a real MP4 - ffprobe would fail
+        # on it, so both the kind-detecting pre-probe and the post-conversion
+        # probe_with_thumb are stubbed, exactly as a real "video bytes" file
+        # would be read by ffprobe in production.
+        patch("media_bot_v2.pipeline.probe", return_value=MediaInfo(kind=KIND_VIDEO)),
         patch(
             "media_bot_v2.pipeline.probe_with_thumb",
             return_value=MediaInfo(kind=KIND_VIDEO, duration=120, width=1280, height=720),
@@ -448,6 +453,10 @@ async def test_audio_source_with_video_selection_behaves_as_before(tmp_path, cre
 
     with (
         patch("media_bot_v2.pipeline.ensure_streamable", side_effect=lambda p, **kw: p),
+        # Real file is garbage bytes, not a real MP3 - ffprobe would fail on
+        # it, so both the kind-detecting pre-probe and probe_with_thumb are
+        # stubbed to what a real "audio, no video stream" file reads as.
+        patch("media_bot_v2.pipeline.probe", return_value=MediaInfo(kind=KIND_AUDIO)),
         patch(
             "media_bot_v2.pipeline.probe_with_thumb",
             return_value=MediaInfo(kind=KIND_AUDIO, duration=60, width=0, height=0),

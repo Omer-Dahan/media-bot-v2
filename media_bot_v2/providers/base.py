@@ -6,9 +6,33 @@ files to disk. The pipeline then streams the resulting direct URL(s) to disk.
 
 from __future__ import annotations
 
+import re
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
+
+# Query-string secrets (api_key=..., token=..., ...) and bearer tokens that
+# show up verbatim inside provider exception messages - `requests` embeds the
+# full request URL in connection/HTTP errors, so "ytmp3 auth request failed:
+# <requests exception>" leaked the ytmp3 API key into logs and the
+# provider_health.last_error column at WARNING level (production incident
+# 2026-10-01). Anything matching one of these keys gets masked before the
+# text reaches a log line or is persisted anywhere.
+_SENSITIVE_QUERY_PARAM_RE = re.compile(
+    r"(?i)\b(api[_-]?key|key|token|signature|sig|password|auth)=([^&\s\"'<>]+)"
+)
+_BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+")
+
+
+def mask_secrets(text: str) -> str:
+    """Redact query-string secrets and bearer tokens from free-form text
+    (an exception message, a log line, ...) before it is logged or stored.
+    Safe to call on text with nothing to mask - returns it unchanged."""
+    if not text:
+        return text
+    masked = _SENSITIVE_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", text)
+    masked = _BEARER_TOKEN_RE.sub("Bearer ***", masked)
+    return masked
 
 
 class ProviderError(Exception):

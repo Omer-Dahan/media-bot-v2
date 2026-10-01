@@ -160,6 +160,43 @@ def probe_with_thumb(path: Path) -> MediaInfo:
     return info
 
 
+def correct_extension(path: Path) -> Path:
+    """Rename `path` so its suffix matches what `filetype` actually finds in
+    its bytes, keeping the original stem. A direct-link download keeps
+    whatever name the URL happened to have (`picture.ashx`, `file.php`, ...),
+    which neither Telegram nor the user can tell apart from a real document -
+    this is what gives the caption/thumbnail/preview a chance to work.
+    No-op (returns `path` unchanged) if detection fails, the suffix already
+    matches, or renaming onto an existing path would collide."""
+    guessed = filetype.guess(str(path))
+    if guessed is None:
+        return path
+    real_suffix = f".{guessed.extension}"
+    if path.suffix.lower() == real_suffix.lower():
+        return path
+    target = path.with_suffix(real_suffix)
+    if target.exists():
+        return path
+    try:
+        path.rename(target)
+    except OSError:
+        return path
+    return target
+
+
+def is_animated_webp(path: Path) -> bool:
+    """True for a WebP carrying an `ANIM` chunk (the container-level marker
+    for animation; Telegram cannot show these as a static photo). Only the
+    first few KB are read - a RIFF/WEBP file packs its `VP8X`/`ANIM` chunks
+    right after the 12-byte header, long before any frame payload."""
+    try:
+        with path.open("rb") as fh:
+            head = fh.read(4096)
+    except OSError:
+        return False
+    return head[:4] == b"RIFF" and head[8:12] == b"WEBP" and b"ANIM" in head
+
+
 def _quarter_turned(video: dict) -> bool:
     rotations = [(video.get("tags") or {}).get("rotate")]
     rotations += [side.get("rotation") for side in video.get("side_data_list") or []]

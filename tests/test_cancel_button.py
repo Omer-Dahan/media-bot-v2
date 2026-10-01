@@ -16,6 +16,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from telethon import TelegramClient, events
 from telethon.sessions import MemorySession
+from telethon.tl.types import ReplyKeyboardHide
 
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base
@@ -161,7 +162,11 @@ async def test_owner_cancel_stops_the_task_and_leaves_no_background_work():
     assert click.answer_calls == [(texts.CANCEL_TOAST, False)]
     assert message.edits[-1] == texts.REQUEST_CANCELLED
     # ...with the cancel button cleared, not left dangling on a dead request.
-    assert message.edit_kwargs[-1]["buttons"].rows == []
+    # (An empty ReplyInlineMarkup([]) looks like the obvious "cleared" shape
+    # but is rejected by live Telegram with ReplyMarkupInvalidError - see
+    # telegram/progress.py's _CLEAR_BUTTONS; ReplyKeyboardHide is the sentinel
+    # that actually works.)
+    assert isinstance(message.edit_kwargs[-1]["buttons"], ReplyKeyboardHide)
 
     # ...and actually reaches the pipeline's own task.
     await asyncio.wait_for(handler_task, timeout=5)

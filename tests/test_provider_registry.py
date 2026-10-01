@@ -4,6 +4,7 @@ from media_bot_v2.config import Settings
 from media_bot_v2.providers.base import BaseProvider, ProviderResult
 from media_bot_v2.providers.cobalt import CobaltProvider
 from media_bot_v2.providers.registry import ProviderRegistry, build_provider_registry
+from media_bot_v2.providers.ytmp3 import YTmp3Provider
 
 
 class _DummyProvider(BaseProvider):
@@ -66,6 +67,33 @@ def test_registry_includes_configured_cobalt():
     assert [p.name for p in providers] == ["ytmp3", "cobalt"]
 
 
+def test_registry_skips_unconfigured_ytmp3():
+    """No API key -> ytmp3 never enters the candidate list at all (no
+    request, no failure, no cooldown, no log line for a provider that was
+    never going to work)."""
+    registry = ProviderRegistry(youtube_order=["ytmp3", "cobalt"])
+    ytmp3_unconfigured = YTmp3Provider(api_key=None)
+    cobalt_configured = CobaltProvider(instance_url="https://cobalt.internal")
+
+    registry.register(ytmp3_unconfigured)
+    registry.register(cobalt_configured)
+
+    providers = registry.get_providers_for_platform("youtube")
+    assert [p.name for p in providers] == ["cobalt"]
+
+
+def test_registry_includes_configured_ytmp3():
+    registry = ProviderRegistry(youtube_order=["ytmp3", "cobalt"])
+    ytmp3_configured = YTmp3Provider(api_key="real-key")
+    cobalt_configured = CobaltProvider(instance_url="https://cobalt.internal")
+
+    registry.register(ytmp3_configured)
+    registry.register(cobalt_configured)
+
+    providers = registry.get_providers_for_platform("youtube")
+    assert [p.name for p in providers] == ["ytmp3", "cobalt"]
+
+
 def test_build_provider_registry_from_settings(monkeypatch):
     monkeypatch.setenv("APP_ID", "1")
     monkeypatch.setenv("APP_HASH", "h")
@@ -73,6 +101,7 @@ def test_build_provider_registry_from_settings(monkeypatch):
     monkeypatch.setenv("TIKTOK_PROVIDERS", "musicaldown,tikwm")
     monkeypatch.setenv("DISABLED_PROVIDERS", "tikdownloader")
     monkeypatch.setenv("COBALT_URL", "https://cobalt.example.com")
+    monkeypatch.setenv("YTMP3_API_KEY", "test-key")
 
     settings = Settings(_env_file=None)
     registry = build_provider_registry(settings)
@@ -82,3 +111,21 @@ def test_build_provider_registry_from_settings(monkeypatch):
 
     youtube_providers = registry.get_providers_for_platform("youtube")
     assert [p.name for p in youtube_providers] == ["ytmp3", "cobalt"]
+
+
+def test_build_provider_registry_skips_ytmp3_without_api_key(monkeypatch):
+    """The config-driven wiring, not just the registry primitive: no
+    YTMP3_API_KEY in the environment means ytmp3 is built but filtered out of
+    every platform's candidate list."""
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    monkeypatch.setenv("COBALT_URL", "https://cobalt.example.com")
+    monkeypatch.delenv("YTMP3_API_KEY", raising=False)
+
+    settings = Settings(_env_file=None)
+    assert settings.ytmp3_api_key is None
+    registry = build_provider_registry(settings)
+
+    youtube_providers = registry.get_providers_for_platform("youtube")
+    assert [p.name for p in youtube_providers] == ["cobalt"]

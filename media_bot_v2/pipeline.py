@@ -79,12 +79,20 @@ from media_bot_v2.upload import splitter
 from media_bot_v2.upload.audio_converter import convert_to_mp3, resolve_cover_image
 from media_bot_v2.upload.media_probe import (
     KIND_AUDIO,
+    KIND_OTHER,
+    KIND_PHOTO,
     KIND_VIDEO,
     MediaInfo,
+    correct_extension,
+    is_animated_webp,
     probe,
     probe_with_thumb,
 )
-from media_bot_v2.upload.streamable import DEFAULT_FIX_TIMEOUT_SECONDS, ensure_streamable
+from media_bot_v2.upload.streamable import (
+    DEFAULT_FIX_TIMEOUT_SECONDS,
+    convert_animated_webp,
+    ensure_streamable,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -153,6 +161,11 @@ class _FileGroup:
 
     info: MediaInfo  # probed on the whole file, before splitting
     parts: list[Path]
+    # Set when this specific file must go out as a document regardless of
+    # the user's "send as" setting - an animated WebP whose MP4 conversion
+    # could not be made (or wasn't attempted) has no playable/photo form at
+    # all, so `delivery.as_document` alone is not enough to decide this.
+    force_document: bool = False
 
 
 class DownloadPipeline:
@@ -256,6 +269,7 @@ class DownloadPipeline:
             groups: list[_FileGroup] = []
             for raw_path in result.file_paths:
                 source = Path(raw_path)
+                force_document = False
                 if is_audio_requested:
                     cover_path = await run_in_thread(
                         resolve_cover_image,
@@ -283,19 +297,48 @@ class DownloadPipeline:
                             album=getattr(result, "album", None) or info.album,
                         )
                 else:
-                    if not delivery.as_document:
-                        # "Send as file" delivers the bytes untouched; everything
-                        # sent as playable video must be H.264/AAC MP4 with the
-                        # moov up front or clients fail with IO_UNSPECIFIED. This
-                        # runs OUTSIDE the upload budget with its own smaller
-                        # one: a slow conversion is killed and the original is
-                        # sent, and it never eats the time the upload needs.
-                        source = await self._make_streamable(source)
-                    async with self._upload_budget() as cm:
-                        up_cm = cm
-                        info = await run_in_thread(probe_with_thumb, source)
+                    # Many direct-link URLs carry a meaningless path segment
+                    # (picture.ashx, file.php, ...) as their filename; give
+                    # the file the extension its actual bytes call for before
+                    # probing anything, so both the kind check below and the
+                    # final delivered filename reflect what it really is.
+                    source = await run_in_thread(correct_extension, source)
+                    info = await run_in_thread(probe, source)
+                    if info.kind == KIND_VIDEO:
+                        if not delivery.as_document:
+                            # "Send as file" delivers the bytes untouched;
+                            # everything sent as playable video must be
+                            # H.264/AAC MP4 with the moov up front or clients
+                            # fail with IO_UNSPECIFIED. This runs OUTSIDE the
+                            # upload budget with its own smaller one: a slow
+                            # conversion is killed and the original is sent,
+                            # and it never eats the time the upload needs.
+                            source = await self._make_streamable(source)
+                        async with self._upload_budget() as cm:
+                            up_cm = cm
+                            info = await run_in_thread(probe_with_thumb, source)
+                    elif info.kind == KIND_PHOTO and is_animated_webp(source):
+                        # An animated WebP cannot be sent as a Telegram photo
+                        # (photos never animate) - try to turn it into a short
+                        # streamable MP4 (outside the upload budget, same as
+                        # _make_streamable above); if that isn't possible
+                        # (user asked for raw files, or this ffmpeg build
+                        # cannot decode ANIM/ANMF chunks at all), it goes out
+                        # as a plain document instead, keeping its real
+                        # .webp extension.
+                        source, info = await self._handle_animated_webp(
+                            source, info, as_document=delivery.as_document
+                        )
+                        force_document = info.kind != KIND_VIDEO
+                        async with self._upload_budget() as cm:
+                            up_cm = cm
+                            if info.kind == KIND_VIDEO:
+                                info = await run_in_thread(probe_with_thumb, source)
+                    else:
+                        async with self._upload_budget() as cm:
+                            up_cm = cm
                 parts = await run_in_thread(splitter.split_file, source)
-                groups.append(_FileGroup(info=info, parts=parts))
+                groups.append(_FileGroup(info=info, parts=parts, force_document=force_document))
 
             # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
             await _update_progress(progress, texts.UPLOADING, is_terminal=False)
@@ -333,7 +376,7 @@ class DownloadPipeline:
                             part,
                             caption=caption,
                             media=send_info,
-                            as_document=delivery.as_document or not playable,
+                            as_document=delivery.as_document or not playable or group.force_document,
                             title=result.title,
                             performer=getattr(result, "artist", None) or send_info.performer,
                             progress=upload_progress,
@@ -559,9 +602,29 @@ class DownloadPipeline:
         original file is returned - never an error for the user."""
         try:
             return await run_in_thread(ensure_streamable, source, timeout=self._fix_timeout())
-        except Exception:
-            logger.warning("Streamable conversion failed for %s, sending it as-is", source, exc_info=True)
+        except Exception as exc:
+            logger.warning("Streamable conversion failed for %s (%s), sending it as-is", source.name, exc)
+            logger.debug("Streamable conversion failure for %s", source, exc_info=True)
             return source
+
+    async def _handle_animated_webp(
+        self, source: Path, info: MediaInfo, *, as_document: bool
+    ) -> tuple[Path, MediaInfo]:
+        """Try to transcode an animated WebP to MP4; on any failure (or when
+        the user asked for raw files), keep the original bytes/extension and
+        mark it `KIND_OTHER` so the uploader sends it as a document instead
+        of attempting Telegram's (animation-less) photo upload."""
+        if as_document:
+            return source, replace(info, kind=KIND_OTHER)
+        try:
+            converted = await run_in_thread(convert_animated_webp, source, timeout=self._fix_timeout())
+        except Exception as exc:
+            logger.warning("Animated WebP conversion failed for %s (%s), sending it as a document", source.name, exc)
+            logger.debug("Animated WebP conversion failure for %s", source, exc_info=True)
+            return source, replace(info, kind=KIND_OTHER)
+        if converted is None:
+            return source, replace(info, kind=KIND_OTHER)
+        return converted, replace(info, kind=KIND_VIDEO)
 
     def _upload_budget(self):
         if self._upload_timeout and self._upload_timeout > 0:

@@ -58,8 +58,11 @@ class ProviderRegistry:
             provider = self._providers.get(name)
             if not provider:
                 continue
-            # If cobalt is registered but instance_url is not configured, skip it
-            if isinstance(provider, CobaltProvider) and not provider.is_configured:
+            # Skip providers that are registered but not configured (missing
+            # instance URL / API key) entirely - no request, no failure, no
+            # cooldown entry, no log line for a provider that was never going
+            # to work.
+            if isinstance(provider, (CobaltProvider, YTmp3Provider)) and not provider.is_configured:
                 continue
             result.append(provider)
         return result

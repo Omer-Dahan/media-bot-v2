@@ -9,11 +9,15 @@ import requests
 
 from media_bot_v2.engines.youtube import extract_video_id, matches_youtube_url
 from media_bot_v2.executor import run_in_thread
-from media_bot_v2.providers.base import BaseProvider, ProviderFetchError, ProviderResult
+from media_bot_v2.providers.base import (
+    BaseProvider,
+    ProviderFetchError,
+    ProviderResult,
+    ProviderUnavailableError,
+)
 
 logger = logging.getLogger(__name__)
 
-DEFAULT_API_KEY = "9b0ed5dab31616027ad7154140b0272d"
 REFERER_HEADER = "https://ytmp3.gl/"
 
 
@@ -26,11 +30,15 @@ class YTmp3Provider(BaseProvider):
     def __init__(
         self,
         *,
-        api_key: str = DEFAULT_API_KEY,
+        api_key: str | None = None,
         timeout: float = 15.0,
     ) -> None:
         super().__init__(timeout=timeout)
         self.api_key = api_key
+
+    @property
+    def is_configured(self) -> bool:
+        return bool(self.api_key)
 
     def matches(self, url: str) -> bool:
         return matches_youtube_url(url)
@@ -39,6 +47,9 @@ class YTmp3Provider(BaseProvider):
         return await run_in_thread(self._fetch_sync, url)
 
     def _fetch_sync(self, url: str) -> ProviderResult:
+        if not self.api_key:
+            raise ProviderUnavailableError("ytmp3 API key is not configured")
+
         video_id = extract_video_id(url)
         if not video_id:
             raise ProviderFetchError(f"Could not extract valid YouTube video ID from {url}")

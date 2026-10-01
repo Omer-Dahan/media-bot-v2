@@ -31,6 +31,8 @@ import uuid
 from dataclasses import dataclass
 from pathlib import Path
 
+import filetype
+
 logger = logging.getLogger(__name__)
 
 _PROBE_TIMEOUT_SECONDS = 60
@@ -142,7 +144,14 @@ def build_fix_command(source: Path, target: Path, profile: StreamProfile) -> lis
     if profile.video_ok:
         cmd += ["-c:v", "copy"]
     else:
-        cmd += ["-c:v", "libx264", "-preset", "veryfast", "-crf", "23", "-pix_fmt", "yuv420p"]
+        # libx264 refuses odd width/height outright ("width not divisible by
+        # 2"); this scale filter rounds both dimensions down to even without
+        # visibly cropping anything, so a 343x274 source re-encodes instead
+        # of failing and falling back to a non-streamable file.
+        cmd += [
+            "-c:v", "libx264", "-preset", "veryfast", "-crf", "23",
+            "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2", "-pix_fmt", "yuv420p",
+        ]  # fmt: skip
     if profile.audio_ok:
         cmd += ["-c:a", "copy"]
     else:
@@ -153,7 +162,20 @@ def build_fix_command(source: Path, target: Path, profile: StreamProfile) -> lis
 
 def ensure_streamable(path: Path, *, timeout: float = DEFAULT_FIX_TIMEOUT_SECONDS) -> Path:
     """Return a path to a streamable MP4 version of `path` (which may be `path`
-    itself). Never raises: on any failure the original path comes back."""
+    itself). Never raises: on any failure the original path comes back.
+
+    Callers are expected to route images through media_probe's KIND_PHOTO
+    check and never reach this function with one - this is a backstop, not
+    the primary guard. ffprobe reports a single-frame WebP/PNG/JPEG as a
+    "video" stream too (codec_name=webp/png/mjpeg, no duration), which used
+    to send every photo through a doomed H.264 re-encode attempt (production
+    incident 2026-10-01: a 343x274 WebP failed with "width not divisible by
+    2" and was then sent as a raw, extension-less file with no preview)."""
+    guessed = filetype.guess(str(path))
+    if guessed is not None and guessed.mime.startswith("image/"):
+        logger.debug("%s is an image (%s), not a video - skipping streamable conversion", path.name, guessed.mime)
+        return path
+
     profile = inspect_streams(path)
     if profile is None or profile.video_codec is None or profile.streamable:
         return path
@@ -172,8 +194,14 @@ def ensure_streamable(path: Path, *, timeout: float = DEFAULT_FIX_TIMEOUT_SECOND
     )
     try:
         subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
-    except (subprocess.SubprocessError, OSError):
-        logger.warning("Could not make %s streamable, sending it as-is", path, exc_info=True)
+    except subprocess.CalledProcessError as exc:
+        logger.warning("Could not make %s streamable (%s), sending it as-is", path.name, _short_ffmpeg_error(exc))
+        logger.debug("ffmpeg conversion failure for %s", path, exc_info=True)
+        target.unlink(missing_ok=True)
+        return path
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning("Could not make %s streamable (%s), sending it as-is", path.name, exc)
+        logger.debug("ffmpeg conversion failure for %s", path, exc_info=True)
         target.unlink(missing_ok=True)
         return path
 
@@ -186,4 +214,62 @@ def ensure_streamable(path: Path, *, timeout: float = DEFAULT_FIX_TIMEOUT_SECOND
         logger.warning("Could not move %s into place", target, exc_info=True)
         target.unlink(missing_ok=True)
         return path
+    return final
+
+
+def _short_ffmpeg_error(exc: subprocess.CalledProcessError) -> str:
+    """The last non-empty line of ffmpeg's stderr - where libx264 and friends
+    put the actual reason ("width not divisible by 2 (343x274)"), instead of
+    a multi-megabyte wall of per-frame output or a Python traceback."""
+    stderr = (exc.stderr or b"").decode("utf-8", "replace").strip()
+    for line in reversed(stderr.splitlines()):
+        if line.strip():
+            return line.strip()
+    return f"ffmpeg exited with status {exc.returncode}"
+
+
+def convert_animated_webp(path: Path, *, timeout: float = DEFAULT_FIX_TIMEOUT_SECONDS) -> Path | None:
+    """Transcode an animated WebP into a short, streamable H.264 MP4, named
+    after `path`'s own stem (`clip.webp` -> `clip.mp4`) with `path` removed -
+    same in-place-replacement contract as `ensure_streamable`. Returns None
+    (never raises, and `path` is left untouched) if it cannot be done - some
+    ffmpeg builds' bundled WebP decoder does not support the ANIM/ANMF
+    chunks at all ("skipping unsupported chunk: ANIM"), in which case the
+    caller is expected to fall back to sending the original file as a
+    document."""
+    target = path.parent / f"{path.stem}.{uuid.uuid4().hex[:8]}.anim.mp4"
+    cmd = [
+        "ffmpeg", "-y", "-loglevel", "error", "-i", str(path),
+        "-c:v", "libx264", "-pix_fmt", "yuv420p",
+        "-vf", "scale=trunc(iw/2)*2:trunc(ih/2)*2",
+        "-movflags", "+faststart", "-f", "mp4", str(target),
+    ]  # fmt: skip
+    try:
+        subprocess.run(cmd, check=True, capture_output=True, timeout=timeout)
+    except subprocess.CalledProcessError as exc:
+        logger.warning(
+            "Could not convert animated WebP %s to MP4 (%s), sending it as a document",
+            path.name,
+            _short_ffmpeg_error(exc),
+        )
+        logger.debug("ffmpeg conversion failure for %s", path, exc_info=True)
+        target.unlink(missing_ok=True)
+        return None
+    except (subprocess.SubprocessError, OSError) as exc:
+        logger.warning(
+            "Could not convert animated WebP %s to MP4 (%s), sending it as a document", path.name, exc
+        )
+        logger.debug("ffmpeg conversion failure for %s", path, exc_info=True)
+        target.unlink(missing_ok=True)
+        return None
+
+    final = path.with_suffix(".mp4")
+    try:
+        os.replace(target, final)
+        if final != path:
+            path.unlink(missing_ok=True)
+    except OSError:
+        logger.warning("Could not move %s into place", target, exc_info=True)
+        target.unlink(missing_ok=True)
+        return None
     return final
