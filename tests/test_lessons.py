@@ -470,6 +470,7 @@ class _SlowStreamingSource:
         self.bytes_sent = 0
         self.closed = False
         self.exited = False
+        self.url = "https://example.com/big_file.bin"
         self._lock = threading.Lock()
 
     def iter_content(self, chunk_size: int | None = None):

@@ -71,6 +71,42 @@ class _Handler(http.server.BaseHTTPRequestHandler):
             self.end_headers()
             self.wfile.write(LARGE_CONTENT)
             return
+        if self.path == "/redirect":
+            # 302s to a path with a different name and no Content-Disposition -
+            # the saved filename must come from this final destination, not
+            # from "/redirect" itself.
+            self.send_response(302)
+            self.send_header("Location", "/final-destination.pdf")
+            self.end_headers()
+            return
+        if self.path == "/redirect-with-cd":
+            self.send_response(302)
+            self.send_header("Location", "/final-with-cd")
+            self.end_headers()
+            return
+        if self.path == "/final-with-cd":
+            self.send_response(200)
+            self.send_header("Content-Type", "application/octet-stream")
+            self.send_header("Content-Disposition", 'attachment; filename="override-name.bin"')
+            self.end_headers()
+            self.wfile.write(FILE_CONTENT)
+            return
+        if self.path == "/redirect-chain-1":
+            self.send_response(302)
+            self.send_header("Location", "/redirect-chain-2")
+            self.end_headers()
+            return
+        if self.path == "/redirect-chain-2":
+            self.send_response(302)
+            self.send_header("Location", "/final-destination.pdf")
+            self.end_headers()
+            return
+        if self.path == "/redirect-to-dir":
+            # Final URL's path ends in "/" - no filename to extract at all.
+            self.send_response(302)
+            self.send_header("Location", "/some-dir/")
+            self.end_headers()
+            return
         if self.path == "/slow":
             # Trickles the body out with a short sleep between chunks, giving
             # a test time to cancel mid-transfer instead of racing a fast
@@ -347,3 +383,54 @@ async def test_download_blocks_disallowed_scheme(tmp_path):
     engine = DirectEngine()
     with pytest.raises(UnsupportedUrlError):
         await engine.download("file:///etc/passwd", dest_dir=tmp_path)
+
+
+# --- Filename derived from the final (post-redirect) URL, not the original -
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_redirect_without_content_disposition_uses_final_url_filename(
+    local_server, tmp_path
+):
+    """A redirect to a URL with no Content-Disposition must name the file
+    after the final destination's path, not the originally-requested URL."""
+    engine = DirectEngine()
+    result = await engine.download(f"{local_server}/redirect", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    assert Path(result.file_paths[0]).name == "final-destination.pdf"
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_redirect_with_content_disposition_prefers_header(local_server, tmp_path):
+    """Content-Disposition on the final response still wins over the final
+    URL's own path."""
+    engine = DirectEngine()
+    result = await engine.download(f"{local_server}/redirect-with-cd", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    assert Path(result.file_paths[0]).name == "override-name.bin"
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_redirect_chain_uses_final_destination_filename(local_server, tmp_path):
+    """Several hops deep, the name must still come from the very last
+    destination, not an intermediate hop or the original URL."""
+    engine = DirectEngine()
+    result = await engine.download(f"{local_server}/redirect-chain-1", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    assert Path(result.file_paths[0]).name == "final-destination.pdf"
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_redirect_to_nameless_final_url_falls_back_to_default(local_server, tmp_path):
+    """The final URL's path ends in "/" - there's no filename to extract -
+    must fall back to the default name, not raise or produce an empty one."""
+    engine = DirectEngine()
+    result = await engine.download(f"{local_server}/redirect-to-dir", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    name = Path(result.file_paths[0]).name
+    assert name  # non-empty
+    assert Path(name).stem == "download"

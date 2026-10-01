@@ -115,6 +115,9 @@ This document details the eight critical failure patterns identified in the prod
 - Fix: pass `buttons=None` explicitly (never omitted) at every edit site that must clear a keyboard - the normal terminal edit, the deferred-retry edit, the last-ditch failure edit, and the content-error (`EntityBoundsInvalidError`/`ReplyMarkupInvalidError`) safety-net retry alike. `media_bot_v2/telegram/progress.py`'s `MessageProgressReporter` threads a `clear_buttons` boolean through all of them instead of a sentinel object, specifically so non-button flows keep their exact `edit(text)` call (no `buttons` kwarg at all) for compatibility with minimal test fakes.
 - A test asserting only that the code's own sentinel object doesn't crash a fake that rejects that exact object is tautological - it can never fail. `tests/test_m11_9.py::test_terminal_clear_actually_removes_the_inline_keyboard` instead drives a fake `edit` that reproduces Telethon's real kwarg-presence rule and tracks the resulting `reply_markup` state, so it fails if the clear branch ever regresses to a bare `edit(text)`.
 
+### 11.18 Filename for a redirected direct link (M11.18)
+- When a direct link has no `Content-Disposition`, the saved filename must be derived from the final, post-redirect URL (`response.url`) - not the originally-requested URL, which can point at a path with an unrelated name.
+
 ## Known limitations (deliberately not fixed)
 Cosmetic only. None of them damages the delivered file or affects billing (charging is by volume and only for what was delivered). Do not open new rounds for them.
 

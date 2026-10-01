@@ -166,21 +166,24 @@ def _filename_from_url(url: str) -> str:
     return safe_basename_from_url_path(urlparse(url).path, default_stem="download", default_ext="")
 
 
-def _filename_from_response(url: str, response) -> str:
+def _filename_from_response(response) -> str:
     """The name to save this download under: the server's own suggested
     filename (`Content-Disposition`) if it offered one, else one derived
-    from the URL's path. Either way, a missing extension is filled in from
-    `Content-Type` as a stopgap - the authoritative fix for a missing or
-    misleading extension is `media_probe.correct_extension`, which inspects
-    the actual bytes once the file is fully on disk; this only keeps a
-    server that sends no extension at all (and whose bytes `filetype` can't
-    identify either, e.g. an ISO image or MSI installer) from producing a
-    bare, extension-less filename."""
+    from the final (post-redirect) URL's path - `response.url`, not the
+    URL the caller originally requested, since a redirect can land on a
+    server that names the file very differently from the original link.
+    Either way, a missing extension is filled in from `Content-Type` as a
+    stopgap - the authoritative fix for a missing or misleading extension is
+    `media_probe.correct_extension`, which inspects the actual bytes once
+    the file is fully on disk; this only keeps a server that sends no
+    extension at all (and whose bytes `filetype` can't identify either,
+    e.g. an ISO image or MSI installer) from producing a bare,
+    extension-less filename."""
     cd_name = _parse_content_disposition_filename(response.headers.get("Content-Disposition"))
     if cd_name:
         name = safe_basename_from_url_path(cd_name, default_stem="download", default_ext="")
     else:
-        name = _filename_from_url(url)
+        name = _filename_from_url(response.url)
     if not name:
         name = "download"
     if not Path(name).suffix:
@@ -229,7 +232,7 @@ def _stream_to_file(
         # itself) - the HEAD preflight above is a best-effort optimization
         # only, never the source of the filename.
         dest_path = within_directory(
-            dest_dir, _filename_from_response(url, response), fallback="download.bin"
+            dest_dir, _filename_from_response(response), fallback="download.bin"
         )
         if cancel_token is not None:
             if cancel_token.is_set():
