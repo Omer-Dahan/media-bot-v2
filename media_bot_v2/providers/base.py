@@ -11,23 +11,46 @@ from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from typing import Any
 
-# Query-string secrets (api_key=..., token=..., ...) and bearer tokens that
-# show up verbatim inside provider exception messages - `requests` embeds the
-# full request URL in connection/HTTP errors, so "ytmp3 auth request failed:
-# <requests exception>" leaked the ytmp3 API key into logs and the
+# Query-string secrets (api_key=..., token=..., ...), JSON/text body secrets
+# ("key": "value"), and bearer tokens that show up verbatim inside provider
+# exception messages - `requests` embeds the full request URL in
+# connection/HTTP errors, so "ytmp3 auth request failed: <requests
+# exception>" leaked the ytmp3 API key into logs and the
 # provider_health.last_error column at WARNING level (production incident
 # 2026-10-01). Anything matching one of these keys gets masked before the
 # text reaches a log line or is persisted anywhere.
+#
+# The key must be preceded by a non-identifier character, the start of the
+# string, or a 2-digit percent-escape (`%3F` etc.) - not a bare `\b` - so a
+# fully percent-encoded nested query string (`...%3Fapi_key%3Dsecret123`,
+# where even the `?` got encoded and no literal separator character exists
+# between the escape and the key) still counts as a boundary. This is also
+# what keeps "tokenizer"/"keyboard"/a "turkey=5"-style innocent param from
+# being touched: the separator must follow the key immediately (after
+# optional quote/whitespace), so "izer"/"board" right after the key simply
+# never matches that separator.
+_SENSITIVE_KEYS = (
+    r"x[-_]api[-_]key|api[-_]?key|apikey|"
+    r"access[-_]?token|refresh[-_]?token|"
+    r"authorization|auth|"
+    r"password|passwd|pwd|"
+    r"signature|sig|secret|token|key"
+)
 _SENSITIVE_QUERY_PARAM_RE = re.compile(
-    r"(?i)\b(api[_-]?key|key|token|signature|sig|password|auth)=([^&\s\"'<>]+)"
+    r"(?i)(?:^|(?<=[^A-Za-z0-9_])|(?<=%[0-9A-Fa-f]{2}))"
+    r"(" + _SENSITIVE_KEYS + r")"
+    r"[\"']?\s*(?:=|%3[dD]|:)\s*"
+    r"(?!bearer\b)"  # leave "Authorization: Bearer <token>" to _BEARER_TOKEN_RE below
+    r"(\"[^\"]*\"|'[^']*'|[^&\s\"'<>,}]+)"
 )
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+")
 
 
 def mask_secrets(text: str) -> str:
-    """Redact query-string secrets and bearer tokens from free-form text
-    (an exception message, a log line, ...) before it is logged or stored.
-    Safe to call on text with nothing to mask - returns it unchanged."""
+    """Redact query-string secrets, JSON/text-body secrets, and bearer tokens
+    from free-form text (an exception message, a log line, ...) before it is
+    logged or stored. Safe to call on text with nothing to mask - returns it
+    unchanged."""
     if not text:
         return text
     masked = _SENSITIVE_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", text)

@@ -34,7 +34,7 @@ from telethon.errors import (
     RPCError,
     ServerError,
 )
-from telethon.tl.types import ReplyInlineMarkup, ReplyKeyboardHide
+from telethon.tl.types import ReplyInlineMarkup
 
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.flood_wait import (
@@ -47,30 +47,39 @@ from media_bot_v2.telegram.progress_format import format_progress
 
 logger = logging.getLogger(__name__)
 
-# The sentinel used to clear a message's inline keyboard on edit. An empty
-# `ReplyInlineMarkup([])` looks like the obvious choice (it is the only
-# `buttons` value Telethon's `build_reply_markup` passes through unchanged
-# without re-typing it - see that function), but live Telegram rejects it
-# with `ReplyMarkupInvalidError`: an inline keyboard markup must carry at
-# least one row, empty or not (production incident 2026-09-30/10-01, where
-# this fired on essentially every successful download's final edit and was
-# only ever papered over by the plain-text safety net below).
-# `ReplyKeyboardHide` has no such "must be non-empty" constraint - it is a
-# real "there is no keyboard here" marker - and clears the message's inline
-# buttons the same way.
-_CLEAR_BUTTONS = ReplyKeyboardHide()
+# Clearing a message's inline keyboard on `edit` requires passing
+# `buttons=None` *explicitly* as a keyword argument. Telethon's `Message.edit`
+# only overrides `reply_markup` when `buttons` is present in `kwargs` at all;
+# if the `buttons` keyword is omitted entirely, it re-injects the message's
+# *existing* `reply_markup` (`kwargs['buttons'] = self.reply_markup`) before
+# building the request, so a plain `edit(text)` leaves any inline keyboard
+# dangling on an otherwise-terminal message.
+#
+# An empty `ReplyInlineMarkup([])` looks like the obvious value to pass
+# instead (it's the only `buttons` value Telethon's `build_reply_markup`
+# passes through unchanged), but live Telegram rejects it with
+# `ReplyMarkupInvalidError`: an inline keyboard markup must carry at least
+# one row (production incident 2026-09-30/10-01, where this fired on
+# essentially every successful download's final edit). `ReplyKeyboardHide`
+# avoids that crash but is semantically wrong - it hides the bottom *reply*
+# keyboard, not an inline keyboard, so on real Telegram the inline cancel/
+# retry button stays attached. The only correct value is `buttons=None`,
+# passed explicitly (never omitted) wherever a terminal edit must clear it.
+#
+# `_clear_buttons` (see `update()`/`_deferred_terminal_retry`) is the boolean
+# flag that distinguishes "clear explicitly" (call `edit(text, buttons=None)`)
+# from "no buttons involved at all" (call `edit(text)` with no `buttons`
+# kwarg, for the vast majority of callers/tests whose minimal fakes only
+# implement `edit(text)` and would reject an unexpected kwarg).
 
 
 def _buttons_for_new_message(buttons: Any) -> Any:
-    """`_CLEAR_BUTTONS` is only valid on `edit`, to clear a keyboard that
-    already exists on that message - Telegram rejects it outright
-    (`ReplyMarkupInvalidError`) as the `reply_markup` of a brand-new message
-    via `respond`/`send_message`. Every call site that falls back to sending
-    a *new* message must run its `buttons` through this first; call sites
-    that `edit` the existing message keep passing `buttons` through
-    unchanged."""
-    if isinstance(buttons, ReplyKeyboardHide):
-        return None
+    """A brand-new message via `respond`/`send_message` has no prior
+    `reply_markup` to clear, and Telegram rejects an empty `ReplyInlineMarkup`
+    outright (`ReplyMarkupInvalidError`) as the `reply_markup` of a new
+    message. Every call site that falls back to sending a *new* message must
+    run its `buttons` through this first; call sites that `edit` the existing
+    message keep passing `buttons` through unchanged."""
     if isinstance(buttons, ReplyInlineMarkup) and not buttons.rows:
         return None
     return buttons
@@ -164,10 +173,14 @@ async def _deferred_terminal_retry(
     reporter: MessageProgressReporter | None = None,
     max_retries: int = 5,
     max_wait_seconds: float = MAX_FLOOD_WAIT_SECONDS,
+    clear_buttons: bool = False,
 ) -> None:
     """Deferred delivery or cleanup after a prolonged flood wait expires.
     Guarantees that on failure the user receives an error indication,
-    and stale progress messages (e.g. 95%) are never left behind."""
+    and stale progress messages (e.g. 95%) are never left behind.
+
+    `clear_buttons` carries the same "pass `buttons=None` explicitly"
+    intent as `update()` - see the module-level note above `_buttons_for_new_message`."""
     if already_deleted is None:
         already_deleted = not needs_delete
 
@@ -200,6 +213,15 @@ async def _deferred_terminal_retry(
                         message.edit,
                         text,
                         buttons=buttons,
+                        max_retries=max_retries,
+                        max_wait_seconds=max_wait_seconds,
+                        sleep_func=sleeper,
+                    )
+                elif clear_buttons:
+                    await call_with_flood_retry(
+                        message.edit,
+                        text,
+                        buttons=None,
                         max_retries=max_retries,
                         max_wait_seconds=max_wait_seconds,
                         sleep_func=sleeper,
@@ -276,7 +298,10 @@ async def _deferred_terminal_retry(
                 logger.warning("Failed to delete misleading progress message after deferred retry failure", exc_info=True)
                 if hasattr(message, "edit") and callable(message.edit):
                     try:
-                        await message.edit(texts.DOWNLOAD_FAILED)
+                        if clear_buttons:
+                            await message.edit(texts.DOWNLOAD_FAILED, buttons=None)
+                        else:
+                            await message.edit(texts.DOWNLOAD_FAILED)
                         already_deleted = True
                     except Exception:
                         logger.debug("Last-ditch edit to clear misleading progress failed", exc_info=True)
@@ -414,6 +439,7 @@ class MessageProgressReporter:
         if not terminal and text == self._last_text and buttons is None:
             return
 
+        clear_buttons = False
         if terminal and buttons is None:
             if self._get_failure_buttons is not None:
                 try:
@@ -421,7 +447,7 @@ class MessageProgressReporter:
                 except Exception:
                     logger.debug("Failed to get failure buttons for terminal update", exc_info=True)
             if buttons is None and self._clear_buttons_on_terminal:
-                buttons = _CLEAR_BUTTONS
+                clear_buttons = True
 
         if text == self._last_text and buttons == getattr(self, "_last_buttons", None):
             return
@@ -441,6 +467,8 @@ class MessageProgressReporter:
                     if self._message is not None and hasattr(self._message, "edit") and callable(self._message.edit):
                         if buttons is not None:
                             await self._message.edit(text, buttons=buttons)
+                        elif clear_buttons:
+                            await self._message.edit(text, buttons=None)
                         else:
                             await self._message.edit(text)
                         success = True
@@ -474,11 +502,15 @@ class MessageProgressReporter:
                     # identically, but the message itself is still
                     # perfectly editable. Retry once, stripped to plain
                     # text (parse_mode=None, so no entities can be
-                    # generated) and no buttons, rather than latching
-                    # `_uneditable` and silently dropping every progress
-                    # update for the rest of the request: that is what
-                    # happened in production on 2026-09-30, where one bad
-                    # `EntityBoundsInvalidError` on a mid-download edit
+                    # generated) and buttons=None explicitly (not omitted -
+                    # omitting it makes Telethon re-inject whatever
+                    # `reply_markup` the message already has, leaving a
+                    # dangling button on exactly the recovery path meant to
+                    # produce the safest minimal state), rather than
+                    # latching `_uneditable` and silently dropping every
+                    # progress update for the rest of the request: that is
+                    # what happened in production on 2026-09-30, where one
+                    # bad `EntityBoundsInvalidError` on a mid-download edit
                     # froze the progress bar for the remainder of both the
                     # download and the upload.
                     logger.warning(
@@ -487,7 +519,7 @@ class MessageProgressReporter:
                         exc,
                     )
                     try:
-                        await self._message.edit(text, parse_mode=None)
+                        await self._message.edit(text, parse_mode=None, buttons=None)
                     except MessageNotModifiedError:
                         pass
                     except Exception:
@@ -651,6 +683,7 @@ class MessageProgressReporter:
                                 reporter=self,
                                 max_retries=self._max_retries,
                                 max_wait_seconds=self._max_wait_seconds,
+                                clear_buttons=clear_buttons,
                             )
                         )
 

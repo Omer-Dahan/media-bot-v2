@@ -16,7 +16,6 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from telethon import TelegramClient, events
 from telethon.sessions import MemorySession
-from telethon.tl.types import ReplyKeyboardHide
 
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base
@@ -162,11 +161,17 @@ async def test_owner_cancel_stops_the_task_and_leaves_no_background_work():
     assert click.answer_calls == [(texts.CANCEL_TOAST, False)]
     assert message.edits[-1] == texts.REQUEST_CANCELLED
     # ...with the cancel button cleared, not left dangling on a dead request.
-    # (An empty ReplyInlineMarkup([]) looks like the obvious "cleared" shape
-    # but is rejected by live Telegram with ReplyMarkupInvalidError - see
-    # telegram/progress.py's _CLEAR_BUTTONS; ReplyKeyboardHide is the sentinel
-    # that actually works.)
-    assert isinstance(message.edit_kwargs[-1]["buttons"], ReplyKeyboardHide)
+    # `buttons` must be `None` *explicitly present in kwargs* - Telethon only
+    # overrides `reply_markup` when `buttons` appears in kwargs at all; if it
+    # were simply omitted (the bug in the prior round's fix), Telethon would
+    # re-inject the message's existing inline keyboard and the button would
+    # stay live on a now-dead request. An empty ReplyInlineMarkup([]) looks
+    # like the obvious "cleared" shape but is rejected by live Telegram with
+    # ReplyMarkupInvalidError, and ReplyKeyboardHide (the prior round's fix)
+    # clears the bottom *reply* keyboard, not an inline one - see
+    # telegram/progress.py's module-level note above `_buttons_for_new_message`.
+    assert "buttons" in message.edit_kwargs[-1]
+    assert message.edit_kwargs[-1]["buttons"] is None
 
     # ...and actually reaches the pipeline's own task.
     await asyncio.wait_for(handler_task, timeout=5)

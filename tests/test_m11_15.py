@@ -397,6 +397,81 @@ def test_mask_secrets_noop_on_empty_and_clean_text():
     assert mask_secrets("plain error, nothing sensitive here") == "plain error, nothing sensitive here"
 
 
+# -- M11.17: three verified bypass vectors --------------------------------
+# The M11.15 masking only caught a literal `param=value`. Verified bypasses:
+# (1) a percent-encoded `=` (e.g. a nested query string that itself got
+#     URL-encoded, so even the `?` before the key became `%3F` - no literal
+#     separator character survives between the escape and the key at all);
+# (2) a JSON/text body using `"key": "value"` instead of `key=value`;
+# (3) whitespace between the key and the `=`.
+
+
+def test_mask_secrets_redacts_percent_encoded_equals():
+    """Vector 1: the whole nested query string is percent-encoded, including
+    the `?` before the key (`%3F`) - so the key is immediately preceded by a
+    hex letter ('F'), not a real word-boundary character, and the `=` is
+    `%3D` rather than a literal `=`."""
+    masked = mask_secrets(
+        "redirect=https%3A%2F%2Fgamma.example%2Fapi%3Fapi_key%3DSECRETVALUE%26other%3D1"
+    )
+    assert "SECRETVALUE" not in masked
+    assert "api_key=***" in masked
+    assert "gamma.example" in masked  # non-secret context preserved
+
+
+def test_mask_secrets_redacts_json_body_secrets():
+    """Vector 2: a JSON/text body using `"key": "value"` (and the single-quote
+    and bare-word colon variants) instead of a query-string `key=value`."""
+    assert "SECRETVALUE" not in mask_secrets('{"api_key": "SECRETVALUE"}')
+    assert "SECRETVALUE" not in mask_secrets("{'api_key': 'SECRETVALUE'}")
+    assert "SECRETVALUE" not in mask_secrets("api_key: SECRETVALUE in the request body")
+
+
+def test_mask_secrets_redacts_space_before_equals():
+    """Vector 3: whitespace between the key and the `=`."""
+    masked = mask_secrets("GET /auth?api_key =SECRETVALUE HTTP/1.1")
+    assert "SECRETVALUE" not in masked
+
+
+@pytest.mark.parametrize(
+    "param",
+    [
+        "api_key",
+        "apikey",
+        "x-api-key",
+        "access_token",
+        "refresh_token",
+        "secret",
+        "passwd",
+        "pwd",
+        "authorization",
+    ],
+)
+def test_mask_secrets_covers_the_expanded_key_list(param):
+    masked = mask_secrets(f"https://x.example/path?{param}=SECRETVALUE&other=1")
+    assert "SECRETVALUE" not in masked
+    assert "other=1" in masked
+
+
+@pytest.mark.parametrize(
+    "benign_text",
+    [
+        "the tokenizer model loaded fine",
+        "please press a key on the keyboard",
+        "https://example.com/video.mp4?id=5&page=2",
+        "/tmp/report_key_2024.pdf saved successfully",
+        "turkey=5 is just an innocent parameter name",
+        "mykeyboard_layout=qwerty",
+    ],
+)
+def test_mask_secrets_does_not_touch_benign_text(benign_text):
+    """The other direction of the hardening: innocent words that merely
+    contain a sensitive substring ("token" in "tokenizer", "key" in
+    "keyboard"/"turkey"), a clean URL with no secrets, and a filename must
+    all survive unchanged - the masking must not get trigger-happy."""
+    assert mask_secrets(benign_text) == benign_text
+
+
 async def test_youtube_provider_fallback_logs_masked_url_not_the_real_key(caplog):
     """End-to-end through the actual call site: a provider that fails with a
     requests exception embedding the real URL+key must never put the raw key

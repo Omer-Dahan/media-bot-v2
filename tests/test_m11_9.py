@@ -13,15 +13,16 @@ Production log excerpt that drove this round:
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 from telethon.errors import EntityBoundsInvalidError, ReplyMarkupInvalidError
 from telethon.extensions import markdown
-from telethon.tl.types import ReplyInlineMarkup, ReplyKeyboardHide
+from telethon.tl.types import ReplyInlineMarkup
 
 from media_bot_v2.telegram import texts
-from media_bot_v2.telegram.progress import _CLEAR_BUTTONS, MessageProgressReporter
+from media_bot_v2.telegram.progress import MessageProgressReporter
 from media_bot_v2.telegram.progress_format import format_progress
 
 # =============================================================================
@@ -146,49 +147,78 @@ async def test_reply_markup_invalid_on_edit_retries_as_plain_text():
     message = MagicMock()
     message.edit = AsyncMock(side_effect=[ReplyMarkupInvalidError(None), None])
     reporter = MessageProgressReporter(message)
+    real_buttons = ReplyInlineMarkup([MagicMock()])
 
-    await reporter.update(texts.DOWNLOAD_DONE, buttons=_CLEAR_BUTTONS)
+    await reporter.update(texts.DOWNLOAD_DONE, buttons=real_buttons)
 
     assert not reporter._uneditable
     assert reporter.terminal_delivered
     assert message.edit.call_count == 2
-    # The retry drops the offending buttons entirely, not just the text formatting.
-    assert "buttons" not in message.edit.call_args_list[1].kwargs
+    # The retry drops the offending buttons entirely - and does so via an
+    # *explicit* `buttons=None`, not by omitting the kwarg: Telethon's real
+    # `Message.edit` only overrides `reply_markup` when `buttons` is present
+    # in kwargs at all, so omitting it here would silently re-attach
+    # whatever `reply_markup` the message already has instead of clearing it.
+    retry_kwargs = message.edit.call_args_list[1].kwargs
+    assert "buttons" in retry_kwargs
+    assert retry_kwargs["buttons"] is None
 
 
-def test_clear_buttons_sentinel_is_not_an_empty_inline_markup():
-    """M11.15 root-cause fix: an empty ReplyInlineMarkup([]) looks like the
-    obvious way to clear a message's keyboard on edit (it's the only
-    `buttons` value Telethon's build_reply_markup passes through unchanged),
-    but live Telegram rejects it with ReplyMarkupInvalidError - an inline
-    keyboard markup must carry at least one row. This fired on essentially
-    every successful download's final edit in production (2026-09-30/10-01)
-    and was only ever papered over by the plain-text safety net below, never
-    actually fixed. ReplyKeyboardHide has no "must be non-empty" shape."""
-    assert isinstance(_CLEAR_BUTTONS, ReplyKeyboardHide)
-    assert not isinstance(_CLEAR_BUTTONS, ReplyInlineMarkup)
+class _RealisticEditMessage:
+    """A fake `edit` that reproduces Telethon's real kwarg-presence rule
+    (see `telethon/tl/custom/message.py`'s `_edit`/`edit`): if `buttons` is
+    *absent* from kwargs, the existing `reply_markup` is reused untouched;
+    if `buttons=None` is *present*, `reply_markup` is actually cleared. It
+    also reproduces live Telegram's real rejection of an empty
+    `ReplyInlineMarkup([])` as `reply_markup` (`ReplyMarkupInvalidError`).
 
+    Unlike a fake that only raises on the exact sentinel the production code
+    happens to build today (which can never fail, since it just checks that
+    the code does what the code does), this one tracks the actual resulting
+    keyboard state after the edit - so it fails if `update()` ever regresses
+    to a plain `edit(text)` call (no `buttons` kwarg) where a clear was
+    intended, exactly like the M11.15->M11.16 regression this round fixes."""
 
-async def test_clear_buttons_sentinel_is_accepted_on_the_first_try():
-    """Proves the root cause is actually fixed, not just safety-netted: a
-    fake `edit` that reproduces live Telegram's real validation (rejecting
-    an empty ReplyInlineMarkup, accepting everything else) must succeed on
-    the very first call for a terminal update with clear_buttons_on_terminal
-    - no ReplyMarkupInvalidError, no plain-text retry needed."""
+    def __init__(self, reply_markup: Any) -> None:
+        self.reply_markup = reply_markup
+        self.edit_calls: list[dict] = []
 
-    def fake_edit(text, buttons=None, **kwargs):
-        if isinstance(buttons, ReplyInlineMarkup) and not buttons.rows:
+    async def edit(self, text: str, **kwargs: Any) -> None:
+        self.edit_calls.append(kwargs)
+        new_markup = kwargs.get("buttons", self.reply_markup)
+        if isinstance(new_markup, ReplyInlineMarkup) and not new_markup.rows:
             raise ReplyMarkupInvalidError(None)
+        self.reply_markup = new_markup
 
-    message = MagicMock()
-    message.edit = AsyncMock(side_effect=fake_edit)
+
+async def test_terminal_clear_actually_removes_the_inline_keyboard():
+    """Replacement for the old (tautological) sentinel test: that test built
+    a fake `edit` that raised only on the precise empty-`ReplyInlineMarkup`
+    object the production code happened to construct at the time, so it
+    verified the code matched itself, not real Telegram/Telethon behavior -
+    it could never fail. This test instead drives `_RealisticEditMessage`,
+    which reproduces Telethon's actual "buttons must be present in kwargs to
+    override reply_markup" rule and Telegram's actual "empty ReplyInlineMarkup
+    is rejected" rule.
+
+    Proof this catches the original bug: reverting `update()`'s terminal
+    clear branch from `edit(text, buttons=None)` back to a plain `edit(text)`
+    (what M11.15 shipped) makes `_RealisticEditMessage.edit` take the
+    "buttons absent" branch, which reuses `self.reply_markup` unchanged - so
+    the final `message.reply_markup is None` assertion below would fail and
+    `existing_button` would still be attached after a supposedly-terminal,
+    button-clearing update."""
+    existing_button = ReplyInlineMarkup([MagicMock()])
+    message = _RealisticEditMessage(reply_markup=existing_button)
     reporter = MessageProgressReporter(message, clear_buttons_on_terminal=True)
 
     await reporter.update(texts.DOWNLOAD_DONE)
 
     assert reporter.terminal_delivered
-    assert message.edit.call_count == 1
-    assert isinstance(message.edit.call_args.kwargs["buttons"], ReplyKeyboardHide)
+    assert len(message.edit_calls) == 1
+    assert "buttons" in message.edit_calls[0]
+    assert message.edit_calls[0]["buttons"] is None
+    assert message.reply_markup is None
 
 
 async def test_content_error_does_not_permanently_disable_non_terminal_updates():
@@ -215,16 +245,18 @@ async def test_content_error_does_not_permanently_disable_non_terminal_updates()
 
 
 # =============================================================================
-# B - the fallback (`respond`/new-message) path must never send the
-# clear-buttons sentinel as `reply_markup`: it is only valid on `edit`.
+# B - the fallback (`respond`/new-message) path must never send a
+# clear-buttons `None` as `reply_markup`: a brand-new message has no
+# existing keyboard to clear, and the resulting bare `buttons=None` kwarg
+# would needlessly be forwarded to `respond()` where it isn't needed.
 # =============================================================================
 
 
 async def test_terminal_fallback_respond_never_sends_clear_buttons_sentinel():
-    """Reproduces the exact production failure: edit fails, and the
-    fallback `respond()` used to forward `_CLEAR_BUTTONS` (an empty
-    `ReplyInlineMarkup`), which Telegram rejects on a brand-new message
-    with ReplyMarkupInvalidError. The summary must reach the user instead."""
+    """Edit fails (content/markup rejected), falling back to `respond()` for
+    a terminal message whose buttons were meant to be cleared (`buttons`
+    stays `None` throughout - there's nothing to forward to a new message).
+    The summary must still reach the user."""
     message = MagicMock()
     message.edit = AsyncMock(side_effect=ReplyMarkupInvalidError(None))
     new_message = MagicMock()
