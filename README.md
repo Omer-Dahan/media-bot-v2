@@ -270,7 +270,8 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 ┌─────────────────────────────────────────────────────────────┐
 │ 🎬 סרטון יוטיוב (03:45)                                    │
 │                                                             │
-│ 📊 התקדמות: (45.0MB/100.0MB) 45% 🌑🌑🌑🌑🌑🌒🌕🌕🌕🌕      │
+│ 📊 התקדמות: (45.0MB/100.0MB)                               │
+│ 45% 🌑🌑🌑🌑🌑🌒🌕🌕🌕🌕                                    │
 │ ⚡ מהירות: 5.4MB/s                                          │
 │ ⏱️ זמן משוער: 10 שניות                                      │
 ├─────────────────────────────────────────────────────────────┤
@@ -278,7 +279,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 └─────────────────────────────────────────────────────────────┘
 ```
 
-> The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters; it fills so that full moons always land next to the label, and the last cell only turns 🌕 at exactly 100%.
+> The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters, shown on its own line below the size pair so it renders in plain left-to-right reading order with no bidi control characters involved; it fills toward the right as percent increases, and the last cell only turns 🌕 at exactly 100%.
 
 1. **User Ingestion**: The user sends any supported media link in a **private chat only** — the bot does not respond in groups or channels.
 2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, and Instagram start downloading immediately.

@@ -1,5 +1,5 @@
-"""M11/M11.3: the shared bar/percent/size/speed/ETA renderer used by both the
-download (yt-dlp hook) and upload (byte-count) progress messages."""
+"""M11/M11.3/M11.19: the shared bar/percent/size/speed/ETA renderer used by
+both the download (yt-dlp hook) and upload (byte-count) progress messages."""
 
 import re
 import unicodedata
@@ -8,12 +8,10 @@ from media_bot_v2.telegram.progress_format import (
     BAR_EMPTY,
     BAR_FILLED,
     BAR_WIDTH,
-    EMBED_LTR,
     LRM,
     MOON_HALF,
     MOON_QUARTER,
     MOON_THREE_QUARTER,
-    POP_EMBED,
     format_progress,
     human_eta,
     render_bar,
@@ -44,49 +42,14 @@ def _first_strong_is_rtl(line: str) -> bool:
     return False
 
 
-# --- a small, hand-verified UAX#9 special case, used below to check real
-# --- visual (not just logical/source-order) placement --------------------
-#
-# `python-bidi`/`libfribidi` are not installed in this project (no new
-# dependencies for this round) so this suite cannot shell out to a real bidi
-# engine at test time. Per the round's instructions, the fix was instead
-# cross-checked *during development* against a real, standards-conformant
-# implementation (`python-bidi` 0.6.11, installed only in a disposable
-# throwaway venv outside the repo, never added as a dependency here) - see
-# progress_format.py's module docstring for the reasoning and the exact
-# before/after visual strings that verification produced.
-#
-# The check below re-derives the same conclusion from the Unicode Bidirectional
-# Algorithm (UAX#9) rules directly, for the one restricted shape this
-# formatter actually produces: a base-RTL paragraph consisting of
-# [R/neutral label][EMBED_LTR][L/EN/neutral content, no R][POP_EMBED].
-#
-# For that shape specifically (no nested strong-R inside the embedding, no
-# other embeddings): explicit-level rule X5a assigns the embedded span one
-# level higher than the label; implicit rule I2 bumps the (odd) label's
-# level no further since it is already R; L2 ("from the highest level down
-# to the lowest odd level, reverse each contiguous run at or above that
-# level") then reverses the embedded span once (its own, higher level) and
-# reverses the *whole line* once more (the lowest odd level present, the
-# label's). Two reversals of the embedded span cancel out, so it renders in
-# its typed order; the single remaining reversal of the whole line is what
-# swaps the label and the embedded span's relative screen position. Net
-# result: screen order (left to right) is [embedded content, in typed
-# order] followed by [label] - i.e. reading right-to-left, label first,
-# then the embedded content in the order it was typed.
-def _visual_screen_order_ltr_embed(line: str) -> list[str]:
-    """Split `line` into [text before EMBED_LTR, text inside EMBED_LTR..POP_EMBED]
-    and return them in left-to-right screen order per the derivation above.
-    Only valid when the embedded span has no strong-RTL characters in it
-    (asserted here, since that is the precondition the derivation relies on)."""
-    before, _, rest = line.partition(EMBED_LTR)
-    inside, _, _after = rest.partition(POP_EMBED)
-    for ch in inside:
-        assert unicodedata.bidirectional(ch) not in ("R", "AL"), (
-            f"{ch!r} inside the embedded span is strong-RTL; "
-            "the special-case derivation above does not apply"
-        )
-    return [inside, before]
+def _has_no_strong_character(line: str) -> bool:
+    """True if `line` contains no bidi-strong (L/R/AL) character at all - per
+    UAX#9 P2/P3 this is the condition under which a paragraph's direction
+    falls back to the default (LTR for plain text, per P3), independent of
+    any surrounding context. This is the exact property the M11.19 fix
+    relies on for the bar/percent line: see progress_format.py's module and
+    `render_bar` docstrings."""
+    return all(unicodedata.bidirectional(ch) not in ("L", "R", "AL") for ch in line)
 
 
 # --- render_bar -------------------------------------------------------------
@@ -123,12 +86,11 @@ def test_render_bar_partial_fill_matches_percent():
 
 def test_render_bar_is_typed_empty_to_full_not_full_to_empty():
     """`render_bar`'s returned string is typed empty-cells-first,
-    full-cells-last (see its docstring for the bidi reasoning): the
-    *last*-typed character of `format_progress`'s embedded run is what ends
-    up adjacent to the RTL label on screen, and full moons belong there
-    ("fills from the right"), not the empty ones. This is the exact
-    ordering bug the previous bot's `full-first` construction would have
-    reproduced were it copied as-is."""
+    full-cells-last (see its docstring for the bidi reasoning): the bar line
+    it's placed on (see `format_progress`) has no Hebrew label and thus no
+    strong-RTL character, so it renders left-to-right in exactly this typed
+    order - full moons must be last so the bar visibly "fills toward the
+    right" as percent increases."""
     bar = render_bar(50, width=10)
     assert bar == BAR_EMPTY * 5 + MOON_HALF + BAR_FILLED * 4
     # every empty cell precedes every full cell (partial sits in between)
@@ -233,7 +195,8 @@ def test_format_progress_mid_with_speed_and_eta():
     assert "מהירות" in text and "1.5MB/s" in text
     assert "זמן משוער" in text and "36 שניות" in text
     assert "None" not in text
-    # bar + percent + size line is on its own line (not glued into Hebrew prose)
+    # bar + percent is on its own line (M11.19: not glued into the header
+    # line with the size pair, and not glued into Hebrew prose either)
     lines = text.split("\n")
     assert any(BAR_FILLED in line and "45%" in line for line in lines)
 
@@ -260,7 +223,8 @@ def test_format_progress_at_hundred_percent():
     text = format_progress(PHASE, transferred=100 * 1024 * 1024, total=100 * 1024 * 1024)
     assert _percent(text) == 100
     assert BAR_FILLED * BAR_WIDTH in text
-    assert BAR_EMPTY not in text.split("\n")[1]  # the bar line is fully filled, no leftover empty cells
+    bar_line = text.split("\n")[2]
+    assert BAR_EMPTY not in bar_line  # the bar line is fully filled, no leftover empty cells
 
 
 def test_format_progress_never_exceeds_hundred_percent():
@@ -305,7 +269,7 @@ def test_bar_and_percent_stay_in_sync_across_boundaries():
         shown_percent = _percent(text)
         assert shown_percent == int(percent), f"percent={percent}: text shows {shown_percent}%"
 
-        bar_line = text.split("\n")[1]
+        bar_line = text.split("\n")[2]
         total_moons = sum(bar_line.count(ch) for ch in _ALL_MOONS)
         assert total_moons == BAR_WIDTH, f"percent={percent}: bar has {total_moons} cells, not {BAR_WIDTH}"
 
@@ -325,97 +289,62 @@ def test_bar_at_99_percent_has_at_least_one_empty_cell():
     99%, leaving 9 full moons + 1 near-full partial + zero empty cells -
     indistinguishable from "done" at a glance. This must not regress."""
     text = format_progress(PHASE, transferred=99, total=100)
-    bar_line = text.split("\n")[1]
+    bar_line = text.split("\n")[2]
     assert bar_line.count(BAR_EMPTY) >= 1
     assert bar_line.count(BAR_FILLED) < BAR_WIDTH
 
 
-# --- RTL: the bar/percent/size and speed/ETA lines carry an LTR override ----
+# --- M11.19: two-line layout (header = label + size; bar line = percent + bar)
 
 
-def test_bar_line_opens_with_hebrew_label_then_embedded_ltr_run():
+def test_format_progress_splits_size_and_bar_onto_separate_lines():
+    """The production report this round fixes: the owner explicitly asked
+    for the size pair and the percent/bar to be on two separate lines, not
+    joined into one. Line 0 is the phase, line 1 is "label: (size)", line 2
+    is "percent% bar"."""
+    text = format_progress(PHASE, transferred=45 * 1024 * 1024, total=100 * 1024 * 1024)
+    lines = text.split("\n")
+    assert len(lines) == 3
+    assert lines[0] == PHASE
+    assert "התקדמות" in lines[1]
+    assert "(45.0MB/100.0MB)" in lines[1]
+    assert "%" not in lines[1]
+    assert BAR_FILLED not in lines[1] and BAR_EMPTY not in lines[1]
+    assert lines[2].startswith("45%")
+    assert BAR_FILLED in lines[2] or BAR_EMPTY in lines[2]
+    assert "(" not in lines[2]  # the size pair stayed on the header line
+
+
+def test_bar_line_has_no_strong_bidi_character():
+    """Core mechanism of the M11.19 fix (see progress_format.py's module and
+    `render_bar` docstrings): the percent/bar line carries no Hebrew label
+    and no Latin unit letters, so it has no bidi-strong (L/R/AL) character
+    at all. Per UAX#9 P2/P3 that means its paragraph direction falls back
+    to the default (LTR) with no explicit directional control characters
+    needed - confirmed separately against a real bidi engine (`python-bidi`
+    0.6.11, disposable /tmp venv, not a project dependency)."""
+    total = 1_000_000
+    for percent in (0, 1, 50, 99, 100):
+        transferred = percent / 100 * total
+        text = format_progress(PHASE, transferred=transferred, total=total)
+        bar_line = text.split("\n")[2]
+        assert _has_no_strong_character(bar_line), (
+            f"percent={percent}: bar line has a strong bidi character: {bar_line!r}"
+        )
+
+
+def test_header_line_opens_with_hebrew_label_and_carries_only_the_size_pair():
     text = format_progress(PHASE, transferred=45, total=100)
-    bar_line = text.split("\n")[1]
-    assert not bar_line.startswith(EMBED_LTR)  # a strong-L char can't open an RTL line
-    assert EMBED_LTR in bar_line and POP_EMBED in bar_line
-    # Hebrew label precedes the embedded numeric/bar run
-    assert bar_line.index("התקדמות") < bar_line.index(EMBED_LTR)
+    header_line = text.split("\n")[1]
+    assert _first_strong_is_rtl(header_line)
+    assert header_line.index("התקדמות") < header_line.index("(")
     # NOT wrapped in backticks (Markdown inline code): that turns this run
     # into a `MessageEntityCode` whose offset/length is fixed against the
     # text as sent - production hit `EntityBoundsInvalidError` on edit from
     # exactly this (2026-09-30), which then froze all further progress
     # updates for the message. See progress_format.py's `format_progress`
     # for the full incident note.
-    assert "`" not in bar_line
-    inside = bar_line.partition(EMBED_LTR)[2].partition(POP_EMBED)[0]
-    # *typed* (logical/source) order inside the embedded run is size, then
-    # percent, then bar - the reverse of reading order. This is what the
-    # bidi visual-order test below (which is the one that actually matters)
-    # confirms lands bar-closest-to-label on screen; see the module
-    # docstring for why a naive bar-first typed order does not.
-    assert inside.index("(") < inside.index("%") < inside.index(BAR_FILLED)
-
-def test_bar_line_visual_order_is_label_then_bar_then_percent_then_sizes():
-    """The actual finding: cross-checked against a real bidi engine (see
-    module docstring and the header comment above `_visual_screen_order_ltr_embed`),
-    a bare LRM left the bar thrown to the far visual edge, disconnected from
-    the label, with the parenthesised size pair mirrored and broken apart.
-    The fix must produce, right-to-left (the order a person actually reads
-    this line): label, then bar, then percent, then sizes."""
-    text = format_progress(PHASE, transferred=45 * 1024 * 1024, total=100 * 1024 * 1024)
-    bar_line = text.split("\n")[1]
-    content, label = _visual_screen_order_ltr_embed(bar_line)
-
-    # `content` is the embedded span, screen-ordered left-to-right (per the
-    # derivation above, an embedded run with no strong-RTL inside renders in
-    # its typed order). Left-to-right on screen it is [sizes][percent][bar],
-    # i.e. bar sits at its *right* edge - immediately next to the label
-    # (which the derivation places further right still). Reading
-    # right-to-left, that is label, then bar, then percent, then sizes.
-    assert content.index("(45.0MB/100.0MB)") < content.index("45%") < content.index(BAR_FILLED)
-    assert "התקדמות" in label
-
-
-def test_bar_line_visual_order_holds_at_boundary_percents():
-    for percent in (0, 1, 50, 99, 100):
-        total = 1_000_000
-        transferred = percent / 100 * total
-        text = format_progress(PHASE, transferred=transferred, total=total)
-        bar_line = text.split("\n")[1]
-        content, label = _visual_screen_order_ltr_embed(bar_line)
-        bar_char = BAR_FILLED if BAR_FILLED in content else BAR_EMPTY
-        assert content.index(f"{percent}%") < content.rindex(bar_char)
-        assert "התקדמות" in label
-
-
-def test_moon_bar_full_cells_land_adjacent_to_the_label_not_empty_cells():
-    """Cross-checked against a real bidi engine (`python-bidi` 0.6.11, same
-    disposable-venv verification method as the rest of this module - not a
-    project dependency): per `_visual_screen_order_ltr_embed`'s derivation,
-    `content`'s *last* character is the one that lands immediately adjacent
-    to the RTL label on screen. For "fills from the right" to actually
-    read correctly, that adjacent character must be a full moon once any
-    progress exists - not an empty one. Naively typing the bar full-first/
-    empty-last (as the previous bot's `moon_progress_bar` did) would put an
-    *empty* cell there instead, making the bar look like it fills away from
-    the label rather than toward it."""
-    total = 1_000_000
-    for percent in (45.1, 49.9, 50, 95, 99, 99.9):
-        transferred = percent / 100 * total
-        text = format_progress(PHASE, transferred=transferred, total=total)
-        bar_line = text.split("\n")[1]
-        content, label = _visual_screen_order_ltr_embed(bar_line)
-        assert content[-1] == BAR_FILLED, (
-            f"percent={percent}: character adjacent to the label is {content[-1]!r}, expected a full moon"
-        )
-        assert "התקדמות" in label
-
-    # At 0%, there is no progress to show adjacent to the label - the
-    # reserved-empty design correctly leaves an empty moon there instead.
-    text = format_progress(PHASE, transferred=0, total=total)
-    bar_line = text.split("\n")[1]
-    content, _label = _visual_screen_order_ltr_embed(bar_line)
-    assert content[-1] == BAR_EMPTY
+    assert "`" not in header_line
 
 
 def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():
@@ -430,19 +359,32 @@ def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():
     assert eta_line.index("משוער") < eta_line.index(LRM)
 
 
-def test_unknown_total_line_opens_with_hebrew_label_then_left_to_right_mark():
-    text = format_progress(PHASE, transferred=12, total=None)
-    size_line = text.split("\n")[1]
-    assert not size_line.startswith(LRM)
-    assert size_line.index("הורד") < size_line.index(LRM)
+def test_unknown_total_splits_label_and_volume_onto_separate_lines():
+    """Same two-line principle as the known-total case (M11.19): the header
+    line carries what's known (the label plus the "total unknown"
+    qualifier), and a separate line carries the one real data point (bytes
+    transferred so far) - there's no percent/bar to show, so that second
+    line holds just the volume."""
+    text = format_progress(PHASE, transferred=12 * 1024 * 1024, total=None)
+    lines = text.split("\n")
+    assert len(lines) == 3
+    assert lines[0] == PHASE
+    assert "הורד" in lines[1]
+    assert "לא ידוע" in lines[1]
+    assert "12.0MB" not in lines[1]
+    assert lines[2] == f"{LRM}12.0MB"
 
 
-def test_every_line_of_a_full_message_opens_with_a_strong_rtl_character():
+def test_every_line_that_carries_a_hebrew_label_opens_with_a_strong_rtl_character():
     """The concrete failure mode this guards against: a plain-text bidi
     renderer (or a Telegram client that computes per-line paragraph
     direction) picks LTR for any line whose first *strong* character isn't
-    Hebrew/Arabic - even if LRM is present later in the line. This must hold
-    for every line the formatter can produce, not just the ones with a bar."""
+    Hebrew/Arabic - even if LRM is present later in the line. This holds for
+    every line that actually carries Hebrew text. The bar/percent line (and,
+    in unknown-total mode, the volume-only line) intentionally carry no
+    Hebrew text at all and so intentionally fall outside this rule - see
+    `test_bar_line_has_no_strong_bidi_character` and the module docstring
+    for why that's the fix, not a regression."""
     text = format_progress(
         PHASE,
         transferred=45 * 1024 * 1024,
@@ -450,18 +392,51 @@ def test_every_line_of_a_full_message_opens_with_a_strong_rtl_character():
         speed=1.5 * 1024 * 1024,
         eta=36,
     )
-    for line in text.split("\n"):
+    lines = text.split("\n")
+    hebrew_lines = [line for line in lines if "התקדמות" in line or line == PHASE or "מהירות" in line or "משוער" in line]
+    assert len(hebrew_lines) == 4  # phase, header, speed, eta - everything but the bar line
+    for line in hebrew_lines:
         assert _first_strong_is_rtl(line), f"line does not open with a strong RTL character: {line!r}"
 
     unknown_total_text = format_progress(PHASE, transferred=12 * 1024 * 1024, total=None)
-    for line in unknown_total_text.split("\n"):
-        assert _first_strong_is_rtl(line), f"line does not open with a strong RTL character: {line!r}"
+    unknown_lines = unknown_total_text.split("\n")
+    assert _first_strong_is_rtl(unknown_lines[0])
+    assert _first_strong_is_rtl(unknown_lines[1])  # "📥 הורד: (סך כולל לא ידוע)"
+    # unknown_lines[2] (the bare volume, "<LRM>12.0MB") intentionally does not -
+    # LRM itself is strong-L, by design (see progress_format.py's RTL note).
 
     # NOTE: a string-level check like this confirms the *bidi type* of each
     # line's leading character, which decides paragraph direction. It cannot
     # confirm how Telegram's actual clients (desktop/web/Android/iOS) render
     # the full multi-line message - that still requires an eyeball check in
     # each client against a real in-progress download/upload message.
+
+
+# --- M11.19: exact match to the production report's requested rendering -----
+
+
+def test_format_progress_matches_owner_reported_upload_example():
+    """The exact case from the production report: an upload at 27.2MB of
+    67.5MB (40%), 4.4MB/s, 9 seconds left. The owner's requested corrected
+    rendering (two lines: header with label+size, then a separate
+    percent+bar line) is reproduced here byte-for-byte, including the LRM
+    marks before the speed/ETA numbers (invisible, but present in the
+    owner's own pasted example)."""
+    text = format_progress(
+        "⬆️ מעלה לטלגרם...",
+        transferred=27.2 * 1024 * 1024,
+        total=67.5 * 1024 * 1024,
+        speed=4.4 * 1024 * 1024,
+        eta=9,
+    )
+    expected = (
+        "⬆️ מעלה לטלגרם...\n"
+        "📊 התקדמות: (27.2MB/67.5MB)\n"
+        "40% 🌑🌑🌑🌑🌑🌑🌓🌕🌕🌕\n"
+        f"⚡ מהירות: {LRM}4.4MB/s\n"
+        f"⏱️ זמן משוער: {LRM}9 שניות"
+    )
+    assert text == expected
 
 
 # --- M11.12: moon bar must never produce a Telegram entity -------------------
@@ -518,7 +493,7 @@ def test_moon_bar_is_monotonic_across_an_increasing_update_sequence():
     for percent in percents:
         transferred = percent / 100 * total
         text = format_progress(PHASE, transferred=transferred, total=total)
-        bar_line = text.split("\n")[1]
+        bar_line = text.split("\n")[2]
         bar = "".join(ch for ch in bar_line if ch in _ALL_MOONS)
         assert len(bar) == BAR_WIDTH
         fullness = _bar_fullness(bar)
