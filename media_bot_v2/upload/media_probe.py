@@ -160,21 +160,61 @@ def probe_with_thumb(path: Path) -> MediaInfo:
     return info
 
 
+# Names a direct-link server hands back for a dynamic-download endpoint
+# (`?id=123`, a generic attachment handler, ...) that tell the user nothing
+# about the file - replaced with a generic-but-readable stem once the real
+# type is known, same as a misleading extension is replaced below.
+_GARBAGE_STEMS = frozenset({"download", "file", "attachment", "untitled", "noname", "unknown"})
+_GENERIC_STEM = "file"
+
+# Extensions that are a more specific, equally valid name for what `filetype`
+# only recognizes as the generic container it is built on - renaming these to
+# the generic extension would replace a correct, informative name with a
+# misleading one. An APK/JAR/AAR/... *is* a ZIP (filetype has no dedicated
+# matcher for any of them - unlike DOCX/XLSX, which it does detect
+# specifically, by checking for known internal entry names).
+_CONTAINER_ALIAS_GROUPS: tuple[frozenset[str], ...] = (
+    frozenset({"zip", "apk", "jar", "aar", "ipa", "xpi", "whl"}),
+)
+
+
+def _is_garbage_stem(stem: str) -> bool:
+    cleaned = stem.strip().lower()
+    return not cleaned or cleaned in _GARBAGE_STEMS or cleaned.isdigit()
+
+
+def _suffix_is_acceptable(current_ext: str, real_ext: str) -> bool:
+    if not current_ext:
+        return False
+    if current_ext == real_ext:
+        return True
+    return any(real_ext in group and current_ext in group for group in _CONTAINER_ALIAS_GROUPS)
+
+
 def correct_extension(path: Path) -> Path:
     """Rename `path` so its suffix matches what `filetype` actually finds in
-    its bytes, keeping the original stem. A direct-link download keeps
-    whatever name the URL happened to have (`picture.ashx`, `file.php`, ...),
-    which neither Telegram nor the user can tell apart from a real document -
-    this is what gives the caption/thumbnail/preview a chance to work.
-    No-op (returns `path` unchanged) if detection fails, the suffix already
-    matches, or renaming onto an existing path would collide."""
+    its bytes, and its stem is readable rather than a dynamic-download
+    server's meaningless placeholder. A direct-link download keeps whatever
+    name the URL happened to have (`picture.ashx`, `file.php`, `download`,
+    ...), which neither Telegram nor the user can tell apart from a real
+    document - this is what gives the caption/thumbnail/preview a chance to
+    work.
+
+    No-op (returns `path` unchanged) if detection fails (nothing here is
+    trustworthy enough to rename from), the name is already fine, or
+    renaming onto an existing path would collide."""
     guessed = filetype.guess(str(path))
     if guessed is None:
         return path
-    real_suffix = f".{guessed.extension}"
-    if path.suffix.lower() == real_suffix.lower():
+    real_ext = guessed.extension.lower()
+    current_ext = path.suffix.lower().lstrip(".")
+    new_stem = _GENERIC_STEM if _is_garbage_stem(path.stem) else path.stem
+    new_suffix = path.suffix if _suffix_is_acceptable(current_ext, real_ext) else f".{guessed.extension}"
+    if new_stem == path.stem and new_suffix.lower() == path.suffix.lower():
         return path
-    target = path.with_suffix(real_suffix)
+    target = path.with_name(new_stem + new_suffix)
+    if target == path:
+        return path
     if target.exists():
         return path
     try:

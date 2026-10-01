@@ -129,9 +129,44 @@ shared legacy tables) and never contacts Telegram. It checks:
 - `DOWNLOAD_DIR` and the log directory are actually writable.
 - `provider_health` exists (creating it if this is the first run against
   this database).
+- `DOWNLOAD_DIR` is not world-writable and sits on a `noexec` mount
+  (`download_dir_exec_safety` - see 4.1 below).
 
-It prints one line per check (`PASS`/`FAIL`/`SKIP`) and exits non-zero if
-anything failed. Fix every `FAIL` before proceeding to cutover.
+It prints one line per check (`PASS`/`FAIL`/`SKIP`/`WARN`) and exits
+non-zero only if something actually `FAIL`ed. A `WARN` is operator-facing
+hardening advice (currently only `download_dir_exec_safety`) and does not
+block cutover by itself - fix every `FAIL`, and treat every `WARN` as
+something to go fix on the host, not a blocker for right now.
+
+### 4.1 Why `DOWNLOAD_DIR` should be mounted `noexec`
+
+Nothing in this bot ever executes a file it downloaded - every `subprocess`
+call (ffmpeg, ffprobe, the JS runtime) has a fixed binary name as argv[0],
+never a path built from user input, and no archive is ever auto-extracted.
+Mounting `DOWNLOAD_DIR`'s filesystem `noexec` (and keeping it non-world-
+writable) is defense in depth on top of that: it guarantees the kernel
+itself refuses to run anything placed there, closing that door even against
+a future bug or a compromised dependency, not just against a correctly
+written bot.
+
+If `DOWNLOAD_DIR` doesn't already have its own filesystem, give it one with
+a bind mount instead of relocating it:
+
+```bash
+# One-time, as root. DOWNLOAD_DIR below must match your .env value.
+DOWNLOAD_DIR=/opt/media-bot-v2/downloads
+mount --bind "$DOWNLOAD_DIR" "$DOWNLOAD_DIR"
+mount -o remount,noexec,nosuid,nodev "$DOWNLOAD_DIR"
+```
+
+To make this survive a reboot, add a line to `/etc/fstab`:
+
+```
+/opt/media-bot-v2/downloads  /opt/media-bot-v2/downloads  none  bind,noexec,nosuid,nodev  0  0
+```
+
+Re-run the preflight check afterwards to confirm `download_dir_exec_safety`
+now reports `PASS`.
 
 ## 5. `.env` configuration
 

@@ -196,6 +196,19 @@ def format_playlist_trim_reason(*, skipped_for_credits: int, too_large: int, fai
     return ", ".join(parts) if parts else None
 
 
+def format_raw_split_notice(total_parts: int, filename: str) -> str:
+    """Sent once after a non-video file too large for one message is split
+    into raw byte chunks (upload.splitter._split_raw) - unlike a split
+    video, these parts are not independently usable, so without this the
+    user has `total_parts` document attachments and no idea they must be
+    concatenated in order to get the original file back."""
+    return (
+        f"ℹ️ הקובץ “{filename}” גדול מהמותר בהודעה אחת, ולכן פוצל ל-{total_parts} חלקים.\n"
+        "בניגוד לווידאו, לא ניתן לצפות בחלקים האלו בנפרד - יש להוריד את כולם ולחבר אותם "
+        "**לפי הסדר** (חלק 1, חלק 2, ...) כדי לקבל את הקובץ המקורי."
+    )
+
+
 def format_playlist_trimmed(downloaded: int, total: int, reason: str | None = None) -> str:
     lines = [DOWNLOAD_DONE, f"📦 הורדו {downloaded} מתוך {total} פריטים בפלייליסט."]
     if reason:

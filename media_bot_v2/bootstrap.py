@@ -8,6 +8,7 @@ never at import time, so this file is safe to import from tests.
 from __future__ import annotations
 
 import logging
+import os
 import time
 from collections.abc import Callable
 from pathlib import Path
@@ -88,6 +89,16 @@ def log_archive_channel(archive_channel: int | str | None) -> None:
 
 
 def main() -> None:
+    # Safe-by-default file/directory creation for the whole process, before
+    # anything downloads, converts, or splits a single byte: every file this
+    # process creates from here on becomes 0600 and every directory 0700
+    # (0666/0777 requested-mode defaults, masked by this umask), with no
+    # group/other access and - for a creator that only ever requests 0666 -
+    # no execute bit either. See media_bot_v2/engines/permissions.py for the
+    # explicit chmod backstop this does not by itself guarantee (a creator
+    # that explicitly requests an executable mode keeps its owner-execute
+    # bit even under this umask).
+    os.umask(0o077)
     settings = load_settings()
     configure_logging(
         settings.log_file,

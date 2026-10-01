@@ -11,6 +11,8 @@ from __future__ import annotations
 
 import codecs
 
+import filetype
+
 from media_bot_v2.engines.base import NotMediaContentError
 
 SNIFF_BYTES = 1024
@@ -95,3 +97,46 @@ def looks_like_non_media(head: bytes) -> bool:
 def reject_if_not_media_body(head: bytes) -> None:
     if looks_like_non_media(head):
         raise NotMediaContentError()
+
+
+# Content-Type values `filetype`'s own mime->extension registry either does
+# not know (APK, ISO, MSI - none of these have a magic-byte matcher in
+# `filetype` either, see media_probe.correct_extension) or maps to something
+# misleading for this project's purposes.
+_EXTENSION_OVERRIDES: dict[str, str] = {
+    "application/vnd.android.package-archive": ".apk",
+    "application/x-iso9660-image": ".iso",
+    "application/x-msi": ".msi",
+    "application/vnd.microsoft.portable-executable": ".exe",
+    "application/vnd.rar": ".rar",
+}
+# Carries no information about the real file type - must never resolve to an
+# extension (filetype's own registry maps this generic mime to ".eot", a
+# single obscure font type that would be actively misleading here).
+_NO_SIGNAL_CONTENT_TYPES = frozenset({"", "application/octet-stream", "binary/octet-stream"})
+
+
+def extension_for_content_type(content_type: str | None) -> str | None:
+    """Best-effort filename extension for a Content-Type header, used only
+    as a fallback when a file has no extension at all *and* its bytes could
+    not be identified either (ISO images, MSI installers - formats
+    `filetype` has no magic-byte matcher for). Never asked to override an
+    extension that already exists or that the real bytes already settled -
+    callers consult actual bytes (`filetype`) first; this is the fallback
+    for when that is inconclusive."""
+    if not content_type:
+        return None
+    normalized = content_type.split(";")[0].strip().lower()
+    if normalized in _NO_SIGNAL_CONTENT_TYPES:
+        return None
+    if normalized in _EXTENSION_OVERRIDES:
+        return _EXTENSION_OVERRIDES[normalized]
+    guessed_type = filetype.get_type(mime=normalized)
+    if guessed_type is not None:
+        return f".{guessed_type.extension}"
+    media_type, _, subtype = normalized.partition("/")
+    if media_type in ("image", "audio", "video") and subtype:
+        subtype = subtype.split("+")[0].removeprefix("x-")
+        if subtype.isalnum():
+            return f".{subtype}"
+    return None

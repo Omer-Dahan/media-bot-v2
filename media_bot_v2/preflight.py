@@ -20,6 +20,7 @@ from __future__ import annotations
 import contextlib
 import re
 import shutil
+import stat
 import subprocess
 import sys
 import urllib.parse
@@ -35,7 +36,7 @@ from sqlalchemy.engine import make_url
 from media_bot_v2.config import OLD_BOT_SESSION_NAME, Settings, load_settings
 from media_bot_v2.db.models import ProviderHealth
 
-Status = Literal["pass", "fail", "skip"]
+Status = Literal["pass", "fail", "skip", "warn"]
 
 EXPECTED_LEGACY_TABLES = ("users", "settings", "payments", "video_cache")
 _JS_RUNTIME_BINARIES = ("deno", "node", "bun")
@@ -299,6 +300,88 @@ def check_provider_health_table(settings: Settings) -> CheckResult:
     )
 
 
+def _mount_options_for(path: Path) -> list[str] | None:
+    """Mount options of the filesystem containing `path`, by picking the
+    entry in `/proc/mounts` whose mount point is the longest matching
+    prefix of `path` (the same resolution a nested mount needs - `/` and
+    `/home` can both be listed, and a path under `/home` belongs to
+    whichever is more specific). None if this cannot be determined at all
+    (no `/proc/mounts` - any non-Linux platform, or a sandboxed environment
+    without `/proc`), which the caller turns into a SKIP rather than
+    guessing."""
+    try:
+        resolved = path.resolve()
+    except OSError:
+        return None
+    try:
+        lines = Path("/proc/mounts").read_text().splitlines()
+    except OSError:
+        return None
+
+    best: tuple[int, list[str]] | None = None
+    for line in lines:
+        fields = line.split()
+        if len(fields) < 4:
+            continue
+        mount_point = Path(fields[1])
+        try:
+            if resolved != mount_point and not resolved.is_relative_to(mount_point):
+                continue
+        except (OSError, ValueError):
+            continue
+        depth = len(mount_point.parts)
+        if best is None or depth > best[0]:
+            best = (depth, fields[3].split(","))
+    return best[1] if best is not None else None
+
+
+def check_download_dir_exec_safety(settings: Settings) -> CheckResult:
+    """Operator-facing hardening advice (never a cutover blocker - `warn`,
+    not `fail`) about the download directory: nothing in this project ever
+    executes a downloaded file (every `subprocess` call has a fixed binary
+    name - ffmpeg/ffprobe/deno/node/bun - as argv[0], never a user-supplied
+    path), but a `noexec` mount and non-world-writable permissions remove a
+    layer of defense in depth against a future bug or dependency doing so
+    by mistake. SKIPs (never fails outright) when the check cannot be
+    performed at all, e.g. no `/proc/mounts` on this platform."""
+    directory = Path(settings.download_dir)
+    if not directory.exists():
+        return CheckResult(
+            "download_dir_exec_safety", "skip", f"{directory} does not exist yet; nothing to check"
+        )
+    try:
+        mode = directory.stat().st_mode
+    except OSError as exc:
+        return CheckResult("download_dir_exec_safety", "skip", f"Could not stat {directory}: {exc}")
+
+    problems: list[str] = []
+    if mode & stat.S_IWOTH:
+        problems.append(
+            f"{directory} is world-writable (mode {oct(stat.S_IMODE(mode))}) - "
+            f"run `chmod o-w {directory}` so another local user cannot plant a file there"
+        )
+
+    options = _mount_options_for(directory)
+    if options is None:
+        if problems:
+            return CheckResult("download_dir_exec_safety", "warn", "; ".join(problems))
+        return CheckResult(
+            "download_dir_exec_safety",
+            "skip",
+            "Could not determine this filesystem's mount options (no /proc/mounts on this platform)",
+        )
+    if "noexec" not in options:
+        problems.append(
+            f"{directory}'s filesystem is not mounted `noexec` (current options: {','.join(options)}) - "
+            "see docs/DEPLOY.md for a bind-mount that adds it without relocating the directory"
+        )
+    if problems:
+        return CheckResult("download_dir_exec_safety", "warn", "; ".join(problems))
+    return CheckResult(
+        "download_dir_exec_safety", "pass", f"{directory}: noexec mount, not world-writable"
+    )
+
+
 ALL_CHECKS = (
     check_database,
     check_session_name,
@@ -309,6 +392,7 @@ ALL_CHECKS = (
     check_ffprobe,
     check_writable_directories,
     check_provider_health_table,
+    check_download_dir_exec_safety,
 )
 
 
@@ -317,13 +401,19 @@ def run_all(settings: Settings) -> list[CheckResult]:
 
 
 def format_report(results: list[CheckResult]) -> str:
-    label = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP"}
+    label = {"pass": "PASS", "fail": "FAIL", "skip": "SKIP", "warn": "WARN"}
     lines = ["media-bot-v2 preflight report", "=" * 30]
     lines.extend(f"[{label[r.status]}] {r.name}: {r.detail}" for r in results)
     failed = [r for r in results if r.status == "fail"]
+    warned = [r for r in results if r.status == "warn"]
     lines.append("")
     if failed:
         lines.append(f"{len(failed)} check(s) failed - not ready for cutover.")
+    elif warned:
+        lines.append(
+            f"All checks passed; {len(warned)} warning(s) above are operator-facing hardening "
+            "advice and do not block cutover."
+        )
     else:
         lines.append("All checks passed (or were intentionally skipped) - ready for cutover.")
     return "\n".join(lines)

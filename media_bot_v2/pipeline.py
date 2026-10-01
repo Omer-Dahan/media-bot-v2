@@ -45,6 +45,7 @@ from __future__ import annotations
 import asyncio
 import inspect
 import logging
+import re
 import shutil
 import time
 import uuid
@@ -68,6 +69,7 @@ from media_bot_v2.engines.base import (
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.instagram import InstagramDownloadError
+from media_bot_v2.engines.permissions import harden_path, harden_tree
 from media_bot_v2.engines.tiktok import TikTokDownloadError
 from media_bot_v2.engines.youtube import YouTubeDownloadError
 from media_bot_v2.executor import run_in_thread
@@ -168,6 +170,18 @@ class _FileGroup:
     force_document: bool = False
 
 
+# upload.splitter._split_raw names each chunk "<original name>.part<NNN>" -
+# recovering the original name for the reassembly notice below is just
+# stripping that suffix back off.
+_RAW_SPLIT_PART_SUFFIX_RE = re.compile(r"\.part\d+$")
+
+
+def _original_name_for_group(group: _FileGroup) -> str:
+    if not group.parts:
+        return ""
+    return _RAW_SPLIT_PART_SUFFIX_RE.sub("", group.parts[0].name)
+
+
 class DownloadPipeline:
     def __init__(
         self,
@@ -236,6 +250,16 @@ class DownloadPipeline:
         # one) must not write into the same directory, where one download's
         # cleanup could delete the other's still-in-flight files.
         task_dir = self._download_dir / str(user_id) / uuid.uuid4().hex
+        # Created (and hardened) here rather than left to the engine's own
+        # `mkdir(parents=True, exist_ok=True)` so the per-user directory and
+        # the task directory are both already 0700 - under the process-wide
+        # umask(0o077) set at startup (bootstrap.main) a fresh mkdir would
+        # land there anyway, but this is the explicit guarantee, not an
+        # assumption about umask having taken effect.
+        task_dir.parent.mkdir(parents=True, exist_ok=True)
+        harden_path(task_dir.parent)
+        task_dir.mkdir(parents=True, exist_ok=True)
+        harden_path(task_dir)
         cancel_token = CancellationToken()
         dl_cm = None
         up_cm = None
@@ -334,11 +358,30 @@ class DownloadPipeline:
                             up_cm = cm
                             if info.kind == KIND_VIDEO:
                                 info = await run_in_thread(probe_with_thumb, source)
+                    elif info.kind == KIND_OTHER:
+                        # Neither video, audio, nor (non-animated) photo - a
+                        # direct link can point at absolutely anything (zip,
+                        # apk, pdf, iso, exe, ...). None of those have a
+                        # non-document Telegram send form, so this always
+                        # goes out as a plain document with its real,
+                        # already-corrected filename - never an attempted
+                        # stream/transcode/thumbnail for a file type that has
+                        # no such thing.
+                        force_document = True
+                        async with self._upload_budget() as cm:
+                            up_cm = cm
                     else:
                         async with self._upload_budget() as cm:
                             up_cm = cm
                 parts = await run_in_thread(splitter.split_file, source)
                 groups.append(_FileGroup(info=info, parts=parts, force_document=force_document))
+
+            # Every file this run will upload now exists in task_dir (downloaded,
+            # converted, probed, split) - force 0600/0700 on all of it before any
+            # of it is read for upload, regardless of what wrote it (this
+            # project's own code, or a subprocess/third-party library such as
+            # yt-dlp, gallery-dl, or instaloader).
+            await run_in_thread(harden_tree, task_dir)
 
             # 3. Upload phase under upload_timeout, recording delivered sizes; cache only a complete result
             await _update_progress(progress, texts.UPLOADING, is_terminal=False)
@@ -414,6 +457,8 @@ class DownloadPipeline:
                             await self._edit_caption_quietly(uploader, previous[0], previous[1])
                         if label:
                             previous = (message, label)
+
+                await self._send_raw_split_notice_quietly(uploader, group=group, reply_to=last_media_message)
 
             # Delivery is done at this point - every part already reached the
             # user. A charging failure past this line must never surface as
@@ -692,6 +737,25 @@ class DownloadPipeline:
             await uploader.edit_caption(message, caption)
         except Exception:
             logger.warning("Failed to edit a part's caption to %r", caption, exc_info=True)
+
+    async def _send_raw_split_notice_quietly(
+        self, uploader: Uploader, *, group: _FileGroup, reply_to: Any
+    ) -> None:
+        """A non-video file split into raw byte chunks (splitter._split_raw)
+        produces parts that are not independently usable, unlike a split
+        video - tell the user explicitly that they must concatenate the
+        parts, in order, to get the original file back. Never allowed to
+        fail the request: this is an explanatory follow-up, not the
+        delivery itself (which already succeeded by the time this runs)."""
+        total_parts = len(group.parts)
+        if total_parts <= 1 or group.info.kind == KIND_VIDEO:
+            return
+        text = texts.format_raw_split_notice(total_parts, _original_name_for_group(group))
+        try:
+            async with self._upload_budget():
+                await uploader.send_description(text, reply_to=reply_to)
+        except Exception:
+            logger.warning("Failed to send the raw-split reassembly notice", exc_info=True)
 
     async def _send_description_quietly(
         self,

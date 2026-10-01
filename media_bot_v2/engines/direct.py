@@ -18,7 +18,7 @@ import logging
 import re
 import time
 from pathlib import Path
-from urllib.parse import urlparse
+from urllib.parse import unquote, urlparse
 
 from media_bot_v2.engines.base import (
     BaseEngine,
@@ -29,6 +29,7 @@ from media_bot_v2.engines.base import (
 )
 from media_bot_v2.engines.content_check import (
     SNIFF_BYTES,
+    extension_for_content_type,
     reject_if_not_media_body,
     reject_if_not_media_content_type,
 )
@@ -118,14 +119,12 @@ class DirectEngine(BaseEngine):
         if not self.matches(url):
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL)
         dest_dir.mkdir(parents=True, exist_ok=True)
-        filename = _filename_from_url(url)
-        dest_path = within_directory(dest_dir, filename, fallback="download.bin")
         loop = asyncio.get_running_loop() if self._progress is not None else None
         try:
-            await run_in_thread(
+            dest_path = await run_in_thread(
                 _preflight_and_stream_to_file,
                 url,
-                dest_path,
+                dest_dir,
                 self._max_download_size,
                 cancel_token,
                 self._progress,
@@ -139,18 +138,65 @@ class DirectEngine(BaseEngine):
         return DownloadResult(file_paths=[str(dest_path)], title=dest_path.name)
 
 
+_CD_FILENAME_STAR_RE = re.compile(r"filename\*\s*=\s*[^']*''([^;]+)", re.IGNORECASE)
+_CD_FILENAME_RE = re.compile(r'filename\s*=\s*"([^"]+)"|filename\s*=\s*([^;]+)', re.IGNORECASE)
+
+
+def _parse_content_disposition_filename(header_value: str | None) -> str | None:
+    """Extract a filename from a `Content-Disposition` header, preferring
+    the RFC 5987 `filename*=UTF-8''...` form (percent-encoded, so it survives
+    non-ASCII names) over the plain `filename="..."` form. None if the
+    header is absent or has neither form."""
+    if not header_value:
+        return None
+    star_match = _CD_FILENAME_STAR_RE.search(header_value)
+    if star_match:
+        candidate = unquote(star_match.group(1).strip())
+        if candidate:
+            return candidate
+    match = _CD_FILENAME_RE.search(header_value)
+    if match:
+        candidate = (match.group(1) or match.group(2) or "").strip().strip('"')
+        if candidate:
+            return candidate
+    return None
+
+
 def _filename_from_url(url: str) -> str:
-    return safe_basename_from_url_path(urlparse(url).path, default_stem="download", default_ext=".bin")
+    return safe_basename_from_url_path(urlparse(url).path, default_stem="download", default_ext="")
+
+
+def _filename_from_response(url: str, response) -> str:
+    """The name to save this download under: the server's own suggested
+    filename (`Content-Disposition`) if it offered one, else one derived
+    from the URL's path. Either way, a missing extension is filled in from
+    `Content-Type` as a stopgap - the authoritative fix for a missing or
+    misleading extension is `media_probe.correct_extension`, which inspects
+    the actual bytes once the file is fully on disk; this only keeps a
+    server that sends no extension at all (and whose bytes `filetype` can't
+    identify either, e.g. an ISO image or MSI installer) from producing a
+    bare, extension-less filename."""
+    cd_name = _parse_content_disposition_filename(response.headers.get("Content-Disposition"))
+    if cd_name:
+        name = safe_basename_from_url_path(cd_name, default_stem="download", default_ext="")
+    else:
+        name = _filename_from_url(url)
+    if not name:
+        name = "download"
+    if not Path(name).suffix:
+        ext = extension_for_content_type(response.headers.get("Content-Type")) or ".bin"
+        name = f"{name}{ext}"
+    return name
 
 
 def _preflight_and_stream_to_file(
     url: str,
-    dest_path: Path,
+    dest_dir: Path,
     max_size: int | None,
     cancel_token: CancellationToken | None = None,
     progress=None,
     loop=None,
-) -> None:
+) -> Path:
     try:
         with safe_request("HEAD", url, timeout=10) as head_resp:
             if head_resp.status_code < 400:
@@ -161,25 +207,34 @@ def _preflight_and_stream_to_file(
     except Exception as exc:  # noqa: BLE001
         logger.debug("Preflight HEAD request failed for %s: %s; proceeding to GET", url, exc)
 
-    _stream_to_file(url, dest_path, max_size, cancel_token, progress, loop)
+    return _stream_to_file(url, dest_dir, max_size, cancel_token, progress, loop)
 
 
 def _stream_to_file(
     url: str,
-    dest_path: Path,
+    dest_dir: Path,
     max_size: int | None,
     cancel_token: CancellationToken | None = None,
     progress=None,
     loop=None,
-) -> None:
+) -> Path:
     with safe_request("GET", url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
         reject_if_not_media_content_type(response)
         _reject_if_declared_size_too_large(response, url, max_size)
+        # Only decided now, not before the request: a redirect can land on a
+        # server that names the file very differently from the original URL
+        # (`Content-Disposition`), and `response` here is already the final
+        # hop (`ssrf_guard.safe_request` re-validates and follows redirects
+        # itself) - the HEAD preflight above is a best-effort optimization
+        # only, never the source of the filename.
+        dest_path = within_directory(
+            dest_dir, _filename_from_response(url, response), fallback="download.bin"
+        )
         if cancel_token is not None:
             if cancel_token.is_set():
                 response.close()
-                return
+                return dest_path
             cancel_token.on_cancel(response.close)
 
         # Parsed once: also the total shown in the progress bar below
@@ -231,7 +286,7 @@ def _stream_to_file(
             if cancel_token is not None and cancel_token.is_set():
                 # Cancelled mid-stream: what is on disk is a truncated file, not a result.
                 dest_path.unlink(missing_ok=True)
-                return
+                return dest_path
             if 0 < len(head) < SNIFF_BYTES:
                 reject_if_not_media_body(head)
         except (DownloadTooLargeError, UnsupportedUrlError):
@@ -240,8 +295,9 @@ def _stream_to_file(
         except Exception:
             dest_path.unlink(missing_ok=True)
             if cancel_token is not None and cancel_token.is_set():
-                return
+                return dest_path
             raise
+    return dest_path
 
 
 def _reject_if_declared_size_too_large(response, url: str, max_size: int | None) -> None:
