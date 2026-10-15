@@ -41,7 +41,8 @@ def test_adds_stdout_handler_with_file_format_and_level(tmp_path, capsys):
     root = logging.getLogger()
     before = len(root.handlers)
     configure_logging(str(tmp_path / "bot.log"), 1024, 1)
-    assert len(root.handlers) == before + 2
+    # file handler + stdout handler + the per-request log handler.
+    assert len(root.handlers) == before + 3
 
     console = _stdout_handlers(root)[0]
     file_handler = next(h for h in _owned(root) if isinstance(h, logging.handlers.RotatingFileHandler))
@@ -72,7 +73,8 @@ def test_console_can_be_disabled(tmp_path):
     root = logging.getLogger()
     before = len(root.handlers)
     configure_logging(str(tmp_path / "bot.log"), 1024, 1, log_to_console=False)
-    assert len(root.handlers) == before + 1
+    # file handler + the per-request log handler (no stdout handler).
+    assert len(root.handlers) == before + 2
     assert not _stdout_handlers(root)
 
 

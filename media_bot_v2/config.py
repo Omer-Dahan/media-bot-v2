@@ -8,7 +8,7 @@ this rewrite are documented in spec/SPEC.md.
 
 from __future__ import annotations
 
-from pydantic import AliasChoices, Field, field_validator
+from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 # The old bot's Telethon session file name. Starting this bot with the same
@@ -63,9 +63,20 @@ class Settings(BaseSettings):
     # discovered later in an archive-copy warning log.
     archive_channel: int | str | None = Field(default=None, validation_alias="ARCHIVE_CHANNEL")
 
-    @field_validator("archive_channel", mode="before")
+    # --- Error reporting to the archive channel ---
+    error_reports_enabled: bool = Field(default=True, validation_alias="ERROR_REPORTS_ENABLED")
+    # `int | str | None`, normalized the same way as archive_channel below -
+    # falls back to archive_channel at bootstrap time when left unset.
+    error_report_channel: int | str | None = Field(default=None, validation_alias="ERROR_REPORT_CHANNEL")
+    # Comma-separated `kind` values to silence (e.g. "not_media,too_large").
+    error_report_skip: str = Field(default="", validation_alias="ERROR_REPORT_SKIP")
+    error_report_dedup_seconds: float = Field(default=600.0, validation_alias="ERROR_REPORT_DEDUP_SECONDS")
+    error_report_max_per_minute: int = Field(default=10, validation_alias="ERROR_REPORT_MAX_PER_MINUTE")
+    request_log_max_lines: int = Field(default=300, validation_alias="REQUEST_LOG_MAX_LINES")
+
+    @field_validator("archive_channel", "error_report_channel", mode="before")
     @classmethod
-    def _normalize_archive_channel(cls, value: object) -> int | str | None:
+    def _normalize_archive_channel(cls, value: object, info: ValidationInfo) -> int | str | None:
         if value is None or isinstance(value, int):
             return value
         text = str(value).strip()
@@ -76,8 +87,9 @@ class Settings(BaseSettings):
         digits = text.removeprefix("-")
         if digits.isdigit():
             return int(text)
+        env_name = "ARCHIVE_CHANNEL" if info.field_name == "archive_channel" else "ERROR_REPORT_CHANNEL"
         raise ValueError(
-            f"ARCHIVE_CHANNEL={text!r} אינו בפורמט נתמך. "
+            f"{env_name}={text!r} אינו בפורמט נתמך. "
             "השתמשו במזהה מספרי של ערוץ/סופרגרופ (למשל -1003534083142) "
             "או בשם משתמש של ערוץ ציבורי שמתחיל ב-@ (למשל @my_channel)."
         )
@@ -218,6 +230,10 @@ class Settings(BaseSettings):
     @property
     def parsed_disabled_providers(self) -> set[str]:
         return {p.strip().lower() for p in self.disabled_providers.split(",") if p.strip()}
+
+    @property
+    def parsed_error_report_skip(self) -> set[str]:
+        return {p.strip().lower() for p in self.error_report_skip.split(",") if p.strip()}
 
 
 

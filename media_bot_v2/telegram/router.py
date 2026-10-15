@@ -45,6 +45,7 @@ from media_bot_v2.engines.youtube import (
     fetch_title_duration,
     is_playlist_url,
 )
+from media_bot_v2.logging_setup import request_log_scope
 from media_bot_v2.pipeline import DownloadPipeline
 from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
@@ -52,6 +53,7 @@ from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import settings_menu, texts
 from media_bot_v2.telegram.callback_data import decode, encode
 from media_bot_v2.telegram.delivery import DeliveryOptions
+from media_bot_v2.telegram.error_report import ErrorReporter, classify_kind
 from media_bot_v2.telegram.flood_wait import (
     FLOOD_WAIT_ERRORS,
     call_with_flood_retry,
@@ -88,6 +90,20 @@ def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
     if not host:
         return False
     return any(host == d or host.endswith("." + d) for d in hosts)
+
+
+def _infer_platform(url: str) -> str:
+    """Best-effort platform guess for a URL whose handling branch is no
+    longer known - used only by url_handler's outer failure report, where
+    the exception may have happened before (or after) the branch that would
+    have told us for certain."""
+    if _host_matches(url, YOUTUBE_HOSTS):
+        return "youtube"
+    if _host_matches(url, TIKTOK_HOSTS):
+        return "tiktok"
+    if _host_matches(url, INSTAGRAM_HOSTS):
+        return "instagram"
+    return "direct"
 
 
 def _sender_info(event) -> tuple[str | None, str | None]:
@@ -236,6 +252,8 @@ def register_handlers(
     tiktok_cookies_file: str | None = None,
     instagram_cookies_file: str | None = None,
     retry_store: RetryStore | None = None,
+    error_reporter: ErrorReporter | None = None,
+    request_log_max_lines: int = 300,
 ) -> None:
     quality_store = QualitySelectionStore()
     if retry_store is None:
@@ -349,108 +367,147 @@ def register_handlers(
         progress: MessageProgressReporter,
         delivery: DeliveryOptions | None = None,
     ) -> None:
-        try:
-            if delivery is None:
-                delivery = load_delivery(job_user_id, first_name=None, username=None)
-            total_credits = credits_service.get_total_credits(job_user_id)
+        request_started = time.monotonic()
 
-            if job_platform == "youtube":
-                is_playlist = is_playlist_url(job_url)
-                if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
-                    raise CreditsExhaustedException(texts.CREDITS_EXHAUSTED)
-                playlist_limit = (
-                    int(total_credits) if is_playlist and math.isfinite(total_credits) else None
-                )
-                engine = build_youtube_engine(
-                    job_quality or "720",
-                    progress=progress,
-                    is_playlist=is_playlist,
-                    playlist_item_limit=playlist_limit,
-                    subtitles=delivery.subtitles,
-                )
-                media_ref = extract_video_id(job_url) or job_url
-                cache_key = compute_cache_key(media_ref, job_quality or "720", delivery.send_as, delivery.subtitles)
-            elif job_platform == "tiktok":
-                engine = TikTokEngine(
-                    registry=registry,
-                    health_tracker=health_tracker,
-                    max_download_size=max_download_size,
-                    cookies_file=tiktok_cookies_file,
-                    progress=progress,
-                )
-                cache_key = compute_cache_key(job_url, "tiktok", delivery.send_as)
-            elif job_platform == "instagram":
-                engine = InstagramEngine(
-                    max_download_size=max_download_size,
-                    cookies_file=instagram_cookies_file,
-                    force_ipv4=force_ipv4,
-                    progress=progress,
-                )
-                cache_key = compute_cache_key(
-                    extract_instagram_id(job_url) or job_url, "instagram", delivery.send_as
-                )
-            else:  # direct
-                engine = DirectEngine(max_download_size=max_download_size, progress=progress)
-                cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
-
-            uploader = TelethonUploader(
-                client, chat_id=job_chat_id, archive_channel=archive_channel,
-                workers=upload_workers, connections=upload_connections,
-                adaptive=True,
-                on_flood=progress.handle_flood_wait,
+        def _report(exc: BaseException | None, user_text: str) -> None:
+            if error_reporter is None:
+                return
+            error_reporter.report(
+                user_id=job_user_id,
+                user_display=delivery.user_display if delivery is not None else "",
+                chat_id=job_chat_id,
+                url=job_url,
+                platform=job_platform,
+                quality=job_quality,
+                kind=classify_kind(exc),
+                user_text=user_text,
+                exc=exc,
+                started_at=request_started,
             )
 
-            async def on_wait() -> None:
-                if progress is not None:
-                    await progress.update(texts.QUEUE_WAIT, is_terminal=False)
+        # Opened before anything else so log lines written by the engine,
+        # yt-dlp, ffmpeg and provider HTTP calls (via executor.run_in_thread,
+        # which copies this context into the worker thread) all land in the
+        # same buffer - the one _report() above attaches to a failure report.
+        with request_log_scope(
+            user_id=job_user_id, url=job_url, platform=job_platform, max_lines=request_log_max_lines
+        ):
+            try:
+                if delivery is None:
+                    delivery = load_delivery(job_user_id, first_name=None, username=None)
+                total_credits = credits_service.get_total_credits(job_user_id)
 
-            async with limiter.slot(job_user_id, on_wait=on_wait):
-                await _run_cancellable(
-                    active_cancellations,
-                    chat_id=job_chat_id,
-                    message=message,
-                    owner_id=job_user_id,
-                    progress=progress,
-                    coro=pipeline.run(
-                        user_id=job_user_id,
-                        url=job_url,
-                        engine=engine,
-                        uploader=uploader,
+                if job_platform == "youtube":
+                    is_playlist = is_playlist_url(job_url)
+                    if is_playlist and math.isfinite(total_credits) and total_credits <= 0:
+                        raise CreditsExhaustedException(texts.CREDITS_EXHAUSTED)
+                    playlist_limit = (
+                        int(total_credits) if is_playlist and math.isfinite(total_credits) else None
+                    )
+                    engine = build_youtube_engine(
+                        job_quality or "720",
                         progress=progress,
-                        cache=video_cache_store,
-                        cache_key=cache_key,
-                        archive_channel=archive_channel,
-                        delivery=delivery,
-                        audio_only=(job_quality == "audio"),
-                    ),
+                        is_playlist=is_playlist,
+                        playlist_item_limit=playlist_limit,
+                        subtitles=delivery.subtitles,
+                    )
+                    media_ref = extract_video_id(job_url) or job_url
+                    cache_key = compute_cache_key(
+                        media_ref, job_quality or "720", delivery.send_as, delivery.subtitles
+                    )
+                elif job_platform == "tiktok":
+                    engine = TikTokEngine(
+                        registry=registry,
+                        health_tracker=health_tracker,
+                        max_download_size=max_download_size,
+                        cookies_file=tiktok_cookies_file,
+                        progress=progress,
+                    )
+                    cache_key = compute_cache_key(job_url, "tiktok", delivery.send_as)
+                elif job_platform == "instagram":
+                    engine = InstagramEngine(
+                        max_download_size=max_download_size,
+                        cookies_file=instagram_cookies_file,
+                        force_ipv4=force_ipv4,
+                        progress=progress,
+                    )
+                    cache_key = compute_cache_key(
+                        extract_instagram_id(job_url) or job_url, "instagram", delivery.send_as
+                    )
+                else:  # direct
+                    engine = DirectEngine(max_download_size=max_download_size, progress=progress)
+                    cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
+
+                uploader = TelethonUploader(
+                    client, chat_id=job_chat_id, archive_channel=archive_channel,
+                    workers=upload_workers, connections=upload_connections,
+                    adaptive=True,
+                    on_flood=progress.handle_flood_wait,
                 )
-        except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
-            msg_id = getattr(getattr(progress, "_message", message), "id", None)
-            if msg_id is not None:
-                retry_store.remove((job_chat_id, msg_id))
-            if progress is not None:
-                await _report_quota_error(progress, exc)
-        except (YouTubeDownloadError, TikTokDownloadError, InstagramDownloadError, DownloadTooLargeError, UnsupportedUrlError) as exc:
-            if not getattr(progress, "is_terminal_completed", False):
-                await progress.update(str(exc), is_terminal=True)
-        except FLOOD_WAIT_ERRORS as exc:
-            wait_seconds = get_flood_wait_seconds(exc)
-            logger.warning("Download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, job_url)
-            if not getattr(progress, "is_terminal_completed", False):
-                await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
-        except TimeoutError:
-            if not getattr(progress, "is_terminal_completed", False):
-                try:
-                    await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on timeout", exc_info=True)
-        except Exception:
-            logger.exception("Download failed for url=%s", job_url)
-            if not getattr(progress, "is_terminal_completed", False):
-                try:
-                    await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                except Exception:
-                    logger.debug("Failed to update progress on general failure", exc_info=True)
+
+                async def on_wait() -> None:
+                    if progress is not None:
+                        await progress.update(texts.QUEUE_WAIT, is_terminal=False)
+
+                async with limiter.slot(job_user_id, on_wait=on_wait):
+                    await _run_cancellable(
+                        active_cancellations,
+                        chat_id=job_chat_id,
+                        message=message,
+                        owner_id=job_user_id,
+                        progress=progress,
+                        coro=pipeline.run(
+                            user_id=job_user_id,
+                            url=job_url,
+                            engine=engine,
+                            uploader=uploader,
+                            progress=progress,
+                            cache=video_cache_store,
+                            cache_key=cache_key,
+                            archive_channel=archive_channel,
+                            delivery=delivery,
+                            audio_only=(job_quality == "audio"),
+                        ),
+                    )
+            except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
+                msg_id = getattr(getattr(progress, "_message", message), "id", None)
+                if msg_id is not None:
+                    retry_store.remove((job_chat_id, msg_id))
+                if progress is not None:
+                    await _report_quota_error(progress, exc)
+            except (
+                YouTubeDownloadError,
+                TikTokDownloadError,
+                InstagramDownloadError,
+                DownloadTooLargeError,
+                UnsupportedUrlError,
+            ) as exc:
+                if not getattr(progress, "is_terminal_completed", False):
+                    await progress.update(str(exc), is_terminal=True)
+                _report(exc, str(exc))
+            except FLOOD_WAIT_ERRORS as exc:
+                wait_seconds = get_flood_wait_seconds(exc)
+                logger.warning(
+                    "Download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, job_url
+                )
+                if not getattr(progress, "is_terminal_completed", False):
+                    await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
+                _report(exc, texts.FLOOD_WAIT_FAILED)
+            except TimeoutError as exc:
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on timeout", exc_info=True)
+                _report(exc, texts.REQUEST_TIMEOUT_EXCEEDED)
+            except Exception as exc:
+                logger.exception("Download failed for url=%s", job_url)
+                if not getattr(progress, "is_terminal_completed", False):
+                    try:
+                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                    except Exception:
+                        logger.debug("Failed to update progress on general failure", exc_info=True)
+                _report(exc, texts.DOWNLOAD_FAILED)
 
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
@@ -514,6 +571,7 @@ def register_handlers(
 
     @client.on(events.CallbackQuery(pattern=rb"^ytq:"))
     async def quality_pick_handler(event: events.CallbackQuery.Event) -> None:
+        handler_started = time.monotonic()
         parts = decode(event.data)
         if len(parts) != 3 or parts[0] != "ytq":
             await _safe_answer_callback(event)
@@ -527,6 +585,7 @@ def register_handlers(
             return
 
         progress: MessageProgressReporter | None = None
+        delivery: DeliveryOptions | None = None
         try:
             delivery = load_delivery(event.sender_id, first_name=None, username=None)
 
@@ -593,8 +652,21 @@ def register_handlers(
                 progress=progress,
                 delivery=delivery,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Early failure in quality pick for url=%s", url)
+            if error_reporter is not None:
+                error_reporter.report(
+                    user_id=event.sender_id,
+                    user_display=delivery.user_display if delivery is not None else "",
+                    chat_id=event.chat_id,
+                    url=url,
+                    platform="youtube",
+                    quality=quality,
+                    kind=classify_kind(exc),
+                    user_text=texts.DOWNLOAD_FAILED,
+                    exc=exc,
+                    started_at=handler_started,
+                )
             if progress is not None:
                 if not getattr(progress, "is_terminal_completed", False):
                     try:
@@ -630,6 +702,7 @@ def register_handlers(
 
     @client.on(events.CallbackQuery(pattern=rb"^retry(:|$)"))
     async def retry_handler(event: events.CallbackQuery.Event) -> None:
+        handler_started = time.monotonic()
         if getattr(event, "is_private", None) is False:
             return
 
@@ -698,7 +771,7 @@ def register_handlers(
                 platform=old_platform,
                 quality=old_quality,
             )
-        except Exception:
+        except Exception as exc:
             # Anything failing before the download itself starts (message
             # edit/respond, progress setup) must not leave is_running stuck:
             # with no _execute_download call, nothing will ever reach the
@@ -706,6 +779,20 @@ def register_handlers(
             # running" for up to the store's TTL. The retry context itself is
             # kept (not removed) so the same button works on a second click.
             logger.exception("Early failure in retry handler before download started for retry_id=%s", retry_id)
+            if error_reporter is not None:
+                first_name, username = _sender_info(event)
+                error_reporter.report(
+                    user_id=retry_ctx.user_id,
+                    user_display=_display_name(first_name, username),
+                    chat_id=retry_ctx.chat_id,
+                    url=retry_ctx.url,
+                    platform=retry_ctx.platform,
+                    quality=retry_ctx.quality,
+                    kind=classify_kind(exc),
+                    user_text=texts.DOWNLOAD_FAILED,
+                    exc=exc,
+                    started_at=handler_started,
+                )
             retry_ctx.is_running = False
             return
 
@@ -725,6 +812,7 @@ def register_handlers(
     # Private chats only, like the old bot: a link posted in a group is ignored.
     @client.on(events.NewMessage(func=lambda e: bool(getattr(e, "is_private", False))))
     async def url_handler(event: events.NewMessage.Event) -> None:
+        handler_started = time.monotonic()
         raw_text = event.raw_text or ""
         if raw_text.startswith("/"):
             return
@@ -738,6 +826,7 @@ def register_handlers(
         url = match.group(0)
 
         progress: MessageProgressReporter | None = None
+        delivery: DeliveryOptions | None = None
         try:
             first_name, username = _sender_info(event)
             delivery = load_delivery(event.sender_id, first_name=first_name, username=username)
@@ -824,8 +913,21 @@ def register_handlers(
                 message=message,
                 progress=progress,
             )
-        except Exception:
+        except Exception as exc:
             logger.exception("Handler failed for url=%s", url)
+            if error_reporter is not None:
+                error_reporter.report(
+                    user_id=event.sender_id,
+                    user_display=delivery.user_display if delivery is not None else "",
+                    chat_id=event.chat_id,
+                    url=url,
+                    platform=_infer_platform(url),
+                    quality=None,
+                    kind=classify_kind(exc),
+                    user_text=texts.DOWNLOAD_FAILED,
+                    exc=exc,
+                    started_at=handler_started,
+                )
             if progress is not None:
                 if not getattr(progress, "is_terminal_completed", False):
                     try:

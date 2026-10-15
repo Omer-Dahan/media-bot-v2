@@ -18,6 +18,7 @@ callers (mainly tests) that use the pipeline without going through bootstrap.
 from __future__ import annotations
 
 import asyncio
+import contextvars
 import functools
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
@@ -56,6 +57,14 @@ def get_thread_pool() -> ThreadPoolExecutor:
 
 async def run_in_thread[**P, T](func: Callable[P, T], *args: P.args, **kwargs: P.kwargs) -> T:
     """`asyncio.to_thread()`, but on the dedicated pool above instead of the
-    event loop's default executor."""
+    event loop's default executor.
+
+    Copies the current `contextvars.Context` into the worker thread, exactly
+    as `asyncio.to_thread()` does - otherwise `ContextVar`s set on the calling
+    task (notably the per-request log buffer, `logging_setup.request_log_scope`)
+    would never be visible to log lines written from yt-dlp, ffmpeg and
+    provider HTTP calls, all of which run their blocking work here.
+    """
     loop = asyncio.get_running_loop()
-    return await loop.run_in_executor(get_thread_pool(), functools.partial(func, *args, **kwargs))
+    ctx = contextvars.copy_context()
+    return await loop.run_in_executor(get_thread_pool(), functools.partial(ctx.run, func, *args, **kwargs))

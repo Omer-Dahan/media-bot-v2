@@ -271,6 +271,34 @@ def format_download_summary(
     return "\n".join(lines)
 
 
+# --- Error report to the archive/error channel (telegram/error_report.py) ---
+
+ERROR_REPORT_PLATFORM_HE = {
+    "youtube": "יוטיוב",
+    "tiktok": "טיקטוק",
+    "instagram": "אינסטגרם",
+    "direct": "קישור ישיר",
+}
+
+ERROR_REPORT_QUALITY_NONE = "-"
+
+ERROR_REPORT_HEADER = "❌ <b>דיווח שגיאה</b> #{platform} #{kind}"
+ERROR_REPORT_BODY = (
+    "👤 משתמש: {user_display}\n"
+    "🆔 <code>{user_id}</code>\n"
+    "🧭 מסלול: {platform_he} · איכות: {quality}\n"
+    "<blockquote expandable>🔗 קישור: {url}</blockquote>\n"
+    "⚠️ הודעה למשתמש: {user_text}\n"
+    "🔧 חריגה: <code>{exc_type}: {exc_text}</code>\n"
+    "⏱️ משך: {elapsed} · 🕒 {timestamp}"
+)
+ERROR_REPORT_LOG_SECTION = "<blockquote expandable>📋 לוג מפורט:\n<pre>{log_tail}</pre></blockquote>"
+ERROR_REPORT_NO_LOG = "אין לוג זמין"
+ERROR_REPORT_TRUNCATED_NOTICE = "... (נקטעו {n} שורות ראשונות, הלוג המלא בקובץ המצורף)"
+ERROR_REPORT_RATE_LIMITED_NOTICE = "ℹ️ דולגו {n} דיווחים בגלל הגבלת קצב"
+ERROR_REPORT_FILE_CAPTION = "📎 לוג מלא · <code>{user_id}</code>"
+
+
 def format_failure_summary(attempts: list[tuple[str, str]]) -> str:
     if not attempts:
         return DOWNLOAD_FAILED

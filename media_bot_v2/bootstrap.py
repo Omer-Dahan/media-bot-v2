@@ -27,6 +27,7 @@ from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import build_provider_registry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram.client import build_client
+from media_bot_v2.telegram.error_report import ErrorReporter
 from media_bot_v2.telegram.flood_wait import FLOOD_WAIT_ERRORS, get_flood_wait_seconds
 from media_bot_v2.telegram.parallel_upload import init_upload_concurrency_limit
 from media_bot_v2.telegram.router import register_handlers
@@ -150,6 +151,14 @@ def main() -> None:
     registry = build_provider_registry(settings)
 
     client = build_client(settings, session_name=settings.session_name)
+    error_reporter = ErrorReporter(
+        client,
+        settings.error_report_channel or settings.archive_channel,
+        enabled=settings.error_reports_enabled,
+        skip_kinds=frozenset(settings.parsed_error_report_skip),
+        dedup_seconds=settings.error_report_dedup_seconds,
+        max_per_minute=settings.error_report_max_per_minute,
+    )
     register_handlers(
         client,
         session_factory=session_factory,
@@ -172,6 +181,8 @@ def main() -> None:
         registry=registry,
         tiktok_cookies_file=settings.tiktok_cookies_file,
         instagram_cookies_file=settings.instagram_cookies_file,
+        error_reporter=error_reporter,
+        request_log_max_lines=settings.request_log_max_lines,
     )
 
     logger.info("Starting media-bot-v2")
