@@ -125,6 +125,7 @@ def build_report_text(
     timestamp: str,
     log_lines: list[str],
     rate_limited_skipped: int = 0,
+    attachment_available: bool = True,
 ) -> tuple[str, bool]:
     """Pure: builds the HTML report message. Returns `(text, log_truncated)`.
 
@@ -191,7 +192,12 @@ def build_report_text(
     def render(kept_lines: list[str], dropped_count: int) -> str:
         text = "\n".join(kept_lines)
         if dropped_count:
-            notice = texts.ERROR_REPORT_TRUNCATED_NOTICE.format(n=dropped_count)
+            notice_template = (
+                texts.ERROR_REPORT_TRUNCATED_NOTICE
+                if attachment_available
+                else texts.ERROR_REPORT_TRUNCATED_NOTICE_NO_ATTACHMENT
+            )
+            notice = notice_template.format(n=dropped_count)
             text = f"{notice}\n{text}" if text else notice
         log_section = texts.ERROR_REPORT_LOG_SECTION.format(log_tail=html.escape(text))
         return f"{header_body}\n{log_section}"
@@ -320,15 +326,32 @@ class ErrorReporter:
         while self._sent_at and now - self._sent_at[0] >= 60.0:
             self._sent_at.popleft()
 
-    def _try_consume_rate_slot(self, now: float) -> bool:
+    def _rate_slot_available(self, now: float) -> bool:
+        """Peeks whether a rate slot is currently free, without consuming
+        one - used to decide, before the message text is built, whether the
+        attachment will actually be sendable, so the message never promises
+        an attachment the budget is about to block."""
+        self._prune_rate_window(now)
+        return len(self._sent_at) < self._max_per_minute
+
+    def _try_consume_rate_slot(self, now: float, *, count_as_skip: bool = True) -> bool:
         """Spends one slot of the global per-minute token bucket - used both
         for the report's message and, separately, for its attached log file
         (triage 3.6: "הודעה וקובץ נספרים כל אחד בנפרד"), so a stream of
         truncated reports cannot double the real send rate to the channel
-        past `ERROR_REPORT_MAX_PER_MINUTE`."""
+        past `ERROR_REPORT_MAX_PER_MINUTE`.
+
+        `count_as_skip` gates whether a failure bumps `_rate_limited_skipped`
+        - the counter behind the "N reports skipped" notice must only count
+        reports that were themselves skipped (the `report()` call site below),
+        never an attachment that was skipped while its report still went out
+        (the `_send_unsafe` call site), or the notice would claim more drops
+        than actually happened.
+        """
         self._prune_rate_window(now)
         if len(self._sent_at) >= self._max_per_minute:
-            self._rate_limited_skipped += 1
+            if count_as_skip:
+                self._rate_limited_skipped += 1
             return False
         self._sent_at.append(now)
         return True
@@ -356,6 +379,10 @@ class ErrorReporter:
         rate_limited_skipped: int,
     ) -> None:
         log_lines = log_text.split("\n") if log_text else []
+        # Peeked (not consumed) before the text is built, so the message
+        # never promises an attachment that the budget is about to block -
+        # see _rate_slot_available's docstring.
+        attachment_available = self._rate_slot_available(self._clock())
         text, truncated = build_report_text(
             platform=platform,
             kind=kind,
@@ -369,6 +396,7 @@ class ErrorReporter:
             timestamp=timestamp,
             log_lines=log_lines,
             rate_limited_skipped=rate_limited_skipped,
+            attachment_available=attachment_available,
         )
         # A new message, never an edit - no `buttons`/`reply_markup` kwarg at
         # all (docs/LESSONS.md 11: an empty ReplyInlineMarkup([]) is rejected
@@ -389,7 +417,9 @@ class ErrorReporter:
             # separately from the message above (triage 3.6) - skip it
             # rather than let a burst of truncated reports double the real
             # per-minute send rate past ERROR_REPORT_MAX_PER_MINUTE.
-            if not self._try_consume_rate_slot(self._clock()):
+            if not attachment_available or not self._try_consume_rate_slot(
+                self._clock(), count_as_skip=False
+            ):
                 logger.info("Error report log attachment skipped (rate limit: %d/min reached)", self._max_per_minute)
                 return
             full_log = mask_secrets(log_text)

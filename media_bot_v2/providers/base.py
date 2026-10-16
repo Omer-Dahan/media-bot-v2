@@ -48,15 +48,29 @@ _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+")
 # `Cookie: SID=...; session=...` / `Set-Cookie: ...` headers: the value after
 # `SID=` is not caught by _SENSITIVE_QUERY_PARAM_RE above because "SID" and
 # arbitrary cookie names are not in the sensitive-key list - there is no
-# bounded set of cookie names to enumerate, so the whole header value (to
-# end of line) is redacted instead of trying to parse individual pairs.
-_COOKIE_HEADER_RE = re.compile(r"(?i)\b(cookie|set-cookie)\s*:\s*[^\r\n]+")
+# bounded set of cookie names to enumerate, so the whole header value is
+# redacted instead of trying to parse individual pairs. The header name may
+# be followed by a closing quote before the colon (a Python dict repr like
+# `'Cookie': 'SID=...'` or a JSON body like `"Cookie": "SID=..."`), so an
+# optional quote plus whitespace is allowed on both sides of the colon; the
+# value itself is then terminated at the matching closing quote when one is
+# present, or at end of line otherwise - never past it, so a dict repr's
+# next key is left untouched.
+_COOKIE_HEADER_RE = re.compile(
+    r"(?i)\b(cookie|set-cookie)[\"']?\s*:\s*"
+    r"(?:\"[^\"\r\n]*\"|'[^'\r\n]*'|[^\r\n]*)"
+)
 
 # A bare Telegram bot token (`123456789:AAH...`), as opposed to one embedded
 # in a `token=`/`api_key=`-style query param (already covered above) - this
 # is the exact shape that leaked into the journal in production before
-# M11.17 masked it in the provider path only, not generally.
-_BOT_TOKEN_RE = re.compile(r"\b(\d{6,10}):[A-Za-z0-9_-]{30,}\b")
+# M11.17 masked it in the provider path only, not generally. The token's own
+# digit run is immediately preceded by a letter in a Bot API URL
+# (`.../bot123456789:AAH.../sendMessage`), and a letter-to-digit transition is
+# not a `\b` word boundary, so the boundary is a negative lookbehind for
+# another digit instead - that still rejects matching a few digits in the
+# middle of a longer run, while letting a preceding letter through.
+_BOT_TOKEN_RE = re.compile(r"(?<!\d)(\d{6,10}):[A-Za-z0-9_-]{30,}\b")
 
 
 def mask_secrets(text: str) -> str:

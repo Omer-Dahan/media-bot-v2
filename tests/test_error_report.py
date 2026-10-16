@@ -19,6 +19,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
@@ -235,7 +236,14 @@ async def test_failed_send_is_warning_only_and_download_path_still_finishes(capl
     msg = event.messages[0]
     assert msg.edits[-1] == "too big"
     assert any("Error report to archive failed" in r.message for r in caplog.records)
-    assert credit_calls == baseline_calls
+    # Absolute truth, not merely "same as baseline": the fake pipeline never
+    # charges credits on its own, so both runs must show an empty call list.
+    # Comparing only to `baseline_calls` is blind to a mutation that charges
+    # credits from the error-report path itself, since the baseline run (with
+    # error_reporter=None) exercises that exact same mutated code and would
+    # also pick up the bogus charge, making the two sides match anyway.
+    assert baseline_calls == []
+    assert credit_calls == []
 
 
 # 3. Cancellation, credits-exhausted and bandwidth-exhausted are never
@@ -271,12 +279,18 @@ async def test_large_log_truncates_under_limit_and_attaches_full_log():
     # Stays under RequestLogBuffer's own 300-line cap (so every line survives
     # into current_request_log()) while still totalling ~50KB, so the
     # *message* truncation (not the buffer's own line cap) is what's tested.
+    # The very last line (the one that survives truncation, since the tail is
+    # kept) ends with a bare `&` rather than padding - `html.escape` turns it
+    # into a trailing `&amp;`, so a mutant that truncates characters *after*
+    # escaping instead of before would slice right through that entity,
+    # instead of landing harmlessly inside "xxxx" filler.
     padding = "x" * 200
     with request_log_scope(user_id=99, url="https://evil.example/x", platform="direct") as buffer:
         for i in range(200):
-            buffer.append(
-                f'line {i}: <tag> & "quoted" value api_key=notasecret{i} {padding}'
-            )
+            line = f'line {i}: <tag> & "quoted" value api_key=notasecret{i} {padding}'
+            if i == 199:
+                line += "&"
+            buffer.append(line)
         reporter.report(
             user_id=99,
             user_display="Tester",
@@ -296,6 +310,11 @@ async def test_large_log_truncates_under_limit_and_attaches_full_log():
     text = sends[0].args[1]
     assert utf16_units(text) <= MESSAGE_LIMIT
     assert "line 0:" not in text  # the head was dropped, the tail was kept
+    assert "&amp;</pre>" in text  # the trailing entity survived whole
+    # No truncation (of this message or any defensive clamp) may have landed
+    # mid-entity and left a dangling fragment such as "&qu" or "&am" behind -
+    # every "&" in the rendered text must start a complete, known entity.
+    assert re.search(r"&(?!amp;|lt;|gt;|quot;|#39;)", text) is None
 
     files = _channel_files(client)
     assert len(files) == 1
@@ -314,6 +333,75 @@ async def test_large_log_truncates_under_limit_and_attaches_full_log():
     assert sent_name is not None and sent_name.startswith("error_log_99_")
     attached_text = attached_buf.getvalue().decode("utf-8")
     assert "line 0:" in attached_text  # full log is in the attachment
+
+
+# 4b. M12.3: a burst of truncated reports that exhausts the per-minute budget
+# on the *attachment* slot must not inflate the "N reports skipped" counter
+# (every report's own message still goes out - only the file is skipped), and
+# the message must say the file was skipped rather than promise an
+# attachment that will never arrive.
+async def test_burst_of_truncated_reports_skips_only_files_not_reports():
+    client = FakeTelegramClient()
+    fake_time = {"t": 1000.0}
+    reporter = ErrorReporter(
+        client, CHANNEL, max_per_minute=4, dedup_seconds=600.0, clock=lambda: fake_time["t"]
+    )
+
+    padding = "x" * 200
+
+    def _report(i: int) -> None:
+        with request_log_scope(
+            user_id=100 + i, url=f"https://evil.example/burst/{i}", platform="direct"
+        ) as buffer:
+            for j in range(200):
+                buffer.append(f'line {j}: <tag> & "quoted" value {padding}')
+            reporter.report(
+                user_id=100 + i,
+                user_display="Tester",
+                chat_id=1234,
+                url=f"https://evil.example/burst/{i}",
+                platform="direct",
+                quality=None,
+                kind="internal",
+                user_text=texts.DOWNLOAD_FAILED,
+                exc=RuntimeError("boom"),
+                started_at=time.monotonic(),
+            )
+
+    for i in range(4):
+        _report(i)
+    await _drain(reporter)
+
+    sends = _channel_sends(client)
+    assert len(sends) == 4, "every one of the 4 reports must still get its message out"
+    assert _channel_files(client) == [], "the budget has no room left for any attachment"
+    for send in sends:
+        text = send.args[1]
+        assert "הקובץ המצורף דולג בגלל הגבלת קצב" in text, "must admit the file was skipped"
+        assert "הלוג המלא בקובץ המצורף" not in text, "must not promise an attachment that never arrives"
+
+    # Advance past the 60s window so the next report gets a fresh message
+    # slot. Before the fix, the four file-only skips above each incremented
+    # the same counter as a report skip, so this next report's notice would
+    # falsely claim 4 reports were dropped even though all 4 got through.
+    fake_time["t"] += 61.0
+    reporter.report(
+        user_id=999,
+        user_display="Tester",
+        chat_id=1234,
+        url="https://evil.example/after-burst",
+        platform="direct",
+        quality=None,
+        kind="internal",
+        user_text=texts.DOWNLOAD_FAILED,
+        exc=RuntimeError("boom"),
+        started_at=time.monotonic(),
+    )
+    await _drain(reporter)
+
+    sends = _channel_sends(client)
+    assert len(sends) == 5
+    assert "דולגו" not in sends[-1].args[1], "no report was actually skipped - the notice must not appear"
 
 
 # 5. Dedup within the window; a different kind reports again.

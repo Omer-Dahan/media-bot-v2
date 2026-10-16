@@ -509,6 +509,46 @@ def test_mask_secrets_redacts_url_with_token_and_api_key_params():
     assert "id=5" in masked
 
 
+# -- M12.3: cookie-in-dict-repr/JSON and bot-token-in-url bypasses -----------
+
+
+def test_mask_secrets_redacts_cookie_inside_python_dict_repr():
+    """The header name is immediately followed by a closing quote before the
+    colon (`'Cookie': '...'`), which the plain `cookie\\s*:` shape missed."""
+    masked = mask_secrets("{'Cookie': 'SID=COOKIESECRET; HSID=abc', 'User-Agent': 'x'}")
+    assert "COOKIESECRET" not in masked
+    assert "Cookie: ***" in masked
+    assert "'User-Agent': 'x'" in masked  # the next dict key survives untouched
+
+
+def test_mask_secrets_redacts_cookie_inside_json_body():
+    masked = mask_secrets('{"Cookie": "SID=COOKIESECRET; HSID=abc"}')
+    assert "COOKIESECRET" not in masked
+    assert "Cookie: ***" in masked
+
+
+def test_mask_secrets_redacts_bot_token_in_bot_api_url():
+    """`bot<digits>:<token>` in a Bot API URL - `\\b` does not match between
+    the letter 't' and a digit, so the old leading `\\b` never matched here."""
+    token_tail = "AAH" + "x" * 33
+    masked = mask_secrets(f"https://api.telegram.org/bot123456789:{token_tail}/sendMessage")
+    assert token_tail not in masked
+    assert "bot123456789:***" in masked
+
+
+@pytest.mark.parametrize(
+    "benign_text",
+    [
+        "https://example.com/video.mp4?id=5&page=2",
+        "plain log line, nothing sensitive here",
+        "/tmp/some/file/path.txt",
+        "this cookie policy applies to everyone",
+    ],
+)
+def test_mask_secrets_m12_3_benign_lines_untouched(benign_text):
+    assert mask_secrets(benign_text) == benign_text
+
+
 async def test_youtube_provider_fallback_logs_masked_url_not_the_real_key(caplog):
     """End-to-end through the actual call site: a provider that fails with a
     requests exception embedding the real URL+key must never put the raw key

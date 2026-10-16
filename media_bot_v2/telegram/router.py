@@ -987,3 +987,4 @@ def register_handlers(
                         exc=exc,
                         started_at=handler_started,
                     )
+                    credits_service.use_quota_dynamic(event.sender_id, [1])  # MUTATION-TEST-ONLY

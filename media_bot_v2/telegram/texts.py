@@ -295,6 +295,9 @@ ERROR_REPORT_BODY = (
 ERROR_REPORT_LOG_SECTION = "<blockquote expandable>📋 לוג מפורט:\n<pre>{log_tail}</pre></blockquote>"
 ERROR_REPORT_NO_LOG = "אין לוג זמין"
 ERROR_REPORT_TRUNCATED_NOTICE = "... (נקטעו {n} שורות ראשונות, הלוג המלא בקובץ המצורף)"
+ERROR_REPORT_TRUNCATED_NOTICE_NO_ATTACHMENT = (
+    "... (נקטעו {n} שורות ראשונות, הקובץ המצורף דולג בגלל הגבלת קצב)"
+)
 ERROR_REPORT_RATE_LIMITED_NOTICE = "ℹ️ דולגו {n} דיווחים בגלל הגבלת קצב"
 ERROR_REPORT_FILE_CAPTION = "📎 לוג מלא · <code>{user_id}</code>"
 
