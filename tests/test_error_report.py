@@ -38,6 +38,7 @@ from media_bot_v2.logging_setup import RequestLogHandler, current_request_log, r
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.captions import MESSAGE_LIMIT, utf16_units
 from media_bot_v2.telegram.error_report import ErrorReporter, classify_kind
+from media_bot_v2.telegram.progress import MessageProgressReporter
 from media_bot_v2.telegram.router import register_handlers
 from tests.fakes_telegram import FakeTelegramClient
 
@@ -111,7 +112,7 @@ class _ControllablePipeline:
 
 def _setup(
     client: FakeTelegramClient, pipeline: _ControllablePipeline, *, error_reporter: ErrorReporter | None
-) -> Any:
+) -> tuple[Any, CreditsService]:
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
@@ -135,7 +136,7 @@ def _setup(
         if isinstance(event, events.NewMessage) and event.pattern is None:
             url_handler = callback
     assert url_handler is not None, "url_handler not found"
-    return url_handler
+    return url_handler, credits_service
 
 
 def _channel_sends(client: FakeTelegramClient) -> list:
@@ -148,16 +149,39 @@ def _channel_files(client: FakeTelegramClient) -> list:
 
 # 1. A domain failure reports exactly once, with no `buttons` kwarg, after
 # the user already has the terminal failure message.
-async def test_domain_failure_sends_one_channel_report_without_buttons():
+async def test_domain_failure_sends_one_channel_report_without_buttons(monkeypatch):
     pipeline = _ControllablePipeline()
     pipeline.fail_with = DownloadTooLargeError("custom too-large message")
     client = FakeTelegramClient()
     reporter = ErrorReporter(client, CHANNEL)
-    url_handler = _setup(client, pipeline, error_reporter=reporter)
+    url_handler, _ = _setup(client, pipeline, error_reporter=reporter)
+
+    # Records the order the SUT *calls* progress.update() vs. error_reporter
+    # .report() - report() itself only ever schedules a background send, so
+    # this is the only reliable way to prove the user-facing update happens
+    # first even though the two don't race on the network.
+    sequence: list[str] = []
+    original_update = MessageProgressReporter.update
+    original_report = ErrorReporter.report
+
+    async def _tracked_update(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sequence.append("progress_update")
+        return await original_update(self, *args, **kwargs)
+
+    def _tracked_report(self: Any, *args: Any, **kwargs: Any) -> Any:
+        sequence.append("report")
+        return original_report(self, *args, **kwargs)
+
+    monkeypatch.setattr(MessageProgressReporter, "update", _tracked_update)
+    monkeypatch.setattr(ErrorReporter, "report", _tracked_report)
 
     event = _FakeEvent("https://www.tiktok.com/@user/video/111", sender_id=42)
     await url_handler(event)
     await _drain(reporter)
+
+    assert sequence == ["progress_update", "report"], (
+        "the user must see the failure before the channel report is scheduled"
+    )
 
     msg = event.messages[0]
     assert msg.edits[-1] == "custom too-large message"
@@ -170,13 +194,33 @@ async def test_domain_failure_sends_one_channel_report_without_buttons():
 
 
 # 2. A send_message failure is only ever a WARNING; the handler finishes
-# normally, with no exception escaping.
+# normally, with no exception escaping - and, crucially, charges credits
+# exactly as it would have with no reporter at all (error_report.py's module
+# docstring promises it "never touches credits").
 async def test_failed_send_is_warning_only_and_download_path_still_finishes(caplog):
     pipeline = _ControllablePipeline()
     pipeline.fail_with = DownloadTooLargeError("too big")
+
+    def _spy_use_quota(calls: list[tuple[int, list[int]]]) -> Any:
+        def _use_quota_dynamic(user_id: int, file_sizes: list[int]) -> int:
+            calls.append((user_id, list(file_sizes)))
+            return 0
+
+        return _use_quota_dynamic
+
+    # Baseline: the exact same failure, with no reporter wired in at all.
+    # Whatever credits calls happen here are the only ones that are ever
+    # correct - a report must never add to them.
+    baseline_calls: list[tuple[int, list[int]]] = []
+    baseline_handler, baseline_credits = _setup(FakeTelegramClient(), pipeline, error_reporter=None)
+    baseline_credits.use_quota_dynamic = _spy_use_quota(baseline_calls)
+    await baseline_handler(_FakeEvent("https://www.tiktok.com/@user/video/222", sender_id=43))
+
     client = FakeTelegramClient()
     reporter = ErrorReporter(client, CHANNEL)
-    url_handler = _setup(client, pipeline, error_reporter=reporter)
+    url_handler, credits_service = _setup(client, pipeline, error_reporter=reporter)
+    credit_calls: list[tuple[int, list[int]]] = []
+    credits_service.use_quota_dynamic = _spy_use_quota(credit_calls)
 
     async def _boom(*args: Any, **kwargs: Any) -> Any:
         raise RuntimeError("Telegram is down")
@@ -191,6 +235,7 @@ async def test_failed_send_is_warning_only_and_download_path_still_finishes(capl
     msg = event.messages[0]
     assert msg.edits[-1] == "too big"
     assert any("Error report to archive failed" in r.message for r in caplog.records)
+    assert credit_calls == baseline_calls
 
 
 # 3. Cancellation, credits-exhausted and bandwidth-exhausted are never
@@ -199,7 +244,7 @@ async def test_cancellation_credits_and_bandwidth_are_never_reported():
     pipeline = _ControllablePipeline()
     client = FakeTelegramClient()
     reporter = ErrorReporter(client, CHANNEL)
-    url_handler = _setup(client, pipeline, error_reporter=reporter)
+    url_handler, _ = _setup(client, pipeline, error_reporter=reporter)
 
     pipeline.fail_with = CreditsExhaustedException(texts.CREDITS_EXHAUSTED)
     await url_handler(_FakeEvent("https://www.tiktok.com/@user/video/333", sender_id=44))
@@ -254,8 +299,20 @@ async def test_large_log_truncates_under_limit_and_attaches_full_log():
 
     files = _channel_files(client)
     assert len(files) == 1
-    assert files[0].kwargs.get("file_name", "").startswith("error_log_99_")
-    attached_text = files[0].args[1].getvalue().decode("utf-8")
+    attached_buf = files[0].args[1]
+    # Telethon's send_file has no `file_name` kwarg - asserting on a fake
+    # client's recorded kwargs would prove nothing about what Telegram
+    # actually receives. What really determines the filename is
+    # telethon.utils.get_attributes(), which falls back to the file-like
+    # object's own `.name` attribute.
+    from telethon import utils as telethon_utils
+
+    attributes, _mime = telethon_utils.get_attributes(attached_buf)
+    sent_name = next(
+        (a.file_name for a in attributes if hasattr(a, "file_name")), None
+    )
+    assert sent_name is not None and sent_name.startswith("error_log_99_")
+    attached_text = attached_buf.getvalue().decode("utf-8")
     assert "line 0:" in attached_text  # full log is in the attachment
 
 

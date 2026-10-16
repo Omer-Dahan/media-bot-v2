@@ -255,3 +255,14 @@ def test_archive_channel_positive_numeric_id_also_becomes_int(monkeypatch):
     settings = Settings(_env_file=None)
     assert settings.archive_channel == 123456789
     assert isinstance(settings.archive_channel, int)
+
+
+def test_request_log_max_lines_rejects_negative_value_at_startup(monkeypatch):
+    """REQUEST_LOG_MAX_LINES=-1 must fail Settings construction (startup),
+    not surface later as a per-request crash inside request_log_scope - the
+    `ge=1` bound on the field is what makes that guarantee true."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("REQUEST_LOG_MAX_LINES", "-1")
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    assert "REQUEST_LOG_MAX_LINES" in str(excinfo.value)

@@ -62,8 +62,14 @@ async def run_in_thread[**P, T](func: Callable[P, T], *args: P.args, **kwargs: P
     Copies the current `contextvars.Context` into the worker thread, exactly
     as `asyncio.to_thread()` does - otherwise `ContextVar`s set on the calling
     task (notably the per-request log buffer, `logging_setup.request_log_scope`)
-    would never be visible to log lines written from yt-dlp, ffmpeg and
-    provider HTTP calls, all of which run their blocking work here.
+    would never be visible to log lines written from here, e.g. a provider's
+    HTTP-error logging. This does NOT by itself make yt-dlp's or ffmpeg's own
+    output land in that buffer: yt-dlp currently runs with `quiet=True,
+    no_warnings=True` and no `logger=` passed, so its `ERROR:`/warning lines
+    go straight to stderr, never through `logging` at all, and ffmpeg's
+    output is captured separately as subprocess output - not via a Python
+    logger either. Routing those into the buffer is a later stage (the
+    yt-dlp `logger` adapter noted in the triage, section 3.5).
     """
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()

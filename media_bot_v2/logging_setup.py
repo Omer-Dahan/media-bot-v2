@@ -65,7 +65,12 @@ class RequestLogBuffer:
     def append(self, line: str) -> None:
         masked = mask_secrets(line)
         if len(masked) > REQUEST_LOG_LINE_MAX_CHARS:
-            masked = masked[:REQUEST_LOG_LINE_MAX_CHARS]
+            # Keep the tail, not the head: a multi-line record (a traceback
+            # appended by logging.Formatter.format()) has its most useful
+            # line - the actual exception - last, and cutting the head
+            # loses the operator-facing `[HH:MM:SS LEVEL logger]` prefix
+            # before that, which matters far less than the error itself.
+            masked = "…" + masked[-(REQUEST_LOG_LINE_MAX_CHARS - 1) :]
         self._lines.append(masked)
 
     def lines(self) -> list[str]:

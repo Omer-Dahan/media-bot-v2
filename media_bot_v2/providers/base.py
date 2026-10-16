@@ -45,16 +45,31 @@ _SENSITIVE_QUERY_PARAM_RE = re.compile(
 )
 _BEARER_TOKEN_RE = re.compile(r"(?i)\bBearer\s+[A-Za-z0-9._\-]+")
 
+# `Cookie: SID=...; session=...` / `Set-Cookie: ...` headers: the value after
+# `SID=` is not caught by _SENSITIVE_QUERY_PARAM_RE above because "SID" and
+# arbitrary cookie names are not in the sensitive-key list - there is no
+# bounded set of cookie names to enumerate, so the whole header value (to
+# end of line) is redacted instead of trying to parse individual pairs.
+_COOKIE_HEADER_RE = re.compile(r"(?i)\b(cookie|set-cookie)\s*:\s*[^\r\n]+")
+
+# A bare Telegram bot token (`123456789:AAH...`), as opposed to one embedded
+# in a `token=`/`api_key=`-style query param (already covered above) - this
+# is the exact shape that leaked into the journal in production before
+# M11.17 masked it in the provider path only, not generally.
+_BOT_TOKEN_RE = re.compile(r"\b(\d{6,10}):[A-Za-z0-9_-]{30,}\b")
+
 
 def mask_secrets(text: str) -> str:
-    """Redact query-string secrets, JSON/text-body secrets, and bearer tokens
-    from free-form text (an exception message, a log line, ...) before it is
-    logged or stored. Safe to call on text with nothing to mask - returns it
-    unchanged."""
+    """Redact query-string secrets, JSON/text-body secrets, bearer tokens,
+    cookie headers, and bare bot tokens from free-form text (an exception
+    message, a log line, ...) before it is logged or stored. Safe to call on
+    text with nothing to mask - returns it unchanged."""
     if not text:
         return text
     masked = _SENSITIVE_QUERY_PARAM_RE.sub(lambda m: f"{m.group(1)}=***", text)
     masked = _BEARER_TOKEN_RE.sub("Bearer ***", masked)
+    masked = _COOKIE_HEADER_RE.sub(lambda m: f"{m.group(1)}: ***", masked)
+    masked = _BOT_TOKEN_RE.sub(lambda m: f"{m.group(1)}:***", masked)
     return masked
 
 

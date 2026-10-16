@@ -22,6 +22,7 @@ from collections.abc import Callable
 from datetime import datetime
 from typing import Any
 
+import requests
 from telethon import TelegramClient
 
 from media_bot_v2.engines.base import DownloadTooLargeError, NotMediaContentError
@@ -46,6 +47,13 @@ _TARGET_BUDGET = 3900
 _MIN_LOG_BUDGET = 500
 
 _TRUNCATED_USER_FIELD_LIMIT = 300
+_URL_FIELD_LIMIT = 300
+
+# engines/direct.py does not yet classify requests.HTTPError into a domain
+# exception (that mapping is a later stage) - it currently reaches here as a
+# bare requests.exceptions.HTTPError, so this is the one place that can give
+# it the `http_4xx` kind the triage's ERROR_REPORT_SKIP list documents.
+_HTTP_4XX_STATUSES = frozenset({401, 403, 404, 410, 451})
 
 
 def classify_kind(exc: BaseException | None) -> str:
@@ -63,6 +71,11 @@ def classify_kind(exc: BaseException | None) -> str:
         return "flood"
     if isinstance(exc, TimeoutError):
         return "timeout"
+    if isinstance(exc, requests.exceptions.HTTPError):
+        status_code = getattr(getattr(exc, "response", None), "status_code", None)
+        if status_code in _HTTP_4XX_STATUSES:
+            return "http_4xx"
+        return "provider"
     if isinstance(exc, ProviderFetchError):
         return "provider"
     return "internal"
@@ -128,6 +141,12 @@ def build_report_text(
     exc_type = type(exc).__name__ if exc is not None else "Unknown"
     exc_text = _truncate_plain(mask_secrets(_exc_text(exc)), _TRUNCATED_USER_FIELD_LIMIT)
     user_text_plain = _truncate_plain(mask_secrets(user_text or ""), _TRUNCATED_USER_FIELD_LIMIT)
+    # A url can carry a query string with its own secrets (?token=.../
+    # ?api_key=...) and, separately, can be long enough on its own (long
+    # tracking params etc.) to push the whole report past Telegram's 4096
+    # limit - mask it like every other dynamic field, then cap its length
+    # the same way exc_text/user_text are capped above.
+    url_plain = _truncate_plain(mask_secrets(url or ""), _URL_FIELD_LIMIT)
 
     header = texts.ERROR_REPORT_HEADER.format(platform=html.escape(platform), kind=html.escape(kind))
     body = texts.ERROR_REPORT_BODY.format(
@@ -135,7 +154,7 @@ def build_report_text(
         user_id=user_id,
         platform_he=html.escape(platform_he),
         quality=html.escape(quality_label),
-        url=html.escape(url),
+        url=html.escape(url_plain),
         user_text=html.escape(user_text_plain),
         exc_type=html.escape(exc_type),
         exc_text=html.escape(exc_text),
@@ -147,9 +166,23 @@ def build_report_text(
         rate_notice = texts.ERROR_REPORT_RATE_LIMITED_NOTICE.format(n=rate_limited_skipped) + "\n"
     header_body = f"{header}\n{body}\n{rate_notice}".rstrip("\n")
 
+    # Defensive floor: every dynamic field above is already capped, but
+    # never trust that alone - if the header on its own is still too close
+    # to (or over) the limit, there is no `kept`/log-section loop below that
+    # could ever bring the final message back under 4096, and the report
+    # would be silently lost (Telegram rejects it, _send() only logs a
+    # WARNING). Hard-clamp it here so build_report_text always returns
+    # something Telegram will actually accept.
+    while utf16_units(header_body) > MESSAGE_LIMIT - _MIN_LOG_BUDGET and len(header_body) > 100:
+        header_body = header_body[: len(header_body) - 200]
+
     if not log_lines:
         log_section = texts.ERROR_REPORT_LOG_SECTION.format(log_tail=texts.ERROR_REPORT_NO_LOG)
-        return f"{header_body}\n{log_section}", False
+        full_text = f"{header_body}\n{log_section}"
+        while utf16_units(full_text) > MESSAGE_LIMIT and len(header_body) > 100:
+            header_body = header_body[: len(header_body) - 200]
+            full_text = f"{header_body}\n{log_section}"
+        return full_text, False
 
     header_units = utf16_units(header_body)
     budget = max(_MIN_LOG_BUDGET, _TARGET_BUDGET - header_units)
@@ -167,6 +200,14 @@ def build_report_text(
     while utf16_units(full_text) > MESSAGE_LIMIT and kept:
         dropped += 1
         kept = kept[1:]
+        full_text = render(kept, dropped)
+
+    # Last resort: even with every log line dropped, a header built entirely
+    # from maximally-sized, escape-heavy fields could still be over budget on
+    # its own - the loop above cannot fix that (it only ever shrinks `kept`,
+    # which is already empty). Never return something over the limit.
+    while utf16_units(full_text) > MESSAGE_LIMIT and len(header_body) > 100:
+        header_body = header_body[: len(header_body) - 200]
         full_text = render(kept, dropped)
 
     return full_text, dropped > 0
@@ -236,14 +277,11 @@ class ErrorReporter:
             logger.info("Error report skipped (dedup: user=%s url=%s kind=%s)", user_id, url, kind)
             return
 
-        self._prune_rate_window(now)
-        if len(self._sent_at) >= self._max_per_minute:
-            self._rate_limited_skipped += 1
+        if not self._try_consume_rate_slot(now):
             logger.info("Error report skipped (rate limit: %d/min reached)", self._max_per_minute)
             return
 
         self._dedup[dedup_key] = now
-        self._sent_at.append(now)
         rate_limited_skipped = self._rate_limited_skipped
         self._rate_limited_skipped = 0
 
@@ -281,6 +319,19 @@ class ErrorReporter:
     def _prune_rate_window(self, now: float) -> None:
         while self._sent_at and now - self._sent_at[0] >= 60.0:
             self._sent_at.popleft()
+
+    def _try_consume_rate_slot(self, now: float) -> bool:
+        """Spends one slot of the global per-minute token bucket - used both
+        for the report's message and, separately, for its attached log file
+        (triage 3.6: "הודעה וקובץ נספרים כל אחד בנפרד"), so a stream of
+        truncated reports cannot double the real send rate to the channel
+        past `ERROR_REPORT_MAX_PER_MINUTE`."""
+        self._prune_rate_window(now)
+        if len(self._sent_at) >= self._max_per_minute:
+            self._rate_limited_skipped += 1
+            return False
+        self._sent_at.append(now)
+        return True
 
     async def _send(self, **kwargs: Any) -> None:
         try:
@@ -334,14 +385,27 @@ class ErrorReporter:
             max_total_wait_seconds=_REPORT_FLOOD_MAX_TOTAL_WAIT_SECONDS,
         )
         if truncated and log_text:
+            # The attachment is its own send against the channel, counted
+            # separately from the message above (triage 3.6) - skip it
+            # rather than let a burst of truncated reports double the real
+            # per-minute send rate past ERROR_REPORT_MAX_PER_MINUTE.
+            if not self._try_consume_rate_slot(self._clock()):
+                logger.info("Error report log attachment skipped (rate limit: %d/min reached)", self._max_per_minute)
+                return
             full_log = mask_secrets(log_text)
             now_local = datetime.now().astimezone()
             file_name = f"error_log_{user_id}_{now_local.strftime('%Y%m%d-%H%M%S')}.txt"
+            # Telethon's send_file has no `file_name` parameter - it has none
+            # at all and a stray `file_name=` kwarg is silently swallowed, so
+            # the attachment arrived as "unnamed". Telethon derives the name
+            # from the file-like object's own `.name` attribute instead
+            # (telethon.utils.get_attributes), so set it directly on the buffer.
+            buf = io.BytesIO(full_log.encode("utf-8"))
+            buf.name = file_name
             await call_with_flood_retry(
                 self._client.send_file,
                 self._channel,
-                io.BytesIO(full_log.encode("utf-8")),
-                file_name=file_name,
+                buf,
                 caption=texts.ERROR_REPORT_FILE_CAPTION.format(user_id=user_id),
                 parse_mode="html",
                 reply_to=getattr(sent, "id", None),

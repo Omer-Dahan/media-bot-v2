@@ -257,17 +257,17 @@ first deployment:
 Copy the sample unit and edit the `CHANGE-ME` placeholders (project path,
 venv path, and the JS runtime's PATH entry):
 
-```bash
-sudo cp deploy/download-bot-v2.service /etc/systemd/system/
-sudo nano /etc/systemd/system/download-bot-v2.service   # fill in CHANGE-ME spots
-sudo systemctl daemon-reload
-sudo systemctl enable download-bot-v2.service
-```
+`deploy/download-bot-v2.service` is only the sample file's name in this repo -
+production installs it as `download-bot.service`, and every command below
+uses that name. Rename it to whatever you actually want if you pick
+something else, and use that name consistently instead:
 
-The filename above is only the sample's name - rename it to whatever you
-want the live unit called (production runs this bot as `download-bot.service`,
-not `download-bot-v2.service`). Match whatever name you pick in every
-`systemctl`/`journalctl` command below and in the cutover steps.
+```bash
+sudo cp deploy/download-bot-v2.service /etc/systemd/system/download-bot.service
+sudo nano /etc/systemd/system/download-bot.service   # fill in CHANGE-ME spots
+sudo systemctl daemon-reload
+sudo systemctl enable download-bot.service
+```
 
 Do not `systemctl start` it yet - see the cutover steps below.
 
@@ -322,12 +322,12 @@ bot's session file or losing in-flight user data.
 4. **Start the new bot** with the production `BOT_TOKEN` and `DB_DSN` now
    in its `.env`:
    ```bash
-   sudo systemctl start download-bot-v2.service
-   sudo systemctl status download-bot-v2.service
+   sudo systemctl start download-bot.service
+   sudo systemctl status download-bot.service
    ```
 
 5. **Verify immediately:**
-   - `journalctl -u download-bot-v2.service -f` shows "Starting
+   - `journalctl -u download-bot.service -f` shows "Starting
      media-bot-v2" with no startup exceptions.
    - Send `/ping` from a personal Telegram account and confirm a reply.
    - Send `/start` from an account that already exists in the DB and
@@ -351,7 +351,7 @@ bot's session file or losing in-flight user data.
 If step 5 turns up a serious problem:
 
 ```bash
-sudo systemctl stop download-bot-v2.service
+sudo systemctl stop download-bot.service
 sudo systemctl start <old-bot-service-name>
 ```
 

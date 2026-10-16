@@ -385,10 +385,12 @@ def register_handlers(
                 started_at=request_started,
             )
 
-        # Opened before anything else so log lines written by the engine,
-        # yt-dlp, ffmpeg and provider HTTP calls (via executor.run_in_thread,
-        # which copies this context into the worker thread) all land in the
-        # same buffer - the one _report() above attaches to a failure report.
+        # Opened before anything else so log lines written here - including
+        # ones from worker threads via executor.run_in_thread, which copies
+        # this context - land in the same buffer the _report() above attaches
+        # to a failure report. This does NOT yet include yt-dlp's or ffmpeg's
+        # own output (they don't log through Python's `logging`, see
+        # executor.py's run_in_thread docstring) - that is a later stage.
         with request_log_scope(
             user_id=job_user_id, url=job_url, platform=job_platform, max_lines=request_log_max_lines
         ):
@@ -586,102 +588,119 @@ def register_handlers(
 
         progress: MessageProgressReporter | None = None
         delivery: DeliveryOptions | None = None
-        try:
-            delivery = load_delivery(event.sender_id, first_name=None, username=None)
-
-            # Edit the menu message itself into the progress message (one message
-            # per download, no new one), and confirm with a short toast.
-            quality_name = texts.QUALITY_NAMES.get(quality, quality)
-            if quality == "audio":
-                toast = texts.QUALITY_TOAST_AUDIO
-                status_text = texts.DOWNLOADING_AUDIO
-            else:
-                toast = texts.QUALITY_TOAST.format(name=quality_name)
-                status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
-            await _safe_answer_callback(event, toast)
-
-            menu_deadline = time.monotonic() + MENU_STATUS_TIMEOUT_SECONDS
-            message = None
-            rem = max(0.0, menu_deadline - time.monotonic())
+        # Opened here, not just inside _execute_download, so a failure in this
+        # handler's own setup (before _execute_download is even reached) can
+        # still be reported with real log lines instead of "no log available".
+        with request_log_scope(
+            user_id=event.sender_id, url=url, platform="youtube", max_lines=request_log_max_lines
+        ):
             try:
-                message = await call_with_flood_retry(
-                    event.edit, status_text, buttons=_cancel_markup(), max_wait_seconds=rem, max_total_wait_seconds=rem
-                )
-            except MessageNotModifiedError:
-                try:
-                    rem = max(0.0, menu_deadline - time.monotonic())
-                    message = await call_with_flood_retry(
-                        event.get_message, max_wait_seconds=rem, max_total_wait_seconds=rem
-                    )
-                except (RPCError, ConnectionError, TimeoutError, OSError):
-                    logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
-                    message = getattr(event, "message", None)
-            except (RPCError, ConnectionError, TimeoutError, OSError):
-                logger.debug("Failed to edit the quality menu message", exc_info=True)
-            if message is None:
-                rem = max(0.0, menu_deadline - time.monotonic())
-                if rem > 0:
-                    try:
-                        message = await call_with_flood_retry(
-                            event.respond,
-                            status_text,
-                            buttons=_cancel_markup(),
-                            max_wait_seconds=rem,
-                            max_total_wait_seconds=rem,
-                        )
-                    except Exception:
-                        logger.debug("Failed to send new status message after edit failure", exc_info=True)
-                        message = getattr(event, "message", None) or event
+                delivery = load_delivery(event.sender_id, first_name=None, username=None)
+
+                # Edit the menu message itself into the progress message (one message
+                # per download, no new one), and confirm with a short toast.
+                quality_name = texts.QUALITY_NAMES.get(quality, quality)
+                if quality == "audio":
+                    toast = texts.QUALITY_TOAST_AUDIO
+                    status_text = texts.DOWNLOADING_AUDIO
                 else:
-                    message = getattr(event, "message", None) or event
-            progress = make_progress(
-                message,
-                user_id=event.sender_id,
-                chat_id=event.chat_id,
-                url=url,
-                platform="youtube",
-                quality=quality,
-            )
-            await _execute_download(
-                job_user_id=event.sender_id,
-                job_chat_id=event.chat_id,
-                job_url=url,
-                job_platform="youtube",
-                job_quality=quality,
-                message=message,
-                progress=progress,
-                delivery=delivery,
-            )
-        except Exception as exc:
-            logger.exception("Early failure in quality pick for url=%s", url)
-            if error_reporter is not None:
-                error_reporter.report(
+                    toast = texts.QUALITY_TOAST.format(name=quality_name)
+                    status_text = texts.DOWNLOADING_QUALITY.format(name=quality_name)
+                await _safe_answer_callback(event, toast)
+
+                menu_deadline = time.monotonic() + MENU_STATUS_TIMEOUT_SECONDS
+                message = None
+                rem = max(0.0, menu_deadline - time.monotonic())
+                try:
+                    message = await call_with_flood_retry(
+                        event.edit,
+                        status_text,
+                        buttons=_cancel_markup(),
+                        max_wait_seconds=rem,
+                        max_total_wait_seconds=rem,
+                    )
+                except MessageNotModifiedError:
+                    try:
+                        rem = max(0.0, menu_deadline - time.monotonic())
+                        message = await call_with_flood_retry(
+                            event.get_message, max_wait_seconds=rem, max_total_wait_seconds=rem
+                        )
+                    except (RPCError, ConnectionError, TimeoutError, OSError):
+                        logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
+                        message = getattr(event, "message", None)
+                except (RPCError, ConnectionError, TimeoutError, OSError):
+                    logger.debug("Failed to edit the quality menu message", exc_info=True)
+                if message is None:
+                    rem = max(0.0, menu_deadline - time.monotonic())
+                    if rem > 0:
+                        try:
+                            message = await call_with_flood_retry(
+                                event.respond,
+                                status_text,
+                                buttons=_cancel_markup(),
+                                max_wait_seconds=rem,
+                                max_total_wait_seconds=rem,
+                            )
+                        except Exception:
+                            logger.debug("Failed to send new status message after edit failure", exc_info=True)
+                            message = getattr(event, "message", None) or event
+                    else:
+                        message = getattr(event, "message", None) or event
+                progress = make_progress(
+                    message,
                     user_id=event.sender_id,
-                    user_display=delivery.user_display if delivery is not None else "",
                     chat_id=event.chat_id,
                     url=url,
                     platform="youtube",
                     quality=quality,
-                    kind=classify_kind(exc),
-                    user_text=texts.DOWNLOAD_FAILED,
-                    exc=exc,
-                    started_at=handler_started,
                 )
-            if progress is not None:
-                if not getattr(progress, "is_terminal_completed", False):
+                await _execute_download(
+                    job_user_id=event.sender_id,
+                    job_chat_id=event.chat_id,
+                    job_url=url,
+                    job_platform="youtube",
+                    job_quality=quality,
+                    message=message,
+                    progress=progress,
+                    delivery=delivery,
+                )
+            except Exception as exc:
+                logger.exception("Early failure in quality pick for url=%s", url)
+                if progress is not None:
+                    if not getattr(progress, "is_terminal_completed", False):
+                        try:
+                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                        except Exception:
+                            logger.debug("Failed to update progress on general failure", exc_info=True)
+                else:
+                    await _safe_answer_callback(event, texts.DOWNLOAD_FAILED, alert=True)
                     try:
-                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
-                    except Exception:
-                        logger.debug("Failed to update progress on general failure", exc_info=True)
-            else:
-                await _safe_answer_callback(event, texts.DOWNLOAD_FAILED, alert=True)
-                try:
-                    await call_with_flood_retry(event.edit, texts.DOWNLOAD_FAILED, buttons=None)
-                except (RPCError, ConnectionError, TimeoutError, OSError):
-                    try:
-                        await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
+                        await call_with_flood_retry(event.edit, texts.DOWNLOAD_FAILED, buttons=None)
                     except (RPCError, ConnectionError, TimeoutError, OSError):
-                        logger.debug("Failed to report error after early failure in quality pick", exc_info=True)
+                        try:
+                            await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
+                        except (RPCError, ConnectionError, TimeoutError, OSError):
+                            logger.debug(
+                                "Failed to report error after early failure in quality pick", exc_info=True
+                            )
+                # Reported last, after every attempt to notify the user above
+                # has already run (succeeded or not) - report() only ever
+                # schedules a background task, so calling it earlier would
+                # let that task reach Telegram before the user's own message
+                # does (reproduced with event.respond raising ConnectionError).
+                if error_reporter is not None:
+                    error_reporter.report(
+                        user_id=event.sender_id,
+                        user_display=delivery.user_display if delivery is not None else "",
+                        chat_id=event.chat_id,
+                        url=url,
+                        platform="youtube",
+                        quality=quality,
+                        kind=classify_kind(exc),
+                        user_text=texts.DOWNLOAD_FAILED,
+                        exc=exc,
+                        started_at=handler_started,
+                    )
 
     @client.on(events.CallbackQuery(pattern=rb"^cancel$"))
     async def cancel_handler(event: events.CallbackQuery.Event) -> None:
@@ -727,74 +746,91 @@ def register_handlers(
             return
 
         retry_ctx.is_running = True
-        try:
-            await _safe_answer_callback(event)
-
-            message = None
+        # Opened here (not just inside _execute_download) so a failure in
+        # this setup step - before _execute_download is ever reached - can
+        # still be reported with real log lines instead of "no log available".
+        with request_log_scope(
+            user_id=retry_ctx.user_id,
+            url=retry_ctx.url,
+            platform=retry_ctx.platform,
+            max_lines=request_log_max_lines,
+        ):
             try:
-                message = await call_with_flood_retry(
-                    event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
-                )
-            except MessageNotModifiedError:
-                try:
-                    message = await call_with_flood_retry(event.get_message)
-                except (RPCError, ConnectionError, TimeoutError, OSError):
-                    message = getattr(event, "message", None)
-            except (RPCError, ConnectionError, TimeoutError, OSError):
-                logger.debug("Failed to edit failure message on retry", exc_info=True)
+                await _safe_answer_callback(event)
 
-            if message is None:
-                try:
-                    await call_with_flood_retry(event.edit, buttons=None)
-                except (RPCError, ConnectionError, TimeoutError, OSError):
-                    logger.debug("Failed to remove buttons on retry message", exc_info=True)
+                message = None
                 try:
                     message = await call_with_flood_retry(
-                        event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                        event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
                     )
+                except MessageNotModifiedError:
+                    try:
+                        message = await call_with_flood_retry(event.get_message)
+                    except (RPCError, ConnectionError, TimeoutError, OSError):
+                        message = getattr(event, "message", None)
                 except (RPCError, ConnectionError, TimeoutError, OSError):
-                    logger.debug("Failed to send replacement status message on retry", exc_info=True)
-                    message = getattr(event, "message", None) or event
+                    logger.debug("Failed to edit failure message on retry", exc_info=True)
 
-            old_id = retry_ctx.retry_id
-            old_url = retry_ctx.url
-            old_platform = retry_ctx.platform
-            old_quality = retry_ctx.quality
-            old_user_id = retry_ctx.user_id
-            old_chat_id = retry_ctx.chat_id
+                if message is None:
+                    try:
+                        await call_with_flood_retry(event.edit, buttons=None)
+                    except (RPCError, ConnectionError, TimeoutError, OSError):
+                        logger.debug("Failed to remove buttons on retry message", exc_info=True)
+                    try:
+                        message = await call_with_flood_retry(
+                            event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                        )
+                    except (RPCError, ConnectionError, TimeoutError, OSError):
+                        logger.debug("Failed to send replacement status message on retry", exc_info=True)
+                        message = getattr(event, "message", None) or event
 
-            progress = make_progress(
-                message,
-                user_id=old_user_id,
-                chat_id=old_chat_id,
-                url=old_url,
-                platform=old_platform,
-                quality=old_quality,
-            )
-        except Exception as exc:
-            # Anything failing before the download itself starts (message
-            # edit/respond, progress setup) must not leave is_running stuck:
-            # with no _execute_download call, nothing will ever reach the
-            # finally below to clear it, and the button would report "already
-            # running" for up to the store's TTL. The retry context itself is
-            # kept (not removed) so the same button works on a second click.
-            logger.exception("Early failure in retry handler before download started for retry_id=%s", retry_id)
-            if error_reporter is not None:
-                first_name, username = _sender_info(event)
-                error_reporter.report(
-                    user_id=retry_ctx.user_id,
-                    user_display=_display_name(first_name, username),
-                    chat_id=retry_ctx.chat_id,
-                    url=retry_ctx.url,
-                    platform=retry_ctx.platform,
-                    quality=retry_ctx.quality,
-                    kind=classify_kind(exc),
-                    user_text=texts.DOWNLOAD_FAILED,
-                    exc=exc,
-                    started_at=handler_started,
+                old_id = retry_ctx.retry_id
+                old_url = retry_ctx.url
+                old_platform = retry_ctx.platform
+                old_quality = retry_ctx.quality
+                old_user_id = retry_ctx.user_id
+                old_chat_id = retry_ctx.chat_id
+
+                progress = make_progress(
+                    message,
+                    user_id=old_user_id,
+                    chat_id=old_chat_id,
+                    url=old_url,
+                    platform=old_platform,
+                    quality=old_quality,
                 )
-            retry_ctx.is_running = False
-            return
+            except Exception as exc:
+                # Anything failing before the download itself starts (message
+                # edit/respond, progress setup) must not leave is_running stuck:
+                # with no _execute_download call, nothing will ever reach the
+                # finally below to clear it, and the button would report "already
+                # running" for up to the store's TTL. The retry context itself is
+                # kept (not removed) so the same button works on a second click.
+                logger.exception(
+                    "Early failure in retry handler before download started for retry_id=%s", retry_id
+                )
+                retry_ctx.is_running = False
+                # Reported last - there is no further user-facing attempt in
+                # this branch (the message edit/respond above already failed,
+                # which is why we're here), but report() is still kept at the
+                # very end on principle: it only ever schedules a background
+                # task and must never run ahead of whatever this branch still
+                # has left to do.
+                if error_reporter is not None:
+                    first_name, username = _sender_info(event)
+                    error_reporter.report(
+                        user_id=retry_ctx.user_id,
+                        user_display=_display_name(first_name, username),
+                        chat_id=retry_ctx.chat_id,
+                        url=retry_ctx.url,
+                        platform=retry_ctx.platform,
+                        quality=retry_ctx.quality,
+                        kind=classify_kind(exc),
+                        user_text=texts.DOWNLOAD_FAILED,
+                        exc=exc,
+                        started_at=handler_started,
+                    )
+                return
 
         try:
             await _execute_download(
@@ -827,47 +863,78 @@ def register_handlers(
 
         progress: MessageProgressReporter | None = None
         delivery: DeliveryOptions | None = None
-        try:
-            first_name, username = _sender_info(event)
-            delivery = load_delivery(event.sender_id, first_name=first_name, username=username)
+        # Opened here, not just inside _execute_download, so a failure in
+        # this handler's own setup (before _execute_download is reached, or
+        # the routing branch below picked) can still be reported with real
+        # log lines instead of "no log available".
+        with request_log_scope(
+            user_id=event.sender_id, url=url, platform=_infer_platform(url), max_lines=request_log_max_lines
+        ):
+            try:
+                first_name, username = _sender_info(event)
+                delivery = load_delivery(event.sender_id, first_name=first_name, username=username)
 
-            if _host_matches(url, YOUTUBE_HOSTS):
-                url_hash = quality_store.put(url)
-                probe_engine = build_youtube_engine("720")
-                title, duration = await fetch_title_duration(
-                    url, opts=probe_engine.info_opts(url), timeout=MENU_LOOKUP_TIMEOUT_SECONDS
-                )
-                await call_with_flood_retry(
-                    event.respond,
-                    texts.YOUTUBE_QUALITY_SELECT.format(
-                        title=(title or "סרטון יוטיוב").translate(_MARKDOWN_SPECIALS),
-                        duration=duration or "לא ידוע",
-                    ),
-                    buttons=build_quality_markup(url_hash, default=delivery.default_quality),
-                )
-                return
-            if _host_matches(url, TIKTOK_HOSTS):
-                message = await call_with_flood_retry(
-                    event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
-                )
-                progress = make_progress(
-                    message,
-                    user_id=event.sender_id,
-                    chat_id=event.chat_id,
-                    url=url,
-                    platform="tiktok",
-                )
-                await _execute_download(
-                    job_user_id=event.sender_id,
-                    job_chat_id=event.chat_id,
-                    job_url=url,
-                    job_platform="tiktok",
-                    message=message,
-                    progress=progress,
-                )
-                return
-            if _host_matches(url, INSTAGRAM_HOSTS):
-                if not matches_instagram_url(url):
+                if _host_matches(url, YOUTUBE_HOSTS):
+                    url_hash = quality_store.put(url)
+                    probe_engine = build_youtube_engine("720")
+                    title, duration = await fetch_title_duration(
+                        url, opts=probe_engine.info_opts(url), timeout=MENU_LOOKUP_TIMEOUT_SECONDS
+                    )
+                    await call_with_flood_retry(
+                        event.respond,
+                        texts.YOUTUBE_QUALITY_SELECT.format(
+                            title=(title or "סרטון יוטיוב").translate(_MARKDOWN_SPECIALS),
+                            duration=duration or "לא ידוע",
+                        ),
+                        buttons=build_quality_markup(url_hash, default=delivery.default_quality),
+                    )
+                    return
+                if _host_matches(url, TIKTOK_HOSTS):
+                    message = await call_with_flood_retry(
+                        event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                    )
+                    progress = make_progress(
+                        message,
+                        user_id=event.sender_id,
+                        chat_id=event.chat_id,
+                        url=url,
+                        platform="tiktok",
+                    )
+                    await _execute_download(
+                        job_user_id=event.sender_id,
+                        job_chat_id=event.chat_id,
+                        job_url=url,
+                        job_platform="tiktok",
+                        message=message,
+                        progress=progress,
+                    )
+                    return
+                if _host_matches(url, INSTAGRAM_HOSTS):
+                    if not matches_instagram_url(url):
+                        await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+                        return
+
+                    message = await call_with_flood_retry(
+                        event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                    )
+                    progress = make_progress(
+                        message,
+                        user_id=event.sender_id,
+                        chat_id=event.chat_id,
+                        url=url,
+                        platform="instagram",
+                    )
+                    await _execute_download(
+                        job_user_id=event.sender_id,
+                        job_chat_id=event.chat_id,
+                        job_url=url,
+                        job_platform="instagram",
+                        message=message,
+                        progress=progress,
+                    )
+                    return
+
+                if not direct_engine.matches(url):
                     await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
                     return
 
@@ -879,63 +946,44 @@ def register_handlers(
                     user_id=event.sender_id,
                     chat_id=event.chat_id,
                     url=url,
-                    platform="instagram",
+                    platform="direct",
                 )
                 await _execute_download(
                     job_user_id=event.sender_id,
                     job_chat_id=event.chat_id,
                     job_url=url,
-                    job_platform="instagram",
+                    job_platform="direct",
                     message=message,
                     progress=progress,
                 )
-                return
-
-            if not direct_engine.matches(url):
-                await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
-                return
-
-            message = await call_with_flood_retry(
-                event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
-            )
-            progress = make_progress(
-                message,
-                user_id=event.sender_id,
-                chat_id=event.chat_id,
-                url=url,
-                platform="direct",
-            )
-            await _execute_download(
-                job_user_id=event.sender_id,
-                job_chat_id=event.chat_id,
-                job_url=url,
-                job_platform="direct",
-                message=message,
-                progress=progress,
-            )
-        except Exception as exc:
-            logger.exception("Handler failed for url=%s", url)
-            if error_reporter is not None:
-                error_reporter.report(
-                    user_id=event.sender_id,
-                    user_display=delivery.user_display if delivery is not None else "",
-                    chat_id=event.chat_id,
-                    url=url,
-                    platform=_infer_platform(url),
-                    quality=None,
-                    kind=classify_kind(exc),
-                    user_text=texts.DOWNLOAD_FAILED,
-                    exc=exc,
-                    started_at=handler_started,
-                )
-            if progress is not None:
-                if not getattr(progress, "is_terminal_completed", False):
+            except Exception as exc:
+                logger.exception("Handler failed for url=%s", url)
+                if progress is not None:
+                    if not getattr(progress, "is_terminal_completed", False):
+                        try:
+                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                        except Exception:
+                            logger.debug("Failed to update progress on general handler failure", exc_info=True)
+                else:
                     try:
-                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                        await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
                     except Exception:
-                        logger.debug("Failed to update progress on general handler failure", exc_info=True)
-            else:
-                try:
-                    await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
-                except Exception:
-                    logger.debug("Failed to send error response on handler failure", exc_info=True)
+                        logger.debug("Failed to send error response on handler failure", exc_info=True)
+                # Reported last, after every attempt to notify the user above
+                # has already run (succeeded or not) - report() only ever
+                # schedules a background task, so calling it earlier would
+                # let that task reach Telegram before the user's own message
+                # does (reproduced with event.respond raising ConnectionError).
+                if error_reporter is not None:
+                    error_reporter.report(
+                        user_id=event.sender_id,
+                        user_display=delivery.user_display if delivery is not None else "",
+                        chat_id=event.chat_id,
+                        url=url,
+                        platform=_infer_platform(url),
+                        quality=None,
+                        kind=classify_kind(exc),
+                        user_text=texts.DOWNLOAD_FAILED,
+                        exc=exc,
+                        started_at=handler_started,
+                    )

@@ -70,9 +70,18 @@ class Settings(BaseSettings):
     error_report_channel: int | str | None = Field(default=None, validation_alias="ERROR_REPORT_CHANNEL")
     # Comma-separated `kind` values to silence (e.g. "not_media,too_large").
     error_report_skip: str = Field(default="", validation_alias="ERROR_REPORT_SKIP")
-    error_report_dedup_seconds: float = Field(default=600.0, validation_alias="ERROR_REPORT_DEDUP_SECONDS")
-    error_report_max_per_minute: int = Field(default=10, validation_alias="ERROR_REPORT_MAX_PER_MINUTE")
-    request_log_max_lines: int = Field(default=300, validation_alias="REQUEST_LOG_MAX_LINES")
+    error_report_dedup_seconds: float = Field(
+        default=600.0, ge=0, validation_alias="ERROR_REPORT_DEDUP_SECONDS"
+    )
+    # 0 would silently disable all reporting, which is what ERROR_REPORTS_ENABLED=false
+    # is for - a bad env value here must fail loudly at startup, not look like "it works".
+    error_report_max_per_minute: int = Field(
+        default=10, ge=1, validation_alias="ERROR_REPORT_MAX_PER_MINUTE"
+    )
+    # 0/negative breaks `collections.deque(maxlen=...)` (ValueError) inside the
+    # request_log_scope() opened at the start of every download - a typo here
+    # must fail at startup, not fail every single request with a misleading error.
+    request_log_max_lines: int = Field(default=300, ge=1, validation_alias="REQUEST_LOG_MAX_LINES")
 
     @field_validator("archive_channel", "error_report_channel", mode="before")
     @classmethod

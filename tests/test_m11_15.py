@@ -472,6 +472,43 @@ def test_mask_secrets_does_not_touch_benign_text(benign_text):
     assert mask_secrets(benign_text) == benign_text
 
 
+# -- M12.1: cookie headers, bare bot tokens, token/api_key URL params --------
+
+
+def test_mask_secrets_redacts_cookie_header():
+    masked = mask_secrets("Cookie: SID=abc123; session=verysecretvalue")
+    assert "abc123" not in masked
+    assert "verysecretvalue" not in masked
+    assert "Cookie: ***" in masked
+
+
+def test_mask_secrets_redacts_set_cookie_header():
+    masked = mask_secrets("Set-Cookie: session=verysecretvalue; Path=/; HttpOnly")
+    assert "verysecretvalue" not in masked
+    assert "Set-Cookie: ***" in masked
+
+
+def test_mask_secrets_redacts_bare_bot_token():
+    """A Telegram bot token (`<digits>:<30+ chars>`) leaked verbatim, not
+    inside a `token=`/`api_key=`-style query param - the shape that reached
+    the journal unmasked before M11.17 only covered the provider path."""
+    token = "123456789:AA" + "x" * 33
+    masked = mask_secrets(f"leaked token in log: {token}")
+    assert token not in masked
+    assert "123456789:***" in masked
+
+
+def test_mask_secrets_redacts_url_with_token_and_api_key_params():
+    masked = mask_secrets(
+        "https://example.com/download?token=SECRETTOKEN&api_key=SECRETAPIKEY&id=5"
+    )
+    assert "SECRETTOKEN" not in masked
+    assert "SECRETAPIKEY" not in masked
+    assert "token=***" in masked
+    assert "api_key=***" in masked
+    assert "id=5" in masked
+
+
 async def test_youtube_provider_fallback_logs_masked_url_not_the_real_key(caplog):
     """End-to-end through the actual call site: a provider that fails with a
     requests exception embedding the real URL+key must never put the raw key
