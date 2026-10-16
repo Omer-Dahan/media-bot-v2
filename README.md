@@ -121,7 +121,7 @@ Comprehensive SSRF protection with redirect hop address inspection, path travers
 <td valign="top">
 
 ### 📨 Failure Reports to the Archive Channel
-Every failed download sends a Hebrew report to the archive channel: user, url, platform, quality, the message the user saw, the exception, and the request's own buffered log tail (the full log attached as a `.txt` when the message had to be truncated). Cancellations, credit, and bandwidth-exhausted failures are not reported.
+A failed download sends a Hebrew report to `ERROR_REPORT_CHANNEL` (or `ARCHIVE_CHANNEL` if unset): user, url, platform, quality, the message the user saw, the exception, and the request's own buffered log tail (the full log attached as a `.txt` when the message had to be truncated). The report is skipped when reports are disabled, when no channel is configured, when the failure `kind` is in `ERROR_REPORT_SKIP`, on a duplicate within the dedup window, when the per-minute rate cap is reached, when the chat equals the report channel, and for cancellation, credits-exhausted, bandwidth-exhausted, or blocked-user failures.
 
 </td>
 </tr>
@@ -135,7 +135,7 @@ Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`)
 <td valign="top">
 
 ### 🧭 Classified Failure Messages
-The YouTube bot-check is recognized even with a curly apostrophe in yt-dlp's text, a private/removed video is never blamed on a broken cookie file, and a direct-link HTTP failure is classified by status code (401/403/410/451 refused, 404/410 gone, 429/5xx busy) with its own Hebrew message and no retry button on a hopeless failure.
+The YouTube bot-check is recognized even with a curly apostrophe in yt-dlp's text, a private/removed video is never blamed on a broken cookie file, and a direct-link HTTP failure is classified by status code (401/403/451 refused, 404/410 gone, 429/5xx busy) with its own Hebrew message and no retry button on a hopeless failure.
 
 </td>
 </tr>
@@ -309,7 +309,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 - **Playlists**: a YouTube playlist download is trimmed to however many items the user's remaining credits can afford; a trimmed delivery says so explicitly rather than silently dropping items.
 - **`SESSION_NAME=main` is hard-blocked**: this collides with the legacy bot's live session file, so `media_bot_v2.config.Settings` raises a `ValidationError` at startup (not just a warning) if `SESSION_NAME` is left at `main`.
 - **Hard limits**: 2000MiB per delivered file (Telegram bot API ceiling; larger files are split) and `MAX_DOWNLOAD_SIZE` (default 4GiB, configurable) per source download, enforced by `DownloadGuard`. An exact `Content-Length`/real downloaded bytes over the cap always rejects; a `total_bytes_estimate` (yt-dlp's extrapolation for split formats) rejects on its own only once it clears **2x** the cap with at least 1MiB of real traffic behind it, so a first-fragment spike cannot refuse a video that would have fit. Trade-off: a borderline-over estimate is let through, and up to one cap's worth of bandwidth/disk can be spent on a file whose estimate turns out wrong.
-- **Failure reports**: a failed download sends a Hebrew report (user, url, platform, quality, the message shown to the user, the exception, and the request's own log tail) to `ERROR_REPORT_CHANNEL` (or `ARCHIVE_CHANNEL` if unset); the full log is attached as a `.txt` when the report had to be truncated. Cancellations, credit-exhausted, and bandwidth-exhausted failures are never reported.
+- **Failure reports**: a failed download sends a Hebrew report (user, url, platform, quality, the message shown to the user, the exception, and the request's own log tail) to `ERROR_REPORT_CHANNEL` (or `ARCHIVE_CHANNEL` if unset); the full log is attached as a `.txt` when the report had to be truncated. The report is skipped when the requesting chat equals the report channel, and cancellation, credits-exhausted, bandwidth-exhausted, and blocked-user failures are never reported.
 
 ---
 
@@ -347,7 +347,7 @@ sudo systemctl enable download-bot.service
 To deploy updates cleanly to the production server:
 
 ```bash
-cd /opt/media-bot-v2 && git pull && uv sync && sudo systemctl restart download-bot-v2.service && sudo journalctl -u download-bot-v2.service -f
+cd /opt/media-bot-v2 && git pull && uv sync && sudo systemctl restart download-bot.service && sudo journalctl -u download-bot.service -f
 ```
 
 > [!IMPORTANT]
@@ -477,11 +477,11 @@ media-bot-v2/
 | `ARCHIVE_CHANNEL` | Storage | Archive channel ID (`-100...` numeric) or `@username` (numeric strings auto-normalized) | `None` |
 | `ERROR_REPORTS_ENABLED` | Error reports | Kill switch for failure reports to the archive channel | `true` |
 | `ERROR_REPORT_CHANNEL` | Error reports | Separate channel for failure reports; empty reuses `ARCHIVE_CHANNEL` | `None` |
-| `ERROR_REPORT_SKIP` | Error reports | Comma-separated failure `kind` values to silence (e.g. `not_media,too_large`) | `""` |
-| `ERROR_REPORT_DEDUP_SECONDS` | Error reports | Same `(user_id, url, kind)` failing again within this many seconds is reported once, not again | `600` |
-| `ERROR_REPORT_MAX_PER_MINUTE` | Error reports | Per-minute ceiling on sends to the error report channel (report message and truncated-log `.txt` each spend one slot) | `10` |
+| `ERROR_REPORT_SKIP` | Error reports | Comma-separated failure `kind` values to silence (`not_media`, `too_large`, `flood`, `timeout`, `http_4xx`, `provider`, `internal`) | `""` |
+| `ERROR_REPORT_DEDUP_SECONDS` | Error reports | Same `(user_id, url, kind)` failing again within this many seconds is reported once, not again (minimum `0`; `0` is not an off switch) | `600` |
+| `ERROR_REPORT_MAX_PER_MINUTE` | Error reports | Per-minute ceiling on sends to the error report channel (report message and truncated-log `.txt` each spend one slot; minimum `1`) | `10` |
 | `REQUEST_LOG_MAX_LINES` | Error reports | Lines kept in the per-request in-memory log buffer attached to a failure report | `300` |
-| `MAX_DOWNLOAD_SIZE` | Storage | Download-side size cap in bytes enforced by `DownloadGuard`, independent of Telegram's 2000MiB per-file split limit | `4294967296` (4 GiB) |
+| `MAX_DOWNLOAD_SIZE` | Storage | Download-side size cap in bytes enforced by `DownloadGuard`, independent of Telegram's 2000MiB per-file split limit (minimum: the splitter's 2000MiB-per-part cap; a lower value is rejected at startup) | `4294967296` (4 GiB) |
 | `DOWNLOAD_DIR` | Storage | Scratch folder for in-flight downloads (cleaned up after each job) | `downloads` |
 | `LOG_FILE` | Logging | File path for structured JSON logs | `logs/bot.log` |
 | `LOG_MAX_BYTES` | Logging | Maximum log file size before rotation in bytes | `10485760` (10 MB) |
@@ -491,16 +491,16 @@ media-bot-v2/
 | `POTOKEN` | YouTube | Static YouTube Proof-of-Origin token | `None` |
 | `POTOKEN_PROVIDER_URL` | YouTube | Health-check URL for external PO token provider service | `None` |
 | `YOUTUBE_COOKIES_FILE` | YouTube | Path to Netscape cookies file for age-gated YouTube content | `None` |
-| `YOUTUBE_PLAYER_CLIENT` | YouTube | Override yt-dlp player client (`mweb` without cookies, `web,default` with cookies) | `None` |
-| `YOUTUBE_JS_RUNTIMES` | YouTube | Comma-separated JS runtimes for `yt-dlp-ejs` challenges | `None` (engine falls back to `deno,node`; `bun` is only used if explicitly listed here) |
-| `YOUTUBE_REMOTE_COMPONENTS`| YouTube | Remote solver component loading for `yt-dlp-ejs` | `None` |
+| `YOUTUBE_PLAYER_CLIENT` | YouTube | Override yt-dlp player client (`mweb` without cookies, `web,default` with cookies); legacy alias `PLAYER_CLIENT` still works | `None` |
+| `YOUTUBE_JS_RUNTIMES` | YouTube | Comma-separated JS runtimes for `yt-dlp-ejs` challenges; legacy alias `JS_RUNTIMES` still works | `None` (engine falls back to `deno,node`; `bun` is only used if explicitly listed here) |
+| `YOUTUBE_REMOTE_COMPONENTS`| YouTube | Remote solver component loading for `yt-dlp-ejs`; legacy alias `REMOTE_COMPONENTS` still works | `None` |
 | `TIKTOK_COOKIES_FILE` | TikTok | Path to cookie file for TikTok private/regional access | `None` |
 | `INSTAGRAM_COOKIES_FILE` | Instagram | Path to cookie file for Instagram gated content | `None` |
 | `TIKTOK_PROVIDERS` | Providers | Comma-separated priority list for TikTok fallback extractors | `tikwm,tikdownloader,musicaldown,cobalt` |
 | `YOUTUBE_PROVIDERS` | Providers | Comma-separated priority list for YouTube fallback extractors | `ytmp3,cobalt` |
 | `DISABLED_PROVIDERS` | Providers | Comma-separated list of globally disabled provider names | `""` |
 | `COBALT_URL` | Providers | Base URL of self-hosted or public Cobalt instance without Turnstile | `None` |
-| `YTMP3_API_KEY` | Providers | Embedded API key for `ytmp3.gl` (gamma cloud) | `9b0ed5dab...` |
+| `YTMP3_API_KEY` | Providers | API key for `ytmp3.gl` (gamma cloud); without a key the provider is skipped entirely | `None` |
 | `PROVIDER_TIMEOUT` | Providers | HTTP request timeout per external provider in seconds | `15.0` |
 | `PROVIDER_FAILURE_THRESHOLD`| Providers| Consecutive failures before temporarily suppressing a provider | `3` |
 | `PROVIDER_COOLDOWN_SECONDS`| Providers| Cooldown duration before retrying a suppressed provider | `300` (5 min) |
@@ -512,7 +512,7 @@ media-bot-v2/
 | `UPLOAD_TIMEOUT` | Timeouts | Dedicated time budget for Telegram upload phase in seconds | `600.0` (10 min) |
 | `CONVERT_TIMEOUT` | Timeouts | Dedicated budget for streamable conversion & MP3 transcoding | `180.0` (3 min) |
 | `UPLOAD_WORKERS` | Speed | Parallel MTProto upload parts in flight per file (1..5) | `5` |
-| `UPLOAD_CONNECTIONS` | Speed | Real concurrent TCP connections to Telegram DC per upload (1..5) | `5` |
+| `UPLOAD_CONNECTIONS` | Speed | Real concurrent TCP connections to Telegram DC per upload (1..5, at most UPLOAD_WORKERS) | `5` |
 
 > [!NOTE]
 > **Concurrency & Threading**: `WORKERS` and `USER_WORKERS` are `asyncio.Semaphore` caps on how many requests may be *in flight* at once. The real ceiling on the blocking work inside a request (download, ffprobe, mp3 conversion, splitting, upload-part I/O) is **`THREAD_POOL_SIZE`** - it sizes a dedicated `ThreadPoolExecutor` (`media_bot_v2/executor.py`, initialized in `bootstrap.py`) that all of that work runs through via `run_in_thread`. Raising `WORKERS`/`USER_WORKERS` without also raising `THREAD_POOL_SIZE` changes nothing, since work queues behind the thread pool regardless of how many requests are "in flight". Uploads are additionally capped separately by `UPLOAD_CONCURRENCY_LIMIT`.
