@@ -22,7 +22,7 @@ Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallback
 ![MySQL](https://img.shields.io/badge/Database-MySQL_%2F_SQLite-4479A1?style=flat-square&logo=mysql&logoColor=white)
 ![FFmpeg](https://img.shields.io/badge/Transcoder-FFmpeg-007808?style=flat-square&logo=ffmpeg&logoColor=white)
 ![License](https://img.shields.io/badge/License-GPL--3.0--or--later-blue?style=flat-square)
-![Hebrew UI](https://img.shields.io/badge/UI-🇮🇱_עברית-D98324?style=flat-square)
+![Hebrew UI](https://img.shields.io/badge/UI-Hebrew_RTL-D98324?style=flat-square)
 
 </div>
 
@@ -109,7 +109,7 @@ Archives delivered media to a private channel. Repeat requests re-send media ins
 <td valign="top">
 
 ### 📊 Bi-Directional Live Progress
-Real-time progress widget edited in place with dynamic progress bar, downloaded size, speed, and ETA. Formatted with explicit bi-di RTL/LTR embeddings.
+Real-time progress widget edited in place with dynamic progress bar, downloaded size, speed, and ETA. Formatted with a trailing LRM after each Hebrew label, no directional control characters.
 
 </td>
 <td valign="top">
@@ -255,7 +255,8 @@ cp .env.example .env
 # 4 · Verify local environment readiness
 uv run python -m media_bot_v2.preflight
 
-# 5 · Run the complete test suite (906 passing, 2 skipped as of this writing - #     the count grows over time, so treat it as a floor, not a fixed target)
+# 5 · Run the complete test suite (1057 passing, 10 skipped as of this writing)
+#     the count grows over time, so treat it as a floor, not a fixed target
 uv run pytest -q
 ```
 
@@ -279,20 +280,16 @@ uv run pytest -q
 
 The bot provides a clean, single-message Hebrew interface in Telegram:
 
+<!-- generated from media_bot_v2.telegram.progress_format output; copy it, never retype it -->
 ```text
-┌─────────────────────────────────────────────────────────────┐
-│ 🎬 סרטון יוטיוב (03:45)                                    │
-│                                                             │
-│ 📊 התקדמות: (45.0MB/100.0MB)                               │
-│ 45% 🌑🌑🌑🌑🌑🌒🌕🌕🌕🌕                                    │
-│ ⚡ מהירות: 5.4MB/s                                          │
-│ ⏱️ זמן משוער: 10 שניות                                      │
-├─────────────────────────────────────────────────────────────┤
-│ [ ❌ ביטול ]                                                │
-└─────────────────────────────────────────────────────────────┘
+⬇️ מוריד...
+📊 התקדמות: (45.0MB/100.0MB)
+45% 🌑🌑🌑🌑🌑🌒🌕🌕🌕🌕
+⚡ מהירות: ‎5.4MB/s
+⏱️ זמן משוער: ‎10 שניות
 ```
 
-> The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters, shown on its own line below the size pair so it renders in plain left-to-right reading order with no bidi control characters involved; it fills toward the right as percent increases, and the last cell only turns 🌕 at exactly 100%.
+> The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters, shown on its own line below the size pair so it renders in plain left-to-right reading order with no bidi control characters involved; it fills toward the right as percent increases, and the last cell only turns 🌕 at exactly 100%. An LRM (U+200E) follows each Hebrew label on the lines above so the digits and units that follow stay left-to-right; the bar/percent line carries no such mark since it has no Hebrew label to anchor.
 
 1. **User Ingestion**: The user sends any supported media link in a **private chat only** - the bot does not respond in groups or channels.
 2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, and Instagram start downloading immediately.
@@ -322,7 +319,7 @@ Production deployment uses `systemd` alongside the required extraction toolchain
 To reliably download YouTube content in production, three components must be active; `media_bot_v2.preflight` checks the first two (section 4 of `docs/DEPLOY.md`) and fails loudly before cutover if they are missing:
 1. **JavaScript Runtime**: `node` (>= 22) or `deno` (>= 2.3) installed on the host and present in the systemd service `PATH`. Without one, yt-dlp cannot solve YouTube's signature challenges and YouTube downloads fail outright.
 2. **EJS Solver Package**: `yt-dlp-ejs` (managed by `uv sync`, so a regular `uv sync` keeps it current) which bundles YouTube signature challenge scripts locally.
-3. **Proof-of-Origin (PO) Token**: Either a self-hosted token provider via Docker ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)) configured with `POTOKEN_PROVIDER_URL=http://127.0.0.1:4416`, or a manual static token in `POTOKEN`. Without either, most videos still download, but any that require a PO token fail with a classified Hebrew "PO token required" message instead of succeeding.
+3. **Proof-of-Origin (PO) Token**: Either a self-hosted token provider via Docker ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)) configured with `POTOKEN_PROVIDER_URL=http://127.0.0.1:4416`, or a manual static token in `POTOKEN`. Without either, most videos still download, but any that require a PO token fail with a classified Hebrew "PO token required" message instead of succeeding - though on 16/10/2026 the JavaScript-runtime and player-client configuration alone (`YOUTUBE_PLAYER_CLIENT=visionos`, no PO-token provider, no Docker) was sufficient for a full download on the production server, so the PO-token provider is not always required.
 
 External extraction fallback (TikTok/YouTube) needs its own keys: `YTMP3_API_KEY` and `COBALT_URL` enable the `ytmp3`/`cobalt` YouTube providers (`YOUTUBE_PROVIDERS` sets the order; `DISABLED_PROVIDERS` turns any of them off globally). With none configured, YouTube falls back to local `yt-dlp` only, and `register_handlers()` logs a startup warning that external providers are disabled for the process.
 
@@ -452,7 +449,7 @@ media-bot-v2/
 │   ├── 📄 SPEC.md                # System specification & cutover roadmap
 │   └── 📂 research/              # Provider/engine feasibility research notes
 │
-└── 📂 tests/                     # 🧪 Comprehensive Test Suite (906 passing, 2 skipped as of this writing)
+└── 📂 tests/                     # 🧪 Comprehensive Test Suite (1057 passing, 10 skipped as of this writing)
 ```
 
 </details>
@@ -491,7 +488,7 @@ media-bot-v2/
 | `POTOKEN` | YouTube | Static YouTube Proof-of-Origin token | `None` |
 | `POTOKEN_PROVIDER_URL` | YouTube | Health-check URL for external PO token provider service | `None` |
 | `YOUTUBE_COOKIES_FILE` | YouTube | Path to Netscape cookies file for age-gated YouTube content | `None` |
-| `YOUTUBE_PLAYER_CLIENT` | YouTube | Override yt-dlp player client (`mweb` without cookies, `web,default` with cookies); legacy alias `PLAYER_CLIENT` still works | `None` |
+| `YOUTUBE_PLAYER_CLIENT` | YouTube | Override yt-dlp player client; tested 16/10/2026 on a no-Docker, no-PO-token-provider host - `tv` fails to reload, `mweb` hits a 403 or falls back to the basic format without a GVS PO token, `visionos` downloaded at 100% with no PO token; legacy alias `PLAYER_CLIENT` still works | `None` |
 | `YOUTUBE_JS_RUNTIMES` | YouTube | Comma-separated JS runtimes for `yt-dlp-ejs` challenges; legacy alias `JS_RUNTIMES` still works | `None` (engine falls back to `deno,node`; `bun` is only used if explicitly listed here) |
 | `YOUTUBE_REMOTE_COMPONENTS`| YouTube | Remote solver component loading for `yt-dlp-ejs`; legacy alias `REMOTE_COMPONENTS` still works | `None` |
 | `TIKTOK_COOKIES_FILE` | TikTok | Path to cookie file for TikTok private/regional access | `None` |
