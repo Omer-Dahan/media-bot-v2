@@ -184,10 +184,15 @@ def human_size(num_bytes: float | None) -> str:
 
 
 def format_download_too_large(file_size: float, max_size: float) -> str:
-    return DIRECT_FILE_TOO_LARGE.format(
-        size=human_size(file_size),
-        max_size=human_size(max_size),
-    )
+    size_str = human_size(file_size)
+    max_str = human_size(max_size)
+    if size_str == max_str:
+        # Rounding can collapse a boundary case (e.g. one byte over the cap)
+        # to the same display string as the cap itself; fall back to exact
+        # byte counts so the two numbers are never printed identically.
+        size_str = f"{int(file_size):,} bytes"
+        max_str = f"{int(max_size):,} bytes"
+    return DIRECT_FILE_TOO_LARGE.format(size=size_str, max_size=max_str)
 
 
 def format_playlist_trim_reason(*, skipped_for_credits: int, too_large: int, failed: int) -> str | None:

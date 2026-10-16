@@ -14,12 +14,14 @@ enforces the cap itself, so the user always gets the detected size and the
 configured limit.
 
 An exact `total_bytes` (a real `Content-Length`) and `downloaded_bytes` (real
-traffic) are both trusted immediately. `total_bytes_estimate` is not: for a
-split HLS/DASH format yt-dlp extrapolates it from the first fragments alone,
-and that extrapolation can land far above the real eventual size (production,
-11.10: a video refused as "4.7GB" that likely would have fit under 4GB). See
-`DownloadGuard.check`'s grace thresholds for how an estimate alone is kept
-from rejecting a download before a single byte of real evidence backs it up.
+traffic) are both trusted immediately and reject on their own. `total_bytes_estimate`
+is not: for a split HLS/DASH format yt-dlp extrapolates it from the first
+fragments alone, and that extrapolation can land far above the real eventual
+size (production, 11.10: a video refused as "4.7GB" against a 4GiB cap, on a
+file that likely would have fit). A merely-over-cap estimate is therefore not
+evidence by itself - only a GROSSLY over-cap estimate is, once a small floor
+of real traffic backs it up. See `DownloadGuard.check` for the exact rule and
+the trade-off it accepts.
 """
 
 from __future__ import annotations
@@ -85,19 +87,23 @@ def too_large_error(signal: DownloadTooLargeSignal) -> DownloadTooLargeError:
 class DownloadGuard:
     """Size cap + cancellation, evaluated from yt-dlp hooks.
 
-    `total_bytes_estimate` alone must never trigger a rejection (M12.5):
-    it is yt-dlp's extrapolation from the first fragments of a split
-    HLS/DASH format and can land far above the real eventual size. It only
-    counts as evidence once real progress backs it up - either
-    `_ESTIMATE_GRACE_MIN_BYTES` of real traffic (a few tens of MB; small
-    enough to bite well before the download gets expensive) or
-    `_ESTIMATE_GRACE_FRACTION` of the estimate itself (a modest percentage;
-    catches a low `max_size` where the absolute floor alone would be most
-    of the limit), whichever is reached first.
+    `total_bytes_estimate` alone must never reject a merely-over-cap download
+    (M12.5a): it is yt-dlp's extrapolation from the first fragments of a
+    split HLS/DASH format and can land far above the real eventual size
+    (production, 11.10: a 4.7GB estimate against a 4GiB cap, on a video that
+    likely would have fit under it). An estimate rejects on its own only
+    when it is GROSSLY over the cap - `estimate > max_size * _GROSS_ESTIMATE_FACTOR`
+    - and only once `_ESTIMATE_MIN_REAL_BYTES` of real traffic backs it up,
+    so a first-fragment spike alone cannot trigger it. An estimate that is
+    over the cap but inside that gross band does not reject by itself: the
+    download proceeds, and `downloaded_bytes` crossing the cap below still
+    stops a genuinely oversize file. Trade-off accepted on purpose: at most
+    one cap's worth of real bandwidth/disk can be spent on a file whose
+    estimate turns out to have been wrong.
     """
 
-    _ESTIMATE_GRACE_MIN_BYTES = 50 * 1024 * 1024  # 50MB of real traffic
-    _ESTIMATE_GRACE_FRACTION = 0.10  # or 10% of the estimate, whichever comes first
+    _GROSS_ESTIMATE_FACTOR = 2.0  # estimate must clear 2x the cap to reject alone
+    _ESTIMATE_MIN_REAL_BYTES = 1 * 1024 * 1024  # ~1MiB: ignore a first-fragment spike
 
     def __init__(self, max_size: int, cancel_token: CancellationToken | None) -> None:
         self._max_size = max_size
@@ -124,9 +130,9 @@ class DownloadGuard:
             detected = total_bytes
         elif received > self._max_size:
             detected = received
-        elif estimate > self._max_size and (
-            received >= self._ESTIMATE_GRACE_MIN_BYTES
-            or received >= estimate * self._ESTIMATE_GRACE_FRACTION
+        elif (
+            estimate > self._max_size * self._GROSS_ESTIMATE_FACTOR
+            and received >= self._ESTIMATE_MIN_REAL_BYTES
         ):
             detected = estimate
         else:

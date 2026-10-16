@@ -256,13 +256,16 @@ first deployment:
   limit (bigger files are split for upload, not refused - see the splitter
   note under `UPLOAD_CONCURRENCY_LIMIT`'s part size above). Must be at least
   2000MB (the splitter's part size) or the bot refuses to start, since
-  nothing downloaded would ever be big enough to need splitting. Raise this
-  if a legitimate file is refused as "too large" (the guard only rejects on
-  an exact `Content-Length`/real bytes received over the cap, or a
-  conservative estimate once real progress backs it up - see
-  `media_bot_v2/engines/ytdlp_support.py`'s `DownloadGuard`). The trade-off:
-  a higher cap lets one request hold more disk space and bandwidth for
-  longer before anything is delivered.
+  nothing downloaded would ever be big enough to need splitting. The guard
+  (`media_bot_v2/engines/ytdlp_support.py`'s `DownloadGuard`) rejects
+  immediately on an exact `Content-Length` or real bytes received over the
+  cap; a size *estimate* alone (yt-dlp's extrapolation from the first
+  fragments of a split format, which can land far above the real eventual
+  size) only rejects when it is more than double the cap, and only once
+  ~1MiB of real traffic backs it up - a borderline-over estimate is let
+  through and the download proceeds. Trade-off: at most one cap's worth of
+  real bandwidth/disk can be spent on a file whose estimate turns out to
+  have been wrong, and a higher cap raises that ceiling too.
 
 ## 6. systemd service
 
