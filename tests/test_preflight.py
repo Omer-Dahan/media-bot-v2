@@ -130,6 +130,55 @@ def test_check_potoken_provider_fails_when_unreachable():
     assert result.status == "fail"
 
 
+def test_check_youtube_readiness_passes_with_potoken(tmp_path):
+    settings = _settings(tmp_path, potoken="abc123")
+    result = preflight.check_youtube_readiness(settings)
+    assert result.status == "pass"
+    assert "POTOKEN is set" in result.detail
+
+
+def test_check_youtube_readiness_passes_with_potoken_provider_url(tmp_path):
+    settings = _settings(tmp_path, potoken_provider_url="http://127.0.0.1:4416")
+    result = preflight.check_youtube_readiness(settings)
+    assert result.status == "pass"
+    assert "POTOKEN_PROVIDER_URL is set" in result.detail
+
+
+def test_check_youtube_readiness_warns_when_client_is_not_visionos(tmp_path):
+    settings = _settings(tmp_path, youtube_player_client="mweb")
+    result = preflight.check_youtube_readiness(settings)
+    assert result.status == "warn"
+    assert "visionos" in result.detail
+    assert "YOUTUBE_PLAYER_CLIENT=visionos" in result.detail
+
+
+def test_check_youtube_readiness_warns_when_visionos_has_no_fallback(tmp_path):
+    settings = _settings(tmp_path, youtube_player_client="visionos")
+    result = preflight.check_youtube_readiness(settings)
+    assert result.status == "warn"
+    assert "single point of failure" in result.detail
+    assert "COBALT_URL" in result.detail
+
+
+def test_check_youtube_readiness_passes_when_visionos_has_fallback(tmp_path):
+    settings = _settings(tmp_path, youtube_player_client="visionos", cobalt_url="https://cobalt.example")
+    result = preflight.check_youtube_readiness(settings)
+    assert result.status == "pass"
+    assert "visionos" in result.detail
+
+
+def test_check_youtube_readiness_respects_disabled_providers(tmp_path):
+    settings = _settings(
+        tmp_path,
+        youtube_player_client="visionos",
+        cobalt_url="https://cobalt.example",
+        disabled_providers="cobalt",
+    )
+    result = preflight.check_youtube_readiness(settings)
+    assert result.status == "warn"
+    assert "single point of failure" in result.detail
+
+
 def test_check_ffmpeg_fails_when_missing(monkeypatch):
     monkeypatch.setattr(preflight.shutil, "which", lambda name: None)
     result = preflight.check_ffmpeg(None)

@@ -35,6 +35,8 @@ from sqlalchemy.engine import make_url
 
 from media_bot_v2.config import OLD_BOT_SESSION_NAME, Settings, load_settings
 from media_bot_v2.db.models import ProviderHealth
+from media_bot_v2.engines.youtube import resolve_player_client
+from media_bot_v2.providers.registry import build_provider_registry
 
 Status = Literal["pass", "fail", "skip", "warn"]
 
@@ -218,6 +220,50 @@ def check_potoken_provider(settings: Settings) -> CheckResult:
     )
 
 
+def check_youtube_readiness(settings: Settings) -> CheckResult:
+    """Operator-facing warning (never a cutover blocker) about the YouTube
+    player-client / PO-token / fallback combination, based on what was
+    actually measured on the production host on 16/10/2026 without Docker
+    (so no PO-token provider): `tv` failed, `mweb` failed with 403 or a
+    PO-token demand, and `visionos` downloaded at 100% with no PO token at
+    all. Read-only: no network, no DB writes."""
+    if settings.potoken:
+        return CheckResult("youtube_readiness", "pass", "POTOKEN is set")
+    if settings.potoken_provider_url:
+        return CheckResult("youtube_readiness", "pass", "POTOKEN_PROVIDER_URL is set")
+
+    effective_client = resolve_player_client(
+        settings.youtube_player_client, has_cookies=bool(settings.youtube_cookies_file)
+    )
+    clients = [c.strip() for c in effective_client.split(",") if c.strip()]
+    if "visionos" not in clients:
+        return CheckResult(
+            "youtube_readiness",
+            "warn",
+            f"No PO token configured and the effective player client is {effective_client!r}; "
+            "on the measured host, 'mweb' failed while 'visionos' downloaded successfully with "
+            "no PO token. Recommend YOUTUBE_PLAYER_CLIENT=visionos, or a PO-token provider "
+            "(bgutil) if a different client is required.",
+        )
+
+    youtube_providers = build_provider_registry(settings).get_providers_for_platform("youtube")
+    if not youtube_providers:
+        return CheckResult(
+            "youtube_readiness",
+            "warn",
+            "No PO token configured, the player client is 'visionos' (the measured working "
+            "client), but no external YouTube provider fallback is configured (YTMP3_API_KEY, "
+            "COBALT_URL). The local yt-dlp path is then a single point of failure; a "
+            "self-hosted cobalt instance (COBALT_URL) is the recommended fallback.",
+        )
+    return CheckResult(
+        "youtube_readiness",
+        "pass",
+        "No PO token configured, but the player client is 'visionos' (the measured working "
+        "client) and an external YouTube provider fallback is configured.",
+    )
+
+
 def _binary_version(binary: str) -> tuple[bool, str]:
     path = shutil.which(binary)
     if not path:
@@ -388,6 +434,7 @@ ALL_CHECKS = (
     check_js_runtime,
     check_yt_dlp_ejs,
     check_potoken_provider,
+    check_youtube_readiness,
     check_ffmpeg,
     check_ffprobe,
     check_writable_directories,

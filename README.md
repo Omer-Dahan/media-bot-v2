@@ -255,7 +255,7 @@ cp .env.example .env
 # 4 · Verify local environment readiness
 uv run python -m media_bot_v2.preflight
 
-# 5 · Run the complete test suite (1057 passing, 10 skipped as of this writing)
+# 5 · Run the complete test suite (1063 passing, 10 skipped as of this writing)
 #     the count grows over time, so treat it as a floor, not a fixed target
 uv run pytest -q
 ```
@@ -316,7 +316,7 @@ Production deployment uses `systemd` alongside the required extraction toolchain
 
 ### The Production "Trio"
 
-To reliably download YouTube content in production, three components must be active; `media_bot_v2.preflight` checks the first two (section 4 of `docs/DEPLOY.md`) and fails loudly before cutover if they are missing:
+To reliably download YouTube content in production, three components must be active; `media_bot_v2.preflight` checks the first two (section 4 of `docs/DEPLOY.md`) and fails loudly before cutover if they are missing, and also warns when no PO token is configured, the player client is not the measured one, and no external fallback is set:
 1. **JavaScript Runtime**: `node` (>= 22) or `deno` (>= 2.3) installed on the host and present in the systemd service `PATH`. Without one, yt-dlp cannot solve YouTube's signature challenges and YouTube downloads fail outright.
 2. **EJS Solver Package**: `yt-dlp-ejs` (managed by `uv sync`, so a regular `uv sync` keeps it current) which bundles YouTube signature challenge scripts locally.
 3. **Proof-of-Origin (PO) Token**: Either a self-hosted token provider via Docker ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)) configured with `POTOKEN_PROVIDER_URL=http://127.0.0.1:4416`, or a manual static token in `POTOKEN`. Without either, most videos still download, but any that require a PO token fail with a classified Hebrew "PO token required" message instead of succeeding - though on 16/10/2026 the JavaScript-runtime and player-client configuration alone (`YOUTUBE_PLAYER_CLIENT=visionos`, no PO-token provider, no Docker) was sufficient for a full download on the production server, so the PO-token provider is not always required.
@@ -449,7 +449,7 @@ media-bot-v2/
 │   ├── 📄 SPEC.md                # System specification & cutover roadmap
 │   └── 📂 research/              # Provider/engine feasibility research notes
 │
-└── 📂 tests/                     # 🧪 Comprehensive Test Suite (1057 passing, 10 skipped as of this writing)
+└── 📂 tests/                     # 🧪 Comprehensive Test Suite (1063 passing, 10 skipped as of this writing)
 ```
 
 </details>

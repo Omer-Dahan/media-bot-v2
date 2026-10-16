@@ -131,11 +131,14 @@ shared legacy tables) and never contacts Telegram. It checks:
   this database).
 - `DOWNLOAD_DIR` is not world-writable and sits on a `noexec` mount
   (`download_dir_exec_safety` - see 4.1 below).
+- No PO token is configured, the player client is not `visionos` (the
+  client measured to work without one), or no external YouTube provider
+  fallback is set (`youtube_readiness`).
 
 It prints one line per check (`PASS`/`FAIL`/`SKIP`/`WARN`) and exits
 non-zero only if something actually `FAIL`ed. A `WARN` is operator-facing
-hardening advice (currently only `download_dir_exec_safety`) and does not
-block cutover by itself - fix every `FAIL`, and treat every `WARN` as
+hardening advice (`download_dir_exec_safety`, `youtube_readiness`) and does
+not block cutover by itself - fix every `FAIL`, and treat every `WARN` as
 something to go fix on the host, not a blocker for right now.
 
 ### 4.1 Why `DOWNLOAD_DIR` should be mounted `noexec`
