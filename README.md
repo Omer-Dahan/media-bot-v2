@@ -3,7 +3,7 @@
 <br>
 
 ### High-Performance Telegram Media Download Bot
-**Downloads from YouTube, TikTok, Instagram, and direct links — powered by Telethon MTProto.**<br>
+**Downloads from YouTube, TikTok, Instagram, and direct links - powered by Telethon MTProto.**<br>
 Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallbacks, schema-compatible DB continuity, and an intuitive Hebrew interface.
 
 <br>
@@ -120,8 +120,22 @@ Comprehensive SSRF protection with redirect hop address inspection, path travers
 </td>
 <td valign="top">
 
+### 📨 Failure Reports to the Archive Channel
+Every failed download sends a Hebrew report to the archive channel: user, url, platform, quality, the message the user saw, the exception, and the request's own buffered log tail (the full log attached as a `.txt` when the message had to be truncated). Cancellations, credit, and bandwidth-exhausted failures are not reported.
+
+</td>
+</tr>
+<tr>
+<td valign="top">
+
 ### 💳 Fair Volume Billing
 Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful upload. On a partial delivery (e.g. a multi-part split where only some parts land) only the parts actually delivered are charged; if nothing was delivered, there is no charge.
+
+</td>
+<td valign="top">
+
+### 🧭 Classified Failure Messages
+The YouTube bot-check is recognized even with a curly apostrophe in yt-dlp's text, a private/removed video is never blamed on a broken cookie file, and a direct-link HTTP failure is classified by status code (401/403/410/451 refused, 404/410 gone, 429/5xx busy) with its own Hebrew message and no retry button on a hopeless failure.
 
 </td>
 </tr>
@@ -241,8 +255,7 @@ cp .env.example .env
 # 4 · Verify local environment readiness
 uv run python -m media_bot_v2.preflight
 
-# 5 · Run the complete test suite (906 passing, 2 skipped as of this writing —
-#     the count grows over time, so treat it as a floor, not a fixed target)
+# 5 · Run the complete test suite (906 passing, 2 skipped as of this writing - #     the count grows over time, so treat it as a floor, not a fixed target)
 uv run pytest -q
 ```
 
@@ -281,7 +294,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 
 > The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters, shown on its own line below the size pair so it renders in plain left-to-right reading order with no bidi control characters involved; it fills toward the right as percent increases, and the last cell only turns 🌕 at exactly 100%.
 
-1. **User Ingestion**: The user sends any supported media link in a **private chat only** — the bot does not respond in groups or channels.
+1. **User Ingestion**: The user sends any supported media link in a **private chat only** - the bot does not respond in groups or channels.
 2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, and Instagram start downloading immediately.
 3. **Live Progress Feedback**: The status message updates in place with a real-time progress bar, speed counter, and ETA. The inline `[ ❌ ביטול ]` button allows the user to abort the transfer cooperatively at any time.
 4. **Delivery & Archiving**: The completed media is delivered with formatted captions, streamable flags, and optional separate subtitle files. The message is quietly archived to the configured `ARCHIVE_CHANNEL`.
@@ -295,7 +308,8 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 - **Full description**: choosing the "full description" option sends the complete description as its own follow-up message below the media, instead of inside the caption.
 - **Playlists**: a YouTube playlist download is trimmed to however many items the user's remaining credits can afford; a trimmed delivery says so explicitly rather than silently dropping items.
 - **`SESSION_NAME=main` is hard-blocked**: this collides with the legacy bot's live session file, so `media_bot_v2.config.Settings` raises a `ValidationError` at startup (not just a warning) if `SESSION_NAME` is left at `main`.
-- **Hard limits**: 2000MiB per delivered file (Telegram bot API ceiling; larger files are split) and 4GiB per source download.
+- **Hard limits**: 2000MiB per delivered file (Telegram bot API ceiling; larger files are split) and `MAX_DOWNLOAD_SIZE` (default 4GiB, configurable) per source download, enforced by `DownloadGuard`. An exact `Content-Length`/real downloaded bytes over the cap always rejects; a `total_bytes_estimate` (yt-dlp's extrapolation for split formats) rejects on its own only once it clears **2x** the cap with at least 1MiB of real traffic behind it, so a first-fragment spike cannot refuse a video that would have fit. Trade-off: a borderline-over estimate is let through, and up to one cap's worth of bandwidth/disk can be spent on a file whose estimate turns out wrong.
+- **Failure reports**: a failed download sends a Hebrew report (user, url, platform, quality, the message shown to the user, the exception, and the request's own log tail) to `ERROR_REPORT_CHANNEL` (or `ARCHIVE_CHANNEL` if unset); the full log is attached as a `.txt` when the report had to be truncated. Cancellations, credit-exhausted, and bandwidth-exhausted failures are never reported.
 
 ---
 
@@ -305,23 +319,27 @@ Production deployment uses `systemd` alongside the required extraction toolchain
 
 ### The Production "Trio"
 
-To reliably download YouTube content in production, three components must be active:
-1. **JavaScript Runtime**: `node` (>= 22) or `deno` (>= 2.3) installed on the host and present in the systemd service `PATH`.
-2. **EJS Solver Package**: `yt-dlp-ejs` (managed by `uv sync`) which bundles YouTube signature challenge scripts locally.
-3. **Proof-of-Origin (PO) Token**: Either a self-hosted token provider via Docker ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)) configured with `POTOKEN_PROVIDER_URL=http://127.0.0.1:4416`, or a manual static token in `POTOKEN`.
+To reliably download YouTube content in production, three components must be active; `media_bot_v2.preflight` checks the first two (section 4 of `docs/DEPLOY.md`) and fails loudly before cutover if they are missing:
+1. **JavaScript Runtime**: `node` (>= 22) or `deno` (>= 2.3) installed on the host and present in the systemd service `PATH`. Without one, yt-dlp cannot solve YouTube's signature challenges and YouTube downloads fail outright.
+2. **EJS Solver Package**: `yt-dlp-ejs` (managed by `uv sync`, so a regular `uv sync` keeps it current) which bundles YouTube signature challenge scripts locally.
+3. **Proof-of-Origin (PO) Token**: Either a self-hosted token provider via Docker ([bgutil-ytdlp-pot-provider](https://github.com/Brainicism/bgutil-ytdlp-pot-provider)) configured with `POTOKEN_PROVIDER_URL=http://127.0.0.1:4416`, or a manual static token in `POTOKEN`. Without either, most videos still download, but any that require a PO token fail with a classified Hebrew "PO token required" message instead of succeeding.
+
+External extraction fallback (TikTok/YouTube) needs its own keys: `YTMP3_API_KEY` and `COBALT_URL` enable the `ytmp3`/`cobalt` YouTube providers (`YOUTUBE_PROVIDERS` sets the order; `DISABLED_PROVIDERS` turns any of them off globally). With none configured, YouTube falls back to local `yt-dlp` only, and `register_handlers()` logs a startup warning that external providers are disabled for the process.
 
 ### systemd Service Setup
 
+The sample unit in this repo is named `download-bot-v2.service`; production installs it as `download-bot.service` (see `docs/DEPLOY.md` section 6) - every command below uses that installed name:
+
 ```bash
 # 1 · Copy systemd unit file
-sudo cp deploy/download-bot-v2.service /etc/systemd/system/
+sudo cp deploy/download-bot-v2.service /etc/systemd/system/download-bot.service
 
 # 2 · Edit paths, user, and PATH to include the JS runtime
-sudo nano /etc/systemd/system/download-bot-v2.service
+sudo nano /etc/systemd/system/download-bot.service
 
 # 3 · Reload systemd and enable service
 sudo systemctl daemon-reload
-sudo systemctl enable download-bot-v2.service
+sudo systemctl enable download-bot.service
 ```
 
 ### The One-Line Server Update Command
@@ -457,6 +475,13 @@ media-bot-v2/
 | `FREE_BANDWIDTH` | Billing | Daily free bandwidth quota in bytes | `2147483648` (2 GB) |
 | `MB_PER_CREDIT` | Billing | Delivered megabytes charged per 1 credit (`max(1, ceil(MB / MB_PER_CREDIT))`) | `200` |
 | `ARCHIVE_CHANNEL` | Storage | Archive channel ID (`-100...` numeric) or `@username` (numeric strings auto-normalized) | `None` |
+| `ERROR_REPORTS_ENABLED` | Error reports | Kill switch for failure reports to the archive channel | `true` |
+| `ERROR_REPORT_CHANNEL` | Error reports | Separate channel for failure reports; empty reuses `ARCHIVE_CHANNEL` | `None` |
+| `ERROR_REPORT_SKIP` | Error reports | Comma-separated failure `kind` values to silence (e.g. `not_media,too_large`) | `""` |
+| `ERROR_REPORT_DEDUP_SECONDS` | Error reports | Same `(user_id, url, kind)` failing again within this many seconds is reported once, not again | `600` |
+| `ERROR_REPORT_MAX_PER_MINUTE` | Error reports | Per-minute ceiling on sends to the error report channel (report message and truncated-log `.txt` each spend one slot) | `10` |
+| `REQUEST_LOG_MAX_LINES` | Error reports | Lines kept in the per-request in-memory log buffer attached to a failure report | `300` |
+| `MAX_DOWNLOAD_SIZE` | Storage | Download-side size cap in bytes enforced by `DownloadGuard`, independent of Telegram's 2000MiB per-file split limit | `4294967296` (4 GiB) |
 | `DOWNLOAD_DIR` | Storage | Scratch folder for in-flight downloads (cleaned up after each job) | `downloads` |
 | `LOG_FILE` | Logging | File path for structured JSON logs | `logs/bot.log` |
 | `LOG_MAX_BYTES` | Logging | Maximum log file size before rotation in bytes | `10485760` (10 MB) |
@@ -481,7 +506,7 @@ media-bot-v2/
 | `PROVIDER_COOLDOWN_SECONDS`| Providers| Cooldown duration before retrying a suppressed provider | `300` (5 min) |
 | `WORKERS` | Concurrency | Global maximum concurrent downloads across all users | `100` |
 | `USER_WORKERS` | Concurrency | Maximum concurrent downloads per individual user | `5` |
-| `THREAD_POOL_SIZE` | Concurrency | Real ceiling on concurrent blocking work (download, ffprobe, mp3 conversion, split, upload-part I/O) — see the note below | `48` |
+| `THREAD_POOL_SIZE` | Concurrency | Real ceiling on concurrent blocking work (download, ffprobe, mp3 conversion, split, upload-part I/O) - see the note below | `48` |
 | `UPLOAD_CONCURRENCY_LIMIT` | Concurrency | Maximum number of uploads allowed to run at once, process-wide (separate from `WORKERS`/`USER_WORKERS`, which gate downloads) | `20` |
 | `REQUEST_TIMEOUT` | Timeouts | Total time budget for a complete download operation in seconds | `600.0` (10 min) |
 | `UPLOAD_TIMEOUT` | Timeouts | Dedicated time budget for Telegram upload phase in seconds | `600.0` (10 min) |
@@ -490,7 +515,7 @@ media-bot-v2/
 | `UPLOAD_CONNECTIONS` | Speed | Real concurrent TCP connections to Telegram DC per upload (1..5) | `5` |
 
 > [!NOTE]
-> **Concurrency & Threading**: `WORKERS` and `USER_WORKERS` are `asyncio.Semaphore` caps on how many requests may be *in flight* at once. The real ceiling on the blocking work inside a request (download, ffprobe, mp3 conversion, splitting, upload-part I/O) is **`THREAD_POOL_SIZE`** — it sizes a dedicated `ThreadPoolExecutor` (`media_bot_v2/executor.py`, initialized in `bootstrap.py`) that all of that work runs through via `run_in_thread`. Raising `WORKERS`/`USER_WORKERS` without also raising `THREAD_POOL_SIZE` changes nothing, since work queues behind the thread pool regardless of how many requests are "in flight". Uploads are additionally capped separately by `UPLOAD_CONCURRENCY_LIMIT`.
+> **Concurrency & Threading**: `WORKERS` and `USER_WORKERS` are `asyncio.Semaphore` caps on how many requests may be *in flight* at once. The real ceiling on the blocking work inside a request (download, ffprobe, mp3 conversion, splitting, upload-part I/O) is **`THREAD_POOL_SIZE`** - it sizes a dedicated `ThreadPoolExecutor` (`media_bot_v2/executor.py`, initialized in `bootstrap.py`) that all of that work runs through via `run_in_thread`. Raising `WORKERS`/`USER_WORKERS` without also raising `THREAD_POOL_SIZE` changes nothing, since work queues behind the thread pool regardless of how many requests are "in flight". Uploads are additionally capped separately by `UPLOAD_CONCURRENCY_LIMIT`.
 
 > [!IMPORTANT]
 > **Archive Channel Format**: `ARCHIVE_CHANNEL` must be set as a negative numeric ID (e.g. `-1003534083142`) or a public `@username`. Passing a plain string number causes Telethon to resolve it via `GetContactsRequest` (treating it as a phone number), which fails for bots. The bot automatically converts numeric strings to integers on load.
@@ -502,7 +527,7 @@ media-bot-v2/
 `media-bot-v2` incorporates key architectural decisions derived from production analysis of the legacy codebase:
 
 - **Telethon MTProto Exclusivity**: Standardized entirely on `Telethon` (async MTProto). Unlike Pyrogram/Kurigram, Telethon uses `bytes` for callback data. All callbacks are centralized through [`media_bot_v2/telegram/callback_data.py`](media_bot_v2/telegram/callback_data.py) for safe encoding/decoding.
-- **Schema-Compatible Database Continuity**: Shares the exact same MySQL production schema (`users`, `settings`, `payments`, `video_cache`) with zero data migrations or table renames — no schema migration is needed to cut over. Cutover itself is **not** zero-downtime: the old bot must be stopped before `media-bot-v2` starts, since both cannot hold the same `BOT_TOKEN` session concurrently (see the Single Session Consumer Rule above). A single v2-only table (`provider_health`) is created by `media_bot_v2.preflight`'s `check_provider_health_table` check, not automatically on bot startup.
+- **Schema-Compatible Database Continuity**: Shares the exact same MySQL production schema (`users`, `settings`, `payments`, `video_cache`) with zero data migrations or table renames - no schema migration is needed to cut over. Cutover itself is **not** zero-downtime: the old bot must be stopped before `media-bot-v2` starts, since both cannot hold the same `BOT_TOKEN` session concurrently (see the Single Session Consumer Rule above). A single v2-only table (`provider_health`) is created by `media_bot_v2.preflight`'s `check_provider_health_table` check, not automatically on bot startup.
 - **Adaptive Provider Fallback with Cooldowns**: External extractors are monitored in real time. The `order_for()` query dynamically prioritizes providers with the highest success rate and lowest latency, temporarily cooling down failing providers for 5 minutes.
 - **Multi-Connection Uploads without Auth Duplication**: Speed is maximized by opening up to 5 real TCP connections to the Telegram DC. Each extra connection reuses the main client's in-memory `AuthKey` (`client._sender.auth_key`) with its own session/seqno, avoiding secondary session files that caused `AUTH_KEY_DUPLICATED` session revocation in the old bot.
 - **Post-Upload Volume Billing**: Solved the legacy pre-charge bug where users were billed before large file splits that subsequently failed. Credits are calculated strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful delivery.
