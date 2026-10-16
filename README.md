@@ -223,7 +223,7 @@ stateDiagram-v2
     EngineDispatch --> CacheCheck: Compute deterministic cache key
     CacheCheck --> CacheServe: Key exists in video_cache -> Resend from archive
     CacheCheck --> Downloading: Cache miss -> Acquire concurrency slot
-    Downloading --> GuardValidation: SSRF guard; direct-link engine also does a preflight HEAD check & body sniffing
+    Downloading --> GuardValidation: SSRF guard, direct-link engine also does a preflight HEAD check & body sniffing
     GuardValidation --> Transcode: Probe media info, fix streamable MP4, or split >2GB
     Transcode --> Uploading: Multi-lane parallel upload over MTProto TCP
     Uploading --> ArchiveCopy: Send copy to private ARCHIVE_CHANNEL
