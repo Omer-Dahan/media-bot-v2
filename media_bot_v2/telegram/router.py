@@ -46,7 +46,7 @@ from media_bot_v2.engines.youtube import (
     is_playlist_url,
 )
 from media_bot_v2.logging_setup import request_log_scope
-from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.pipeline import DownloadPipeline, TracebackMark
 from media_bot_v2.providers.health import ProviderHealthTracker
 from media_bot_v2.providers.registry import ProviderRegistry
 from media_bot_v2.queue.limiter import ConcurrencyLimiter
@@ -388,12 +388,15 @@ def register_handlers(
         # Opened before anything else so log lines written here - including
         # ones from worker threads via executor.run_in_thread, which copies
         # this context - land in the same buffer the _report() above attaches
-        # to a failure report. This does NOT yet include yt-dlp's or ffmpeg's
-        # own output (they don't log through Python's `logging`, see
-        # executor.py's run_in_thread docstring) - that is a later stage.
+        # to a failure report. This also includes yt-dlp's own output, via
+        # the `logger=` adapter every engine passes
+        # (engines.ytdlp_support.YtdlpLoggerAdapter, see executor.py's
+        # run_in_thread docstring) - ffmpeg's output is still captured
+        # separately as subprocess output, not via a Python logger.
         with request_log_scope(
             user_id=job_user_id, url=job_url, platform=job_platform, max_lines=request_log_max_lines
         ):
+            traceback_mark: TracebackMark | None = None
             try:
                 if delivery is None:
                     delivery = load_delivery(job_user_id, first_name=None, username=None)
@@ -451,6 +454,7 @@ def register_handlers(
                     if progress is not None:
                         await progress.update(texts.QUEUE_WAIT, is_terminal=False)
 
+                traceback_mark = TracebackMark()
                 async with limiter.slot(job_user_id, on_wait=on_wait):
                     await _run_cancellable(
                         active_cancellations,
@@ -469,6 +473,7 @@ def register_handlers(
                             archive_channel=archive_channel,
                             delivery=delivery,
                             audio_only=(job_quality == "audio"),
+                            traceback_mark=traceback_mark,
                         ),
                     )
             except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
@@ -504,7 +509,7 @@ def register_handlers(
                         logger.debug("Failed to update progress on timeout", exc_info=True)
                 _report(exc, texts.REQUEST_TIMEOUT_EXCEEDED)
             except Exception as exc:
-                if getattr(exc, "logged_with_traceback", False):
+                if traceback_mark is not None and traceback_mark.logged:
                     # pipeline.run() already logged this one with a traceback -
                     # a second logger.exception here would just be the same
                     # traceback twice. A short WARNING keeps the user/url visible

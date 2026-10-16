@@ -19,7 +19,7 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.engines.direct import DirectEngine
-from media_bot_v2.pipeline import DownloadPipeline
+from media_bot_v2.pipeline import DownloadPipeline, TracebackMark
 from media_bot_v2.telegram import texts
 
 
@@ -44,6 +44,23 @@ class _FailingEngine(BaseEngine):
 
     async def download(self, url: str, *, dest_dir: Path):
         raise RuntimeError("boom: download failed")
+
+
+class _UnsettableAttributeError(RuntimeError):
+    """An exception whose __setattr__ refuses every attribute, the way some
+    built-in or __slots__-based exceptions do. Used to prove the holder-based
+    mark never touches the exception instance at all."""
+
+    def __setattr__(self, name: str, value: object) -> None:
+        raise TypeError(f"refusing to set {name!r}")
+
+
+class _UnsettableFailingEngine(BaseEngine):
+    def matches(self, url: str) -> bool:
+        return True
+
+    async def download(self, url: str, *, dest_dir: Path):
+        raise _UnsettableAttributeError("boom: cannot be flagged")
 
 
 class _PartialWriteFailingEngine(BaseEngine):
@@ -676,19 +693,44 @@ async def test_direct_link_http_failure_through_pipeline_logs_exactly_one_warnin
 
 
 # ==============================================================================
-# M12.7: a generic (unclassified) failure logs exactly one record with a
-# traceback here - and flags the exception so telegram/router.py's own
-# generic handler knows not to log a second one. See
-# tests/test_router.py's mirror test for that other half of the boundary.
+# M12.7a: a generic (unclassified) failure logs exactly one record with a
+# traceback here - and flags the per-request TracebackMark holder the router
+# passed in, so telegram/router.py's own generic handler knows not to log a
+# second one. See tests/test_router.py's mirror test for that other half of
+# the boundary.
 # ==============================================================================
 
 
-async def test_generic_failure_logs_exactly_one_traceback_and_flags_the_exception(
+async def test_generic_failure_logs_exactly_one_traceback_and_flags_the_holder(
     session_factory, credits_service, tmp_path, caplog
 ):
     pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    traceback_mark = TracebackMark()
 
-    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError) as exc_info:
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError):
+        await pipeline.run(
+            user_id=1,
+            url="https://example.com/video.mp4",
+            engine=_FailingEngine(),
+            uploader=_FakeUploader(),
+            progress=_FakeProgress(),
+            traceback_mark=traceback_mark,
+        )
+
+    tracebacks = [r for r in caplog.records if r.exc_info is not None]
+    assert len(tracebacks) == 1
+    assert traceback_mark.logged is True
+
+
+async def test_generic_failure_without_a_holder_still_logs_its_traceback(
+    session_factory, credits_service, tmp_path, caplog
+):
+    """A call site that forgets to pass `traceback_mark` must not crash, and
+    must not lose the traceback either - `run()` still logs it unconditionally;
+    only the best-effort flagging step is skipped."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError):
         await pipeline.run(
             user_id=1,
             url="https://example.com/video.mp4",
@@ -699,4 +741,29 @@ async def test_generic_failure_logs_exactly_one_traceback_and_flags_the_exceptio
 
     tracebacks = [r for r in caplog.records if r.exc_info is not None]
     assert len(tracebacks) == 1
-    assert exc_info.value.logged_with_traceback is True
+
+
+async def test_generic_failure_with_an_unsettable_exception_still_logs_once_and_propagates(
+    session_factory, credits_service, tmp_path, caplog
+):
+    """The whole point of the holder-based redesign: an exception whose
+    `__setattr__` outright refuses attributes (built-in/slotted exceptions do
+    this too) must still propagate unchanged, the traceback must still be
+    logged exactly once, and the holder - untouched by the exception - must
+    still end up flagged."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    traceback_mark = TracebackMark()
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(_UnsettableAttributeError):
+        await pipeline.run(
+            user_id=1,
+            url="https://example.com/video.mp4",
+            engine=_UnsettableFailingEngine(),
+            uploader=_FakeUploader(),
+            progress=_FakeProgress(),
+            traceback_mark=traceback_mark,
+        )
+
+    tracebacks = [r for r in caplog.records if r.exc_info is not None]
+    assert len(tracebacks) == 1
+    assert traceback_mark.logged is True

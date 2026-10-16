@@ -104,6 +104,20 @@ class ProgressReporter(Protocol):
     async def update(self, text: str) -> None: ...
 
 
+class TracebackMark:
+    """Per-request flag the router creates and hands to `run()`, so it knows
+    whether `run()` already logged this failure's traceback without a second
+    one from the router's own generic handler. A plain attribute on the
+    exception itself was tried before this: some built-ins/slotted exceptions
+    refuse arbitrary attributes, and the mark would also follow the exception
+    instance anywhere it was reused. One holder per call sidesteps both."""
+
+    __slots__ = ("logged",)
+
+    def __init__(self) -> None:
+        self.logged = False
+
+
 async def _update_progress(
     progress: ProgressReporter | None,
     text: str,
@@ -214,6 +228,7 @@ class DownloadPipeline:
         archive_channel: int | str | None = None,
         delivery: DeliveryOptions | None = None,
         audio_only: bool = False,
+        traceback_mark: TracebackMark | None = None,
     ) -> None:
         # Wall-clock start of this request, for the completion summary's
         # "total time" line (texts.format_download_summary) - UI-only, never
@@ -626,18 +641,14 @@ class DownloadPipeline:
             )
             await _update_progress(progress, texts.FLOOD_WAIT_FAILED, is_terminal=True)
             raise
-        except Exception as exc:
+        except Exception:
             logger.exception("Download pipeline failed for user=%s url=%s", user_id, url)
             # telegram/router.py's own generic handler would otherwise log a
             # second identical traceback for the same failure - this flag
             # tells it the traceback is already on record, so it only needs
-            # a short WARNING with the url/user still visible. Some built-in
-            # or slotted exceptions refuse arbitrary attributes; logging must
-            # never raise because of that, so the flag is best-effort.
-            try:
-                exc.logged_with_traceback = True
-            except AttributeError:
-                pass
+            # a short WARNING with the url/user still visible.
+            if traceback_mark is not None:
+                traceback_mark.logged = True
             await _update_progress(progress, texts.DOWNLOAD_FAILED, is_terminal=True)
             raise
         finally:

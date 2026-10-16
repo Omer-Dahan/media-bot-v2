@@ -531,19 +531,24 @@ async def test_url_handler_instagram_private_content_shows_hebrew_error():
 # ==============================================================================
 # M12.7: router's generic `except Exception` handler must not log a second
 # traceback for a failure `pipeline.run()` already logged with one (flagged
-# via `logged_with_traceback`) - but must still log its own traceback when
-# the flag is absent. See tests/test_pipeline.py's mirror test for the other
-# half of this boundary (pipeline.run setting the flag in the first place).
+# via the per-request `TracebackMark` holder the router passes in as
+# `traceback_mark=`) - but must still log its own traceback when the flag is
+# absent. See tests/test_pipeline.py's mirror test for the other half of this
+# boundary (pipeline.run setting the flag in the first place).
 # ==============================================================================
 
 
 async def test_router_skips_second_traceback_when_pipeline_already_logged_it(caplog):
     from media_bot_v2.providers.registry import ProviderRegistry
 
-    exc = RuntimeError("boom: pipeline already logged this")
-    exc.logged_with_traceback = True
+    async def _run(*args, **kwargs):
+        mark = kwargs.get("traceback_mark")
+        if mark is not None:
+            mark.logged = True
+        raise RuntimeError("boom: pipeline already logged this")
+
     pipeline = AsyncMock()
-    pipeline.run.side_effect = exc
+    pipeline.run.side_effect = _run
     client = _make_router(pipeline=pipeline, registry=ProviderRegistry())
     url_handler = _find_url_handler(client)
 
