@@ -70,7 +70,7 @@
 - **דומיין:** `ytmp3.la` עושה 301 קבוע ל-`ytmp3.gl` (מיתוג/מיגרציה, לא נפילה).
 - **Backend נפרד לגמרי מהדומיין הפרונטי:** `gamma.gammacloud.net` (שם מוסתר ב-Base64 בקוד: `atob("Z2FtbWFjbG91ZC5uZXQ=")`).
 - **זרימה בת 4 שלבים, כולם GET:**
-  1. `GET https://gamma.gammacloud.net/api/v1/auth?api_key=<key>&_=<timestamp>` — **`api_key` הוא ערך קבוע** שמוטמע כטקסט גלוי בדף הבית (`apiKey='9b0ed5dab31616027ad7154140b0272d'`), לא מחושב. **דורש Header `Referer: https://ytmp3.gl/`** — בלעדיו 403 Forbidden ברמת nginx (בדקנו את שניהם). מחזיר `{"geo":"0","key":"<session_key>","err":0}`.
+  1. `GET https://gamma.gammacloud.net/api/v1/auth?api_key=<key>&_=<timestamp>` — **`api_key` הוא ערך קבוע** שמוטמע כטקסט גלוי בדף הבית (`apiKey='0dummy0leaked0key0placeholder0'`), לא מחושב. **דורש Header `Referer: https://ytmp3.gl/`** — בלעדיו 403 Forbidden ברמת nginx (בדקנו את שניהם). מחזיר `{"geo":"0","key":"<session_key>","err":0}`.
   2. `GET https://gamma.gammacloud.net/api/v1/init?_=<timestamp>` עם Header `Authorization: Bearer <session_key>` — מחזיר `{"convertURL":"https://<תת-דומיין אקראי>.gammacloud.net/api/v1/convert?sig=<חתימה ארוכה שהשרת כבר חתם עליה>"}`. **החתימה מיוצרת ע"י השרת ומוחזרת מוכנה — אין צורך לחשב שום דבר בצד הלקוח.**
   3. `GET <convertURL>&v=<youtube_video_id>&f=<mp3|mp4>&_=<timestamp>` — מחזיר `{"progressURL":...,"downloadURL":...,"redirect":0,"title":""}`.
   4. Polling: `GET <progressURL>&_=<timestamp>` כל 3 שניות עד `"progress":3`. בבדיקה שלנו זה הסתיים **מיידית בפעם הראשונה** עם `{"progress":3,"error":0,"title":"Big Buck Bunny"}`.

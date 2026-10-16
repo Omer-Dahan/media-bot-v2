@@ -136,14 +136,14 @@ q=https%3A%2F%2Fwww.tiktok.com%2F%40user%2Fvideo%2F7123456789&lang=en
 - **Platform:** YouTube
 - **Base Domain:** `gamma.gammacloud.net`
 - **Headers:** `Referer: https://ytmp3.gl/` required on all requests.
-- **Embedded API Key:** `9b0ed5dab31616027ad7154140b0272d` (embedded in ytmp3.gl homepage script).
+- **API Key:** `<YTMP3_API_KEY>` — embedded in the ytmp3.gl homepage script; the operator must supply it via the `YTMP3_API_KEY` env var, and this provider is skipped when it is unset.
 - **Limitation:** Rejects videos with commercial music / copyright claims (returns error code e.g. 215 or 403). Not a universal extractor for every video, but effective as a fast secondary fallback for non-commercial content.
 
 ### Flow (4 GET Requests)
 
 1. **Authorization:**
    ```http
-   GET https://gamma.gammacloud.net/api/v1/auth?api_key=9b0ed5dab31616027ad7154140b0272d&_=<timestamp>
+   GET https://gamma.gammacloud.net/api/v1/auth?api_key=<YTMP3_API_KEY>&_=<timestamp>
    Referer: https://ytmp3.gl/
    ```
    Returns: `{"error": 0, "key": "<bearer_token>"}`

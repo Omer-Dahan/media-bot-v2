@@ -9,7 +9,7 @@
     essentially every successful download - `_CLEAR_BUTTONS` was an empty
     `ReplyInlineMarkup([])`, which live Telegram rejects outright.
 (C) A ytmp3 API key hardcoded as the config default, appearing in plaintext
-    in provider-failure log lines (`...api_key=9b0ed5dab31616027ad7154140b0272d...`).
+    in provider-failure log lines (`...api_key=0dummy0leaked0key0placeholder0...`).
 
 (B) has its own dedicated tests in tests/test_m11_9.py; this file covers (A)
 and (C), plus the odd-dimension re-encode fix that rides along with (A).
@@ -366,11 +366,11 @@ def test_mask_secrets_redacts_the_real_production_log_line():
     """The exact log line from the production incident."""
     real_line = (
         "ytmp3 auth request failed: 403 Client Error: Forbidden for url: "
-        "https://gamma.gammacloud.net/api/v1/auth?api_key=9b0ed5dab31616027ad7154140b0272d&_=1727701234567"
+        "https://gamma.gammacloud.net/api/v1/auth?api_key=0dummy0leaked0key0placeholder0&_=1727701234567"
     )
     masked = mask_secrets(real_line)
 
-    assert "9b0ed5dab31616027ad7154140b0272d" not in masked
+    assert "0dummy0leaked0key0placeholder0" not in masked
     assert "api_key=***" in masked
     assert "https://gamma.gammacloud.net/api/v1/auth" in masked  # non-secret context preserved
     assert "_=1727701234567" in masked  # non-sensitive params untouched
@@ -565,7 +565,7 @@ async def test_youtube_provider_fallback_logs_masked_url_not_the_real_key(caplog
         async def fetch(self, url: str) -> ProviderResult:
             raise requests.exceptions.HTTPError(
                 "403 Client Error: Forbidden for url: "
-                "https://gamma.gammacloud.net/api/v1/auth?api_key=9b0ed5dab31616027ad7154140b0272d&_=123"
+                "https://gamma.gammacloud.net/api/v1/auth?api_key=0dummy0leaked0key0placeholder0&_=123"
             )
 
     registry = ProviderRegistry(youtube_order=["leaky"])
@@ -585,11 +585,11 @@ async def test_youtube_provider_fallback_logs_masked_url_not_the_real_key(caplog
         )
 
     log_text = "\n".join(r.getMessage() for r in caplog.records)
-    assert "9b0ed5dab31616027ad7154140b0272d" not in log_text
+    assert "0dummy0leaked0key0placeholder0" not in log_text
 
     from media_bot_v2.db.models import ProviderHealth
     from media_bot_v2.db.session import session_scope
 
     with session_scope(factory) as session:
         record = session.query(ProviderHealth).filter_by(provider="leaky", platform="youtube").one()
-        assert "9b0ed5dab31616027ad7154140b0272d" not in (record.last_error or "")
+        assert "0dummy0leaked0key0placeholder0" not in (record.last_error or "")
