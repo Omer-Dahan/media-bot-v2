@@ -266,3 +266,46 @@ def test_request_log_max_lines_rejects_negative_value_at_startup(monkeypatch):
     with pytest.raises(ValidationError) as excinfo:
         Settings(_env_file=None)
     assert "REQUEST_LOG_MAX_LINES" in str(excinfo.value)
+
+
+def test_max_download_size_defaults_to_4gib(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.delenv("MAX_DOWNLOAD_SIZE", raising=False)
+    settings = Settings(_env_file=None)
+    assert settings.max_download_size == 4 * 1024 * 1024 * 1024
+
+
+def test_max_download_size_honours_a_custom_value(monkeypatch):
+    """M12.5: the operator must be able to raise the cap from the environment -
+    production had a legitimate 4.7GB file refused with no way to do this."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("MAX_DOWNLOAD_SIZE", str(6 * 1024 * 1024 * 1024))
+    settings = Settings(_env_file=None)
+    assert settings.max_download_size == 6 * 1024 * 1024 * 1024
+
+
+def test_max_download_size_rejects_zero_at_startup(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("MAX_DOWNLOAD_SIZE", "0")
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    assert "MAX_DOWNLOAD_SIZE" in str(excinfo.value)
+
+
+def test_max_download_size_rejects_negative_at_startup(monkeypatch):
+    _base_env(monkeypatch)
+    monkeypatch.setenv("MAX_DOWNLOAD_SIZE", "-1")
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    assert "MAX_DOWNLOAD_SIZE" in str(excinfo.value)
+
+
+def test_max_download_size_below_split_threshold_rejected_at_startup(monkeypatch):
+    """Below the splitter's 2000MB part size, nothing downloaded would ever
+    be large enough to need splitting for upload - this must fail loudly at
+    startup, not quietly make the splitter dead code."""
+    _base_env(monkeypatch)
+    monkeypatch.setenv("MAX_DOWNLOAD_SIZE", str(1000 * 1024 * 1024))
+    with pytest.raises(ValidationError) as excinfo:
+        Settings(_env_file=None)
+    assert "MAX_DOWNLOAD_SIZE" in str(excinfo.value)

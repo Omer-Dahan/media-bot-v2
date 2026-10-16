@@ -10,9 +10,16 @@ Size policy: yt-dlp's own `max_filesize` is deliberately NOT passed. With a
 `Content-Length` it silently skips the file (no error, no hook call, so the
 user only ever sees "no media received"), and without one it does not enforce
 the cap at all. Instead `DownloadGuard.check` runs from the progress hook and
-enforces the cap itself, on both the declared total and the bytes actually
-received so far, so the user always gets the detected size and the configured
-limit.
+enforces the cap itself, so the user always gets the detected size and the
+configured limit.
+
+An exact `total_bytes` (a real `Content-Length`) and `downloaded_bytes` (real
+traffic) are both trusted immediately. `total_bytes_estimate` is not: for a
+split HLS/DASH format yt-dlp extrapolates it from the first fragments alone,
+and that extrapolation can land far above the real eventual size (production,
+11.10: a video refused as "4.7GB" that likely would have fit under 4GB). See
+`DownloadGuard.check`'s grace thresholds for how an estimate alone is kept
+from rejecting a download before a single byte of real evidence backs it up.
 """
 
 from __future__ import annotations
@@ -76,7 +83,21 @@ def too_large_error(signal: DownloadTooLargeSignal) -> DownloadTooLargeError:
 
 
 class DownloadGuard:
-    """Size cap + cancellation, evaluated from yt-dlp hooks."""
+    """Size cap + cancellation, evaluated from yt-dlp hooks.
+
+    `total_bytes_estimate` alone must never trigger a rejection (M12.5):
+    it is yt-dlp's extrapolation from the first fragments of a split
+    HLS/DASH format and can land far above the real eventual size. It only
+    counts as evidence once real progress backs it up - either
+    `_ESTIMATE_GRACE_MIN_BYTES` of real traffic (a few tens of MB; small
+    enough to bite well before the download gets expensive) or
+    `_ESTIMATE_GRACE_FRACTION` of the estimate itself (a modest percentage;
+    catches a low `max_size` where the absolute floor alone would be most
+    of the limit), whichever is reached first.
+    """
+
+    _ESTIMATE_GRACE_MIN_BYTES = 50 * 1024 * 1024  # 50MB of real traffic
+    _ESTIMATE_GRACE_FRACTION = 0.10  # or 10% of the estimate, whichever comes first
 
     def __init__(self, max_size: int, cancel_token: CancellationToken | None) -> None:
         self._max_size = max_size
@@ -95,13 +116,25 @@ class DownloadGuard:
         self.check_cancelled()
         if d.get("status") != "downloading":
             return
-        declared = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+        total_bytes = d.get("total_bytes") or 0
         received = d.get("downloaded_bytes") or 0
-        detected = max(declared, received)
-        if detected > self._max_size:
-            signal = DownloadTooLargeSignal(detected, self._max_size)
-            self.oversize.append(signal)
-            raise signal
+        estimate = d.get("total_bytes_estimate") or 0
+
+        if total_bytes > self._max_size:
+            detected = total_bytes
+        elif received > self._max_size:
+            detected = received
+        elif estimate > self._max_size and (
+            received >= self._ESTIMATE_GRACE_MIN_BYTES
+            or received >= estimate * self._ESTIMATE_GRACE_FRACTION
+        ):
+            detected = estimate
+        else:
+            return
+
+        signal = DownloadTooLargeSignal(detected, self._max_size)
+        self.oversize.append(signal)
+        raise signal
 
     def match_filter(self) -> Callable[..., None]:
         """A yt-dlp `match_filter` that only exists to stop a cancelled

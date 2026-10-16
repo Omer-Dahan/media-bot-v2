@@ -251,6 +251,18 @@ first deployment:
   without touching download/conversion concurrency at all - a slot is held
   only for the upload step, acquired after a file is already downloaded and
   processed.
+- `MAX_DOWNLOAD_SIZE` (default `4294967296`, 4 GiB): the download-side cap
+  `DownloadGuard` enforces, separate from Telegram's own 2000MB-per-file
+  limit (bigger files are split for upload, not refused - see the splitter
+  note under `UPLOAD_CONCURRENCY_LIMIT`'s part size above). Must be at least
+  2000MB (the splitter's part size) or the bot refuses to start, since
+  nothing downloaded would ever be big enough to need splitting. Raise this
+  if a legitimate file is refused as "too large" (the guard only rejects on
+  an exact `Content-Length`/real bytes received over the cap, or a
+  conservative estimate once real progress backs it up - see
+  `media_bot_v2/engines/ytdlp_support.py`'s `DownloadGuard`). The trade-off:
+  a higher cap lets one request hold more disk space and bandwidth for
+  longer before anything is delivered.
 
 ## 6. systemd service
 

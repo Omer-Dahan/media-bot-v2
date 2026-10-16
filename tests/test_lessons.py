@@ -228,11 +228,12 @@ async def test_lesson2_direct_oversized_zim_rejected_on_head_before_get(tmp_path
     # No files left on disk
     assert not any(tmp_path.iterdir())
 
-    # Message is in Hebrew and contains detected size, max size, and Telegram explanation
+    # Message is in Hebrew, contains detected size and max size, and blames
+    # the bot's own configured limit rather than Telegram (M12.5)
     err_text = str(exc_info.value)
     assert "100.0GB" in err_text
     assert "4.0GB" in err_text
-    assert "טלגרם אינה תומכת בהעברת קבצים" in err_text
+    assert "טלגרם" not in err_text
 
 
 # ==============================================================================
@@ -350,11 +351,13 @@ def test_lesson5_accurate_error_classification():
     unsupported_msg = classify_youtube_error("ERROR: Unsupported URL: https://example.com/not-supported")
     assert texts.UNSUPPORTED_URL == unsupported_msg
 
-    # 3. Oversized file
+    # 3. Oversized file - blames the bot's own configured limit, not Telegram (M12.5)
     oversized_msg = texts.format_download_too_large(107374182400, 4294967296)
     assert "100.0GB" in oversized_msg
     assert "4.0GB" in oversized_msg
-    assert "טלגרם" in oversized_msg
+    assert "טלגרם" not in oversized_msg
+    assert oversized_msg.startswith("❌")
+    assert "➡️" in oversized_msg
 
     # Never blames outdated version
     assert "גרסה מיושנת" not in js_msg

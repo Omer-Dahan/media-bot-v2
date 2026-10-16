@@ -195,9 +195,34 @@ class Settings(BaseSettings):
     # smaller than, the upload budget; on expiry the original file is sent.
     convert_timeout: float = Field(default=180.0, validation_alias="CONVERT_TIMEOUT")
 
-    # --- Download limits (not user-configurable, kept as constants for clarity) ---
+    # --- Download limits ---
+    # Telegram's native single-file cap; the splitter chops anything bigger
+    # into parts of this size (media_bot_v2/upload/splitter.py's
+    # TG_NORMAL_MAX_SIZE). Not user-configurable - kept as a constant for
+    # clarity, and as the floor `max_download_size` below is validated against.
     tg_normal_max_size: int = 2000 * 1024 * 1024
-    max_download_size: int = 4 * 1024 * 1024 * 1024
+    # DownloadGuard's cap on what the bot will download at all (M12.5: a
+    # legitimate 4.7GB YouTube video was refused with no way for the operator
+    # to raise this from the environment). Default kept at the old hard-coded
+    # 4 GiB; `gt=0` and the validator below reject a value that would make
+    # every download pointless (nothing could ever be big enough to need the
+    # splitter) or break the server at startup rather than on the next request.
+    max_download_size: int = Field(
+        default=4 * 1024 * 1024 * 1024, gt=0, validation_alias="MAX_DOWNLOAD_SIZE"
+    )
+
+    @field_validator("max_download_size")
+    @classmethod
+    def _max_download_size_at_least_split_threshold(cls, value: int, info: ValidationInfo) -> int:
+        tg_normal_max_size = info.data.get("tg_normal_max_size", 2000 * 1024 * 1024)
+        if value < tg_normal_max_size:
+            raise ValueError(
+                f"MAX_DOWNLOAD_SIZE={value} is smaller than the splitter's per-part cap "
+                f"({tg_normal_max_size} bytes) - nothing downloaded would ever be large "
+                "enough to need splitting for upload. Raise MAX_DOWNLOAD_SIZE to at least "
+                "that value."
+            )
+        return value
 
     @field_validator("upload_workers")
     @classmethod
