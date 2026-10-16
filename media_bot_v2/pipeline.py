@@ -603,7 +603,13 @@ class DownloadPipeline:
             InstagramDownloadError,
             DirectDownloadError,
         ) as exc:
-            logger.warning("Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
+            # DirectEngine already logs its own WARNING for a classified HTTP
+            # failure (status code + url - this handler only has the Hebrew
+            # user-facing text). Logging again here would put two
+            # WARNING-or-above records on the wire for one failure, so this
+            # generic line drops to DEBUG when the engine already reported it.
+            level = logging.DEBUG if getattr(exc, "logged_by_engine", False) else logging.WARNING
+            logger.log(level, "Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
             await _update_progress(progress, str(exc), is_terminal=True)
             raise
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException):

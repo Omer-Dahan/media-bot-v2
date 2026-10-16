@@ -26,6 +26,7 @@ import requests
 from telethon import TelegramClient
 
 from media_bot_v2.engines.base import DownloadTooLargeError, NotMediaContentError
+from media_bot_v2.engines.direct import DirectDownloadError, DirectLinkRefusedError
 from media_bot_v2.logging_setup import current_request_log
 from media_bot_v2.providers.base import ProviderFetchError, mask_secrets
 from media_bot_v2.telegram import texts
@@ -49,10 +50,11 @@ _MIN_LOG_BUDGET = 500
 _TRUNCATED_USER_FIELD_LIMIT = 300
 _URL_FIELD_LIMIT = 300
 
-# engines/direct.py does not yet classify requests.HTTPError into a domain
-# exception (that mapping is a later stage) - it currently reaches here as a
-# bare requests.exceptions.HTTPError, so this is the one place that can give
-# it the `http_4xx` kind the triage's ERROR_REPORT_SKIP list documents.
+# Kept for any call site that still raises a bare requests.exceptions.HTTPError
+# without classifying it first (direct.py itself no longer does - its two
+# exceptions are matched explicitly in classify_kind below, since by the time
+# they reach here they're DirectLinkRefusedError/DirectDownloadError, not a
+# bare HTTPError, and `isinstance` would otherwise never see them).
 _HTTP_4XX_STATUSES = frozenset({401, 403, 404, 410, 451})
 
 
@@ -71,6 +73,15 @@ def classify_kind(exc: BaseException | None) -> str:
         return "flood"
     if isinstance(exc, TimeoutError):
         return "timeout"
+    # engines/direct.py classifies a direct-link HTTP failure into one of
+    # these two before it ever reaches here (M12.4/M12.6) - map them to the
+    # same kinds the raw requests.HTTPError below would have produced, so a
+    # 401/403/404/410/451 still gets `http_4xx` (and ERROR_REPORT_SKIP=
+    # http_4xx still works) and a 429/5xx still gets `provider`.
+    if isinstance(exc, DirectLinkRefusedError):
+        return "http_4xx"
+    if isinstance(exc, DirectDownloadError):
+        return "provider"
     if isinstance(exc, requests.exceptions.HTTPError):
         status_code = getattr(getattr(exc, "response", None), "status_code", None)
         if status_code in _HTTP_4XX_STATUSES:

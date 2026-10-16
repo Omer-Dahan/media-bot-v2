@@ -4,6 +4,9 @@ happens only after a fully successful upload - this must hold even when the
 upload fails partway through a multi-part (split) file."""
 
 import asyncio
+import http.server
+import logging
+import threading
 from pathlib import Path
 
 import pytest
@@ -15,6 +18,7 @@ from media_bot_v2.credits.exceptions import CreditsExhaustedException
 from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
+from media_bot_v2.engines.direct import DirectEngine
 from media_bot_v2.pipeline import DownloadPipeline
 from media_bot_v2.telegram import texts
 
@@ -599,3 +603,73 @@ async def test_cache_hit_that_fails_to_resend_deletes_the_stale_entry_and_downlo
     entry = cache_store.get(key)
     assert entry is not None
     assert entry.message_ids != [42]
+
+
+# ==============================================================================
+# M12.6: one WARNING-or-above record per direct-link HTTP failure, end to end
+# ==============================================================================
+
+
+class _StatusCodeHandler(http.server.BaseHTTPRequestHandler):
+    """Always returns the HTTP status code baked into the request path
+    (e.g. "/403/f.mp4" -> a 403 response) - one handler serves every status
+    code this test needs without a branch per code."""
+
+    def _respond(self):
+        status = int(self.path.strip("/").split("/")[0])
+        self.send_response(status)
+        self.send_header("Content-Length", "0")
+        self.end_headers()
+
+    do_GET = _respond
+    do_HEAD = _respond
+
+    def log_message(self, *args):
+        pass  # keep test output quiet
+
+
+@pytest.fixture
+def status_code_server():
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), _StatusCodeHandler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+@pytest.mark.parametrize("status", [403, 429])
+async def test_direct_link_http_failure_through_pipeline_logs_exactly_one_warning(
+    status, status_code_server, session_factory, credits_service, tmp_path, caplog
+):
+    """A 401/403/404/410/451/429/5xx on a direct link used to log twice at
+    WARNING-or-above when it ran through the real pipeline: once from
+    DirectEngine's own classification (media_bot_v2/engines/direct.py) and
+    again from DownloadPipeline's generic domain-error handler
+    (media_bot_v2/pipeline.py). This drives the real DirectEngine through
+    the real DownloadPipeline.run against a fake HTTP server and checks that
+    is now exactly one record - with the status code and url still visible
+    in it."""
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+    url = f"{status_code_server}/{status}/f.mp4"
+
+    with (
+        caplog.at_level(logging.DEBUG),
+        pytest.raises(Exception),  # noqa: B017 - classified domain error, exact type not the point here
+    ):
+        await pipeline.run(
+            user_id=1,
+            url=url,
+            engine=DirectEngine(),
+            uploader=_FakeUploader(),
+            progress=_FakeProgress(),
+        )
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    message = warnings[0].getMessage()
+    assert str(status) in message
+    assert url in message

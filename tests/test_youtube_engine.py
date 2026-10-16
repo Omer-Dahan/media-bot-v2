@@ -139,6 +139,21 @@ def test_classify_youtube_error_private_video():
     assert "פרטי" in msg or "נמחק" in msg
 
 
+def test_classify_youtube_error_private_video_with_cookie_hint_not_misreported_as_cookie_error():
+    """yt-dlp's real wording for a private video appends a cookie hint
+    ("Use --cookies-from-browser or --cookies for the authentication"), which
+    used to match the broad "cookie"/"cookies" keywords before the private/
+    unavailable pattern was even checked - telling the user their cookie file
+    was invalid when the actual problem is that the video is private."""
+    msg = classify_youtube_error(
+        "ERROR: [youtube] abc123: Private video. Sign in if you've been "
+        "granted access to this video. Use --cookies-from-browser or "
+        "--cookies for the authentication."
+    )
+    assert "פרטי" in msg or "נמחק" in msg
+    assert "אינו תקין או שפג תוקפו" not in msg
+
+
 def test_classify_youtube_error_geo_restricted():
     msg = classify_youtube_error("The uploader has not made this video available in your country")
     assert "גיאוגרפית" in msg

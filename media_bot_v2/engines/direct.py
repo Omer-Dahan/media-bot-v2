@@ -84,13 +84,23 @@ def _classify_http_error(exc: requests.HTTPError, url: str) -> Exception:
     status = response.status_code if response is not None else None
     if status in _REFUSED_STATUS_CODES:
         logger.warning("Direct link refused (HTTP %s) for %s", status, url)
-        return DirectLinkRefusedError(texts.DIRECT_LINK_REFUSED)
+        return _mark_logged(DirectLinkRefusedError(texts.DIRECT_LINK_REFUSED))
     if status in _GONE_STATUS_CODES:
         logger.warning("Direct link gone (HTTP %s) for %s", status, url)
-        return DirectLinkRefusedError(texts.DIRECT_LINK_GONE)
+        return _mark_logged(DirectLinkRefusedError(texts.DIRECT_LINK_GONE))
     if status in _RETRYABLE_STATUS_CODES or (status is not None and 500 <= status < 600):
         logger.warning("Direct link server error (HTTP %s) for %s", status, url)
-        return DirectDownloadError(texts.DIRECT_LINK_SERVER_BUSY)
+        return _mark_logged(DirectDownloadError(texts.DIRECT_LINK_SERVER_BUSY))
+    return exc
+
+
+def _mark_logged(exc: Exception) -> Exception:
+    """Flags an exception as already reported at WARNING (with the HTTP
+    status code and url) right above, so pipeline.py's generic domain-error
+    handler - which only has the Hebrew user-facing text, not the status
+    code - logs its own line at DEBUG instead of a second WARNING for the
+    same failure."""
+    exc.logged_by_engine = True
     return exc
 
 

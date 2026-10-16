@@ -313,7 +313,14 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
         ),
     ),
     (
-        ("cookie", "cookies"),
+        # Narrowed to wording that actually means "the cookie file itself is
+        # the problem" - the bare "cookie"/"cookies" keywords used to match
+        # yt-dlp's generic "Use --cookies-from-browser or --cookies for the
+        # authentication" hint, which is appended to *many* unrelated errors
+        # (bot-check, private video, ...) and made this bucket win over the
+        # real cause. This list must stay a strict subset of the bot-check
+        # keywords above (checked first) and never re-add a bare "cookie".
+        ("cookies are no longer valid", "cookies file", "failed to load cookies"),
         (
             "❌ שגיאת אימות מול יוטיוב: קובץ ה-cookies אינו תקין או שפג תוקפו.\n"
             "➡️ יש לרענן את קובץ ה-cookies בשרת."
