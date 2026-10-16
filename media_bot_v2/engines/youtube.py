@@ -53,6 +53,7 @@ from media_bot_v2.engines.ytdlp_support import (
     DownloadCancelledSignal,
     DownloadGuard,
     DownloadTooLargeSignal,
+    YtdlpLoggerAdapter,
     remove_partial_files,
     rename_to_safe_display_name,
     safe_outtmpl,
@@ -581,8 +582,9 @@ async def fetch_title_duration(url: str, *, opts: dict, timeout: float) -> tuple
 
     try:
         info = await asyncio.wait_for(run_in_thread(_extract), timeout=timeout)
-    except Exception:
-        logger.info("Title/duration lookup failed or timed out for %s", url, exc_info=True)
+    except Exception as exc:  # noqa: BLE001 - expected for a private/removed/geo-blocked video, not a defect
+        # No traceback, and DEBUG rather than a level that reads as a problem.
+        logger.debug("Title/duration lookup failed or timed out for %s: %s", url, exc)
         return None, None
     if not isinstance(info, dict):
         return None, None
@@ -761,7 +763,8 @@ class YouTubeEngine(BaseEngine):
             "merge_output_format": "mp4",
             "noplaylist": not is_playlist_request,
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": YtdlpLoggerAdapter(),
             "noprogress": True,
             "progress_hooks": [self._make_progress_hook(loop, cancel_token, guard)],
             "match_filter": guard.match_filter(),
@@ -815,7 +818,8 @@ class YouTubeEngine(BaseEngine):
         """Options for a metadata-only lookup (no download, no progress hooks)."""
         opts: dict = {
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": YtdlpLoggerAdapter(),
             "noprogress": True,
             "skip_download": True,
             "noplaylist": not is_playlist_url(url),

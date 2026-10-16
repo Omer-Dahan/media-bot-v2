@@ -673,3 +673,30 @@ async def test_direct_link_http_failure_through_pipeline_logs_exactly_one_warnin
     message = warnings[0].getMessage()
     assert str(status) in message
     assert url in message
+
+
+# ==============================================================================
+# M12.7: a generic (unclassified) failure logs exactly one record with a
+# traceback here - and flags the exception so telegram/router.py's own
+# generic handler knows not to log a second one. See
+# tests/test_router.py's mirror test for that other half of the boundary.
+# ==============================================================================
+
+
+async def test_generic_failure_logs_exactly_one_traceback_and_flags_the_exception(
+    session_factory, credits_service, tmp_path, caplog
+):
+    pipeline = DownloadPipeline(credits_service=credits_service, download_dir=tmp_path)
+
+    with caplog.at_level(logging.DEBUG), pytest.raises(RuntimeError) as exc_info:
+        await pipeline.run(
+            user_id=1,
+            url="https://example.com/video.mp4",
+            engine=_FailingEngine(),
+            uploader=_FakeUploader(),
+            progress=_FakeProgress(),
+        )
+
+    tracebacks = [r for r in caplog.records if r.exc_info is not None]
+    assert len(tracebacks) == 1
+    assert exc_info.value.logged_with_traceback is True

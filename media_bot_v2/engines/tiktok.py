@@ -28,6 +28,7 @@ from media_bot_v2.engines.ytdlp_support import (
     DownloadCancelledSignal,
     DownloadGuard,
     DownloadTooLargeSignal,
+    YtdlpLoggerAdapter,
     remove_partial_files,
     safe_outtmpl,
     too_large_error,
@@ -184,6 +185,32 @@ class TikTokEngine(BaseEngine):
 
         return hook
 
+    def _build_local_ydl_opts(
+        self,
+        dest_dir: Path,
+        guard: DownloadGuard,
+        loop: asyncio.AbstractEventLoop | None,
+    ) -> dict:
+        if loop is not None and self._progress is not None:
+            hooks = [self._make_progress_hook(loop, guard)]
+        else:
+            hooks = [guard.check]
+        ydl_opts: dict = {
+            "outtmpl": safe_outtmpl(dest_dir),
+            "quiet": True,
+            "no_warnings": False,
+            "logger": YtdlpLoggerAdapter(),
+            "noprogress": True,
+            "noplaylist": True,
+            "progress_hooks": hooks,
+            "match_filter": guard.match_filter(),
+            "retries": TRANSPORT_RETRIES,
+            "fragment_retries": TRANSPORT_RETRIES,
+        }
+        if self._cookies_file:
+            ydl_opts["cookiefile"] = self._cookies_file
+        return ydl_opts
+
     def _download_local_sync(
         self,
         url: str,
@@ -195,23 +222,7 @@ class TikTokEngine(BaseEngine):
             return DownloadResult(file_paths=[])
 
         guard = DownloadGuard(self._max_download_size, cancel_token)
-        if loop is not None and self._progress is not None:
-            hooks = [self._make_progress_hook(loop, guard)]
-        else:
-            hooks = [guard.check]
-        ydl_opts = {
-            "outtmpl": safe_outtmpl(dest_dir),
-            "quiet": True,
-            "no_warnings": True,
-            "noprogress": True,
-            "noplaylist": True,
-            "progress_hooks": hooks,
-            "match_filter": guard.match_filter(),
-            "retries": TRANSPORT_RETRIES,
-            "fragment_retries": TRANSPORT_RETRIES,
-        }
-        if self._cookies_file:
-            ydl_opts["cookiefile"] = self._cookies_file
+        ydl_opts = self._build_local_ydl_opts(dest_dir, guard, loop)
 
         try:
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:

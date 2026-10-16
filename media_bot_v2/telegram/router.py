@@ -504,7 +504,14 @@ def register_handlers(
                         logger.debug("Failed to update progress on timeout", exc_info=True)
                 _report(exc, texts.REQUEST_TIMEOUT_EXCEEDED)
             except Exception as exc:
-                logger.exception("Download failed for url=%s", job_url)
+                if getattr(exc, "logged_with_traceback", False):
+                    # pipeline.run() already logged this one with a traceback -
+                    # a second logger.exception here would just be the same
+                    # traceback twice. A short WARNING keeps the user/url visible
+                    # without the duplicate noise.
+                    logger.warning("Download failed for user=%s url=%s", job_user_id, job_url)
+                else:
+                    logger.exception("Download failed for user=%s url=%s", job_user_id, job_url)
                 if not getattr(progress, "is_terminal_completed", False):
                     try:
                         await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)

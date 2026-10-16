@@ -3,6 +3,7 @@ without connecting to Telegram. Uses telethon's in-memory session, same
 "never touches the network or disk" spirit as test_telegram_bootstrap.py."""
 
 import asyncio
+import logging
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -526,6 +527,49 @@ async def test_url_handler_instagram_private_content_shows_hebrew_error():
     msg = url_event.messages[0]
     assert texts.INSTAGRAM_PRIVATE_OR_LOGIN in msg.edits
 
+
+# ==============================================================================
+# M12.7: router's generic `except Exception` handler must not log a second
+# traceback for a failure `pipeline.run()` already logged with one (flagged
+# via `logged_with_traceback`) - but must still log its own traceback when
+# the flag is absent. See tests/test_pipeline.py's mirror test for the other
+# half of this boundary (pipeline.run setting the flag in the first place).
+# ==============================================================================
+
+
+async def test_router_skips_second_traceback_when_pipeline_already_logged_it(caplog):
+    from media_bot_v2.providers.registry import ProviderRegistry
+
+    exc = RuntimeError("boom: pipeline already logged this")
+    exc.logged_with_traceback = True
+    pipeline = AsyncMock()
+    pipeline.run.side_effect = exc
+    client = _make_router(pipeline=pipeline, registry=ProviderRegistry())
+    url_handler = _find_url_handler(client)
+
+    with caplog.at_level(logging.DEBUG, logger="media_bot_v2.telegram.router"):
+        url_event = _FakeEvent("https://www.instagram.com/reel/GENERIC123/", 1)
+        await url_handler(url_event)
+
+    router_records = [r for r in caplog.records if r.name == "media_bot_v2.telegram.router"]
+    assert [r for r in router_records if r.exc_info is not None] == []
+    assert len([r for r in router_records if r.levelno == logging.WARNING]) == 1
+
+
+async def test_router_logs_its_own_traceback_when_pipeline_did_not_flag_it(caplog):
+    from media_bot_v2.providers.registry import ProviderRegistry
+
+    pipeline = AsyncMock()
+    pipeline.run.side_effect = RuntimeError("boom: never flagged")
+    client = _make_router(pipeline=pipeline, registry=ProviderRegistry())
+    url_handler = _find_url_handler(client)
+
+    with caplog.at_level(logging.DEBUG, logger="media_bot_v2.telegram.router"):
+        url_event = _FakeEvent("https://www.instagram.com/reel/GENERIC456/", 1)
+        await url_handler(url_event)
+
+    router_records = [r for r in caplog.records if r.name == "media_bot_v2.telegram.router"]
+    assert len([r for r in router_records if r.exc_info is not None]) == 1
 
 
 def test_register_handlers_without_registry_warns_providers_disabled(caplog):

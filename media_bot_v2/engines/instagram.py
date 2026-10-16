@@ -36,6 +36,7 @@ from media_bot_v2.engines.ytdlp_support import (
     DownloadCancelledSignal,
     DownloadGuard,
     DownloadTooLargeSignal,
+    YtdlpLoggerAdapter,
     remove_partial_files,
     rename_to_safe_display_name,
     safe_outtmpl,
@@ -308,7 +309,8 @@ class InstagramEngine(BaseEngine):
         opts: dict = {
             "outtmpl": safe_outtmpl(dest_dir),
             "quiet": True,
-            "no_warnings": True,
+            "no_warnings": False,
+            "logger": YtdlpLoggerAdapter(),
             "noprogress": True,
             "progress_hooks": [self._make_progress_hook(loop, cancel_token, guard)],
             "match_filter": guard.match_filter(),

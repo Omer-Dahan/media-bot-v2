@@ -626,8 +626,18 @@ class DownloadPipeline:
             )
             await _update_progress(progress, texts.FLOOD_WAIT_FAILED, is_terminal=True)
             raise
-        except Exception:
+        except Exception as exc:
             logger.exception("Download pipeline failed for user=%s url=%s", user_id, url)
+            # telegram/router.py's own generic handler would otherwise log a
+            # second identical traceback for the same failure - this flag
+            # tells it the traceback is already on record, so it only needs
+            # a short WARNING with the url/user still visible. Some built-in
+            # or slotted exceptions refuse arbitrary attributes; logging must
+            # never raise because of that, so the flag is best-effort.
+            try:
+                exc.logged_with_traceback = True
+            except AttributeError:
+                pass
             await _update_progress(progress, texts.DOWNLOAD_FAILED, is_terminal=True)
             raise
         finally:

@@ -46,6 +46,53 @@ TRANSPORT_RETRIES = 3
 
 _PARTIAL_NAME_RE = re.compile(r"(\.part(-Frag\d+)?|\.ytdl|\.temp)$", re.IGNORECASE)
 
+# yt-dlp also reports its progress through this same interface
+# (`to_screen` -> `logger.debug`), not just real diagnostics - these must
+# never be promoted to WARNING even if a future yt-dlp version ever routes
+# them through `warning`/`error` instead.
+_YTDLP_PROGRESS_SPAM_RE = re.compile(r"^\[download\]")
+
+
+class YtdlpLoggerAdapter:
+    """yt-dlp's `logger` option (https://github.com/yt-dlp/yt-dlp - see
+    `YoutubeDL.to_screen`/`report_warning`/`report_error`): forwards yt-dlp's
+    own `ERROR:`/`WARNING:` and debug lines into
+    `logging.getLogger("media_bot_v2.ytdlp")` instead of letting yt-dlp print
+    them straight to stderr, which is what happens when `quiet=True` and no
+    `logger` is passed. That is exactly the text an operator needs when a
+    download fails (nsig, PO token, HTTP 403/...) - without this adapter it
+    never reaches the per-request buffer (`logging_setup.RequestLogHandler`)
+    or the file/journal.
+
+    `error`/`warning` land at WARNING with no traceback (yt-dlp already
+    folds the relevant context into the message itself); `debug`/`info` land
+    at DEBUG. Progress spam (`[download]  42.1%`, `[download] Destination:
+    ...`) is routed to DEBUG regardless of which method it comes through, so
+    it can never flood the file/journal handlers (configured at INFO) or an
+    operator's WARNING-and-above view.
+    """
+
+    def __init__(self) -> None:
+        self._logger = logging.getLogger("media_bot_v2.ytdlp")
+
+    def debug(self, msg: str) -> None:
+        self._logger.debug(msg)
+
+    def info(self, msg: str) -> None:
+        self._logger.debug(msg)
+
+    def warning(self, msg: str) -> None:
+        if _YTDLP_PROGRESS_SPAM_RE.match(msg):
+            self._logger.debug(msg)
+            return
+        self._logger.warning(msg)
+
+    def error(self, msg: str) -> None:
+        if _YTDLP_PROGRESS_SPAM_RE.match(msg):
+            self._logger.debug(msg)
+            return
+        self._logger.warning(msg)
+
 
 class DownloadTooLargeSignal(Exception):
     """Raised from inside a yt-dlp progress hook to abort mid-download once

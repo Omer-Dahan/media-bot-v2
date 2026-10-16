@@ -63,13 +63,11 @@ async def run_in_thread[**P, T](func: Callable[P, T], *args: P.args, **kwargs: P
     as `asyncio.to_thread()` does - otherwise `ContextVar`s set on the calling
     task (notably the per-request log buffer, `logging_setup.request_log_scope`)
     would never be visible to log lines written from here, e.g. a provider's
-    HTTP-error logging. This does NOT by itself make yt-dlp's or ffmpeg's own
-    output land in that buffer: yt-dlp currently runs with `quiet=True,
-    no_warnings=True` and no `logger=` passed, so its `ERROR:`/warning lines
-    go straight to stderr, never through `logging` at all, and ffmpeg's
-    output is captured separately as subprocess output - not via a Python
-    logger either. Routing those into the buffer is a later stage (the
-    yt-dlp `logger` adapter noted in the triage, section 3.5).
+    HTTP-error logging. yt-dlp's own `ERROR:`/`WARNING:`/debug lines reach
+    this same buffer too, via the `logger=` adapter every engine now passes
+    (`engines.ytdlp_support.YtdlpLoggerAdapter`) instead of letting them go
+    straight to stderr. ffmpeg's output is still captured separately as
+    subprocess output, not via a Python logger.
     """
     loop = asyncio.get_running_loop()
     ctx = contextvars.copy_context()
