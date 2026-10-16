@@ -68,6 +68,7 @@ from media_bot_v2.engines.base import (
     DownloadTooLargeError,
     UnsupportedUrlError,
 )
+from media_bot_v2.engines.direct import DirectDownloadError
 from media_bot_v2.engines.instagram import InstagramDownloadError
 from media_bot_v2.engines.permissions import harden_path, harden_tree
 from media_bot_v2.engines.tiktok import TikTokDownloadError
@@ -600,6 +601,7 @@ class DownloadPipeline:
             YouTubeDownloadError,
             TikTokDownloadError,
             InstagramDownloadError,
+            DirectDownloadError,
         ) as exc:
             logger.warning("Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
             await _update_progress(progress, str(exc), is_terminal=True)

@@ -117,6 +117,23 @@ def test_classify_youtube_error_cookies():
     assert "cookies" in msg
 
 
+def test_classify_youtube_error_bot_detection_with_curly_apostrophe():
+    """Production log (2026-10-16 00:08:47): yt-dlp's actual message uses a
+    curly apostrophe (U+2019) in "you're", not the ASCII one the pattern
+    table is written with. Before the fix this fell through to the generic
+    "cookie" keyword (the message also mentions --cookies-from-browser) and
+    told the user their cookies file was invalid, instead of reporting the
+    actual bot check."""
+    msg = classify_youtube_error(
+        "ERROR: [youtube] gpvPZUYsjRA: Sign in to confirm you’re not a bot. "
+        "Use --cookies-from-browser or --cookies for the authentication. "
+        "See  https://github.com/yt-dlp/yt-dlp/wiki/FAQ#how-do-i-pass-cookies-to-yt-dlp "
+        "for how to manually pass cookies"
+    )
+    assert "בוט" in msg
+    assert "אינו תקין או שפג תוקפו" not in msg
+
+
 def test_classify_youtube_error_private_video():
     msg = classify_youtube_error("ERROR: [youtube] abc: Private video")
     assert "פרטי" in msg or "נמחק" in msg

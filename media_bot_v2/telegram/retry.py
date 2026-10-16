@@ -57,6 +57,10 @@ HOPELESS_TEXTS = (
     # same quality will fail again - the message already points the user at
     # the quality menu instead.
     "הפורמט המבוקש אינו זמין",
+    # Direct-link 401/403/404/410/451: the site refuses to serve the file, or
+    # it is simply gone - retrying the same URL repeats the same failure.
+    texts.DIRECT_LINK_REFUSED,
+    texts.DIRECT_LINK_GONE,
 )
 
 

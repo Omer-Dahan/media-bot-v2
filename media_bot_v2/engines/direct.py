@@ -20,6 +20,8 @@ import time
 from pathlib import Path
 from urllib.parse import unquote, urlparse
 
+import requests
+
 from media_bot_v2.engines.base import (
     BaseEngine,
     CancellationToken,
@@ -53,6 +55,43 @@ _KNOWN_PLATFORM_DOMAINS = (
 _CHUNK_SIZE = 1024 * 1024
 _REQUEST_TIMEOUT = 30
 _PROGRESS_THROTTLE_SECONDS = 2.0
+
+# 401/403/451: the site itself refuses to serve the file to this client.
+# 404/410: the file is simply gone. Neither is fixed by retrying the exact
+# same request, so these map to a hopeless domain error (no retry button)
+# instead of leaking a raw requests.HTTPError up through the pipeline.
+_REFUSED_STATUS_CODES = (401, 403, 451)
+_GONE_STATUS_CODES = (404, 410)
+# 429/5xx are transient (rate limiting, momentary server trouble) - still
+# worth a retry, just with a classified message instead of the raw error.
+_RETRYABLE_STATUS_CODES = (429,)
+
+
+class DirectLinkRefusedError(UnsupportedUrlError):
+    """Raised when the remote server returns 401/403/404/410/451 for a
+    direct-link download - the site refuses to serve the file, or it no
+    longer exists. Subclasses UnsupportedUrlError so pipeline.py's existing
+    domain-error handling (single WARNING log, no traceback) picks it up."""
+
+
+class DirectDownloadError(Exception):
+    """Raised with an already-classified, Hebrew, user-facing message for a
+    transient (429/5xx) direct-link failure - still worth a retry."""
+
+
+def _classify_http_error(exc: requests.HTTPError, url: str) -> Exception:
+    response = exc.response
+    status = response.status_code if response is not None else None
+    if status in _REFUSED_STATUS_CODES:
+        logger.warning("Direct link refused (HTTP %s) for %s", status, url)
+        return DirectLinkRefusedError(texts.DIRECT_LINK_REFUSED)
+    if status in _GONE_STATUS_CODES:
+        logger.warning("Direct link gone (HTTP %s) for %s", status, url)
+        return DirectLinkRefusedError(texts.DIRECT_LINK_GONE)
+    if status in _RETRYABLE_STATUS_CODES or (status is not None and 500 <= status < 600):
+        logger.warning("Direct link server error (HTTP %s) for %s", status, url)
+        return DirectDownloadError(texts.DIRECT_LINK_SERVER_BUSY)
+    return exc
 
 
 def _report_stream_progress(
@@ -133,6 +172,11 @@ class DirectEngine(BaseEngine):
         except SSRFBlockedError as exc:
             logger.warning("Blocked SSRF attempt for %s: %s", url, exc)
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL) from exc
+        except requests.HTTPError as exc:
+            classified = _classify_http_error(exc, url)
+            if classified is exc:
+                raise
+            raise classified from exc
         if cancel_token is not None and cancel_token.is_set():
             return DownloadResult(file_paths=[])
         return DownloadResult(file_paths=[str(dest_path)], title=dest_path.name)

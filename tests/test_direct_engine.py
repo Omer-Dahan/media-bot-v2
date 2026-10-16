@@ -3,6 +3,7 @@ internet - this proves the streaming-download code path end-to-end without
 violating the "no downloads from the internet" constraint for this stage."""
 
 import http.server
+import logging
 import re
 import threading
 import time
@@ -11,7 +12,9 @@ from pathlib import Path
 import pytest
 
 from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError, UnsupportedUrlError
-from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine, DirectLinkRefusedError
+from media_bot_v2.telegram import texts
+from media_bot_v2.telegram.retry import is_hopeless_failure
 
 FILE_CONTENT = b"hello from a local test server\n" * 100
 LARGE_CONTENT = b"y" * 2000
@@ -46,6 +49,18 @@ class _Handler(http.server.BaseHTTPRequestHandler):
     def do_GET(self):
         if self.path == "/does-not-exist":
             self.send_response(404)
+            self.end_headers()
+            return
+        if self.path == "/forbidden":
+            self.send_response(403)
+            self.end_headers()
+            return
+        if self.path == "/rate-limited":
+            self.send_response(429)
+            self.end_headers()
+            return
+        if self.path == "/server-error":
+            self.send_response(503)
             self.end_headers()
             return
         if self.path == "/declared-oversized":
@@ -162,11 +177,63 @@ async def test_download_streams_file_to_disk(local_server, tmp_path):
 
 
 @pytest.mark.usefixtures("bypass_ssrf_guard")
-async def test_download_raises_on_http_error(local_server, tmp_path):
-    import requests
-
-    with pytest.raises(requests.HTTPError):
+async def test_download_404_raises_classified_gone_error_no_retry_one_log(
+    local_server, tmp_path, caplog
+):
+    """A 404 on a direct link (bug M12.4) must not leak a raw
+    requests.HTTPError up to the user as a generic "try again" failure -
+    it must classify as "file is gone", carry no retry button, and log
+    exactly once (not the two full tracebacks seen in production)."""
+    with caplog.at_level(logging.WARNING), pytest.raises(DirectLinkRefusedError) as exc_info:
         await DirectEngine().download(f"{local_server}/does-not-exist", dest_dir=tmp_path)
+
+    assert str(exc_info.value) == texts.DIRECT_LINK_GONE
+    assert is_hopeless_failure(text=str(exc_info.value))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+    assert warnings[0].exc_info is None
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_download_403_raises_classified_refused_error_no_retry_one_log(
+    local_server, tmp_path, caplog
+):
+    """A 403 on a direct link (production: porn4fans.com, fansmine.com) must
+    classify as "site refuses direct downloads", carry no retry button, and
+    log exactly once."""
+    with caplog.at_level(logging.WARNING), pytest.raises(DirectLinkRefusedError) as exc_info:
+        await DirectEngine().download(f"{local_server}/forbidden", dest_dir=tmp_path)
+
+    assert str(exc_info.value) == texts.DIRECT_LINK_REFUSED
+    assert is_hopeless_failure(text=str(exc_info.value))
+
+    warnings = [r for r in caplog.records if r.levelno >= logging.WARNING]
+    assert len(warnings) == 1
+    assert warnings[0].levelname == "WARNING"
+    assert warnings[0].exc_info is None
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_download_429_raises_classified_retryable_error(local_server, tmp_path):
+    """429 stays retryable (rate limiting is transient) but still gets a
+    classified message instead of a raw HTTPError."""
+    with pytest.raises(DirectDownloadError) as exc_info:
+        await DirectEngine().download(f"{local_server}/rate-limited", dest_dir=tmp_path)
+
+    assert str(exc_info.value) == texts.DIRECT_LINK_SERVER_BUSY
+    assert not is_hopeless_failure(text=str(exc_info.value))
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_download_5xx_raises_classified_retryable_error(local_server, tmp_path):
+    """5xx stays retryable (momentary server trouble) with its own message."""
+    with pytest.raises(DirectDownloadError) as exc_info:
+        await DirectEngine().download(f"{local_server}/server-error", dest_dir=tmp_path)
+
+    assert str(exc_info.value) == texts.DIRECT_LINK_SERVER_BUSY
+    assert not is_hopeless_failure(text=str(exc_info.value))
 
 
 @pytest.mark.usefixtures("bypass_ssrf_guard")

@@ -30,7 +30,7 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Setting
 from media_bot_v2.db.session import session_scope
 from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
-from media_bot_v2.engines.direct import DirectEngine
+from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine
 from media_bot_v2.engines.instagram import (
     InstagramDownloadError,
     InstagramEngine,
@@ -483,6 +483,7 @@ def register_handlers(
                 InstagramDownloadError,
                 DownloadTooLargeError,
                 UnsupportedUrlError,
+                DirectDownloadError,
             ) as exc:
                 if not getattr(progress, "is_terminal_completed", False):
                     await progress.update(str(exc), is_terminal=True)

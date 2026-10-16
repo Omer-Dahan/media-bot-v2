@@ -308,8 +308,8 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
             "http error 429",
         ),
         (
-            "❌ ההורדה מיוטיוב נחסמה (זיהוי בוט או נדרש אימות).\n"
-            "➡️ יש לעדכן את קובץ ה-cookies בשרת או להמתין להסרת החסימה."
+            "❌ יוטיוב מזהה את השרת כבוט וחוסם את ההורדה.\n"
+            "➡️ יש להגדיר PO token תקף (משתנה הסביבה POTOKEN) בשרת, או לעדכן את קובץ ה-cookies ולנסות שוב."
         ),
     ),
     (
@@ -360,6 +360,19 @@ _ERROR_PATTERNS: tuple[tuple[tuple[str, ...], str], ...] = (
     ),
 )
 
+_APOSTROPHE_TRANSLATION = str.maketrans({"’": "'", "‘": "'", "ʼ": "'"})
+
+
+def _normalize_apostrophes(text: str) -> str:
+    """yt-dlp/YouTube error strings sometimes use a curly apostrophe
+    (U+2019), the opening variant (U+2018), or the modifier letter
+    apostrophe (U+02BC) in "you're" instead of the ASCII one our keyword
+    tables are written with - normalize before matching so a message like
+    "Sign in to confirm you’re not a bot" still hits the bot-check
+    bucket instead of falling through to a weaker, unrelated pattern."""
+    return text.translate(_APOSTROPHE_TRANSLATION)
+
+
 _NETWORK_PATTERNS = (
     "connection reset",
     "connection refused",
@@ -385,7 +398,7 @@ def classify_youtube_error(message: str | None) -> str:
     """
     if not message:
         return "❌ ההורדה נכשלה: לא התקבל קובץ מדיה מיוטיוב.\n➡️ נסה שוב או שלח קישור אחר."
-    lowered = message.lower()
+    lowered = _normalize_apostrophes(message).lower()
     for keywords, hebrew in _ERROR_PATTERNS:
         if any(keyword in lowered for keyword in keywords):
             return hebrew
@@ -444,7 +457,7 @@ def _extract_subtitle_paths(entry: dict) -> list[str]:
 def summarize_ytdlp_failure(exc: Exception | str) -> str:
     original = getattr(exc, "original_error", None)
     msg = str(original) if original else str(exc)
-    lowered = msg.lower()
+    lowered = _normalize_apostrophes(msg).lower()
     if any(k in lowered for k in ("javascript runtime", "js runtime", "n challenge", "runtime", "javascript", "פענוח")):
         return "חסר runtime של JavaScript"
     if any(k in lowered for k in ("sign in", "bot detection", "login required", "authentication", "confirm you're not a bot", "זיהוי בוט", "נדרש אימות", "התחברות")):
