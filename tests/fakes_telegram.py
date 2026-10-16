@@ -6,6 +6,11 @@ uploader function ran. `FakeTelegramClient` records every call with its full
 args/kwargs, hands out sequential message ids, remembers sent messages so
 `get_messages` can find them, and can be told to fail the Nth `send_file`.
 
+`send_file` called with a list, exactly like the real Telethon client, sends
+an album - recorded separately as a `"send_media_group"` call so tests can
+tell a grouped send from a single one, and can be told to fail the Nth one
+via `fail_send_media_group`.
+
 `forward_messages` exists only so a test can assert it is never used: the
 bot must not show recipients a "Forwarded from <archive channel>" header.
 """
@@ -45,7 +50,9 @@ class FakeTelegramClient:
         self.stored: dict[tuple[Any, int], FakeMessage] = {}
         self._next_id = 0
         self._send_file_count = 0
+        self._send_media_group_count = 0
         self.fail_send_file: dict[int, Exception] = {}
+        self.fail_send_media_group: dict[int, Exception] = {}
         self._handlers: list[tuple[Any, Any]] = []
 
     # -- recording helpers -------------------------------------------------
@@ -61,6 +68,22 @@ class FakeTelegramClient:
 
     # -- Telethon surface ----------------------------------------------------
     async def send_file(self, entity, file, **kwargs):
+        if isinstance(file, list):
+            self.calls.append(Call("send_media_group", (entity, file), kwargs))
+            self._send_media_group_count += 1
+            failure = self.fail_send_media_group.get(self._send_media_group_count)
+            if failure is not None:
+                raise failure
+            captions_list = kwargs.get("caption") or []
+            messages = []
+            for index, item in enumerate(file):
+                media = item if not isinstance(item, str) else FakeMedia(item.rsplit("/", 1)[-1])
+                caption = captions_list[index] if index < len(captions_list) else ""
+                message = FakeMessage(self._new_id(), entity, media, caption)
+                self.stored[(entity, message.id)] = message
+                messages.append(message)
+            return messages
+
         self.calls.append(Call("send_file", (entity, file), kwargs))
         self._send_file_count += 1
         failure = self.fail_send_file.get(self._send_file_count)

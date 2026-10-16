@@ -10,6 +10,7 @@ captions, part labels, edits - never just "the function ran".
 
 from __future__ import annotations
 
+import base64
 import hashlib
 import shutil
 import subprocess
@@ -363,13 +364,7 @@ async def test_audio_is_sent_with_audio_attributes_and_audio_caption(client, upl
 
 
 async def test_photo_is_always_a_photo_even_in_file_mode(client, uploader, credits_service, tmp_path):
-    import base64
-
-    png = base64.b64decode(
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
-    )
-    source = tmp_path / "pic.png"
-    source.write_bytes(png)
+    source = _write_png(tmp_path / "pic.png")
     await _run(
         _pipeline(credits_service, tmp_path),
         _Engine([("pic.png", source)]),
@@ -778,3 +773,139 @@ def test_cached_item_round_trips_through_the_store(session_factory):
     entry = store.get("k2")
     assert entry.items == [item]
     assert (entry.description, entry.subtitle_ids, entry.subtitle_names) == ("d", [4], ["s.srt"])
+
+
+# --------------------------------------------------------------------------
+# albums (E6): multi-item requests (carousels/slideshows/playlists) are
+# delivered as media groups of up to 10, caption on the last item only
+# --------------------------------------------------------------------------
+_PNG_BYTES = base64.b64decode(
+    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNkYPhfDwAChwGA60e6kgAAAABJRU5ErkJggg=="
+)
+
+
+def _write_png(path: Path) -> Path:
+    path.write_bytes(_PNG_BYTES)
+    return path
+
+
+async def test_twelve_eligible_items_become_two_albums_with_the_signature_on_the_very_last_one(
+    client, uploader, credits_service, tmp_path
+):
+    files = []
+    for i in range(12):
+        path = tmp_path / f"pic{i:02d}.png"
+        _write_png(path)
+        files.append((path.name, path))
+
+    await _run(_pipeline(credits_service, tmp_path), _Engine(files, title="Carousel"), uploader)
+
+    albums = client.calls_to("send_media_group")
+    assert [len(call.args[1]) for call in albums] == [10, 2]
+    assert client.send_files(USER_CHAT) == []  # nothing went out as a plain send_file
+
+    first_captions, second_captions = (call.kwargs["caption"] for call in albums)
+    assert first_captions == [""] * 10
+    assert second_captions[0] == ""
+    assert "Carousel" in second_captions[1] and second_captions[1] != ""
+
+
+async def test_single_item_request_is_a_plain_send_never_an_album(client, uploader, credits_service, tmp_path):
+    source = _write_png(tmp_path / "pic.png")
+
+    await _run(_pipeline(credits_service, tmp_path), _Engine([("pic.png", source)]), uploader)
+
+    assert client.calls_to("send_media_group") == []
+    assert len(client.send_files(USER_CHAT)) == 1
+
+
+async def test_a_split_file_mixed_with_a_carousel_keeps_its_own_part_sends_only_the_carousel_albums(
+    client, uploader, credits_service, tmp_path, media_dir, monkeypatch
+):
+    """A request can mix a file too big to fit in one message (split into
+    labelled parts) with items that DO fit (eligible for an album). The
+    split parts must never be swept into the album buffer - each one keeps
+    its own send and its own "חלק N/M" caption, exactly as before E6."""
+    split_parts = [("big.part000.mp4", media_dir / "v1s.mp4"), ("big.part001.mp4", media_dir / "v2s.mp4")]
+    a = _write_png(tmp_path / "a.png")
+    b = _write_png(tmp_path / "b.png")
+
+    def fake_split(file_path, **kwargs):
+        if file_path.name != "big.mp4":
+            return [file_path]
+        made = [file_path.parent / name for name, _ in split_parts]
+        file_path.unlink()
+        return made
+
+    monkeypatch.setattr("media_bot_v2.pipeline.splitter.split_file", fake_split)
+
+    class _MixedEngine(_Engine):
+        async def download(self, url, *, dest_dir, cancel_token=None):
+            result = await super().download(url, dest_dir=dest_dir)
+            for name, source in split_parts:
+                shutil.copy(source, dest_dir / name)
+            return result
+
+    engine = _MixedEngine([("big.mp4", media_dir / "v1s.mp4"), ("a.png", a), ("b.png", b)], title="Mixed")
+
+    await _run(_pipeline(credits_service, tmp_path), engine, uploader)
+
+    sends = client.send_files(USER_CHAT)
+    assert len(sends) == 2
+    assert sends[0].kwargs["caption"].startswith("📎 חלק 1/2")
+    assert sends[1].kwargs["caption"].startswith("📎 חלק 2/2")
+
+    albums = client.calls_to("send_media_group")
+    assert len(albums) == 1
+    (_entity, album_files) = albums[0].args
+    assert len(album_files) == 2
+    album_captions = albums[0].kwargs["caption"]
+    assert album_captions[0] == "" and album_captions[1] != ""
+
+
+async def test_document_delivery_mode_never_forms_an_album(client, uploader, credits_service, tmp_path):
+    files = [(f"pic{i}.png", _write_png(tmp_path / f"pic{i}.png")) for i in range(3)]
+
+    await _run(
+        _pipeline(credits_service, tmp_path),
+        _Engine(files, title="Docs"),
+        uploader,
+        delivery=DeliveryOptions(send_as="document"),
+    )
+
+    assert client.calls_to("send_media_group") == []
+    assert len(client.send_files(USER_CHAT)) == 3
+
+
+async def test_album_rejected_by_telegram_falls_back_once_to_individual_sends(
+    client, uploader, credits_service, tmp_path
+):
+    client.fail_send_media_group[1] = MediaInvalidError(request=None)
+    files = [(f"pic{i}.png", _write_png(tmp_path / f"pic{i}.png")) for i in range(3)]
+
+    await _run(_pipeline(credits_service, tmp_path), _Engine(files, title="Fallback"), uploader)
+
+    assert len(client.calls_to("send_media_group")) == 1  # the rejected attempt, never retried as an album
+    sends = client.send_files(USER_CHAT)
+    assert len(sends) == 3  # every item still delivered, one by one
+    assert sends[0].kwargs["caption"] == "" and sends[1].kwargs["caption"] == ""
+    assert "Fallback" in sends[2].kwargs["caption"]
+
+
+async def test_grouped_delivery_charges_credits_once_for_the_whole_batch(
+    client, uploader, credits_service, tmp_path
+):
+    real_use_quota = credits_service.use_quota_dynamic
+    calls: list[list[int]] = []
+
+    def spy_use_quota(user_id, file_sizes):
+        calls.append(list(file_sizes))
+        return real_use_quota(user_id, file_sizes)
+
+    credits_service.use_quota_dynamic = spy_use_quota
+    files = [(f"pic{i}.png", _write_png(tmp_path / f"pic{i}.png")) for i in range(3)]
+
+    await _run(_pipeline(credits_service, tmp_path), _Engine(files, title="Billing"), uploader)
+
+    assert len(calls) == 1  # charged exactly once for the request, not once per item/batch
+    assert len(calls[0]) == 3  # one size per delivered item

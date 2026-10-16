@@ -163,6 +163,7 @@ class Uploader(Protocol):
         performer: str | None = None,
         progress: Callable[[int, int], Awaitable[None]] | None = None,
     ) -> Any: ...
+    async def send_media_group(self, paths: list[Path], *, captions: list[str]) -> list[Any]: ...
     async def copy_to_archive(self, message: Any, *, caption: str) -> Any | None: ...
     async def edit_caption(self, message: Any, caption: str) -> None: ...
     async def send_subtitle(self, path: Path) -> Any: ...
@@ -409,8 +410,65 @@ class DownloadPipeline:
             all_parts_archived = True
             last_media_message: Any = None
             any_parts = False
+            # A request with several files (carousel/slideshow/playlist) is
+            # delivered as albums of up to 10 - Telegram's media-group limit -
+            # instead of one message per file. Only whole, unsplit, non-document
+            # photos/videos are eligible; a split file's parts and "send as
+            # file" deliveries keep going out one message at a time, below.
+            multi_item = len(groups) > 1
+            album_buffer: list[tuple[_FileGroup, Path, MediaInfo]] = []
+
+            async def flush_album(*, final: bool) -> None:
+                nonlocal last_media_message, all_parts_archived, any_parts
+                if not album_buffer:
+                    return
+                pending = list(album_buffer)
+                album_buffer.clear()
+                for batch_start in range(0, len(pending), 10):
+                    batch = pending[batch_start : batch_start + 10]
+                    any_parts = True
+                    is_last_batch = final and batch_start + len(batch) == len(pending)
+                    upload_progress.start_part(sum(delivered_sizes))
+                    messages = await self._send_album_batch(
+                        uploader, batch, result=result, url=url, delivery=delivery, caption_on_last=is_last_batch
+                    )
+                    for (grp, part, _info), message in zip(batch, messages, strict=True):
+                        last_media_message = message
+                        part_size = part.stat().st_size
+                        delivered_sizes.append(part_size)
+                        self._credits.add_bandwidth_used(user_id, part_size)
+                        archive_id = await self._archive_copy(
+                            uploader, message, part.name, user_id=user_id, url=url, delivery=delivery
+                        )
+                        if archive_id is not None:
+                            archived_message_ids.append(archive_id)
+                        else:
+                            all_parts_archived = False
+                        cached_items.append(
+                            CachedItem(
+                                kind=grp.info.kind,
+                                duration=grp.info.duration,
+                                width=grp.info.width,
+                                height=grp.info.height,
+                                part_index=0,
+                                part_total=0,
+                                part_label=None,
+                            )
+                        )
+
             for group in groups:
                 total_parts = len(group.parts)
+                eligible_for_album = (
+                    multi_item
+                    and total_parts == 1
+                    and not delivery.as_document
+                    and not group.force_document
+                    and group.info.kind in (KIND_VIDEO, KIND_PHOTO)
+                )
+                if eligible_for_album:
+                    album_buffer.append((group, group.parts[0], group.info))
+                    continue
+                await flush_album(final=False)
                 previous: tuple[Any, str] | None = None
                 for index, part in enumerate(group.parts, start=1):
                     any_parts = True
@@ -475,6 +533,8 @@ class DownloadPipeline:
                             previous = (message, label)
 
                 await self._send_raw_split_notice_quietly(uploader, group=group, reply_to=last_media_message)
+
+            await flush_album(final=True)
 
             # Delivery is done at this point - every part already reached the
             # user. A charging failure past this line must never surface as
@@ -704,6 +764,54 @@ class DownloadPipeline:
         if self._upload_timeout and self._upload_timeout > 0:
             return asyncio.timeout(self._upload_timeout)
         return asyncio.nullcontext()
+
+    async def _send_album_batch(
+        self,
+        uploader: Uploader,
+        batch: list[tuple[_FileGroup, Path, MediaInfo]],
+        *,
+        result: DownloadResult,
+        url: str,
+        delivery: DeliveryOptions,
+        caption_on_last: bool,
+    ) -> list[Any]:
+        """Send up to 10 items as one album; the signature, if any, goes on
+        the last item of the batch. One retry: if the whole album is
+        rejected (a bad item, media-invalid, a flood wait past the uploader's
+        own retry budget), fall back once to sending every item on its own -
+        never a chain of retries."""
+        batch_captions = ["" for _ in batch]
+        if caption_on_last:
+            _group, _part, info = batch[-1]
+            batch_captions[-1] = captions.build_user_caption(
+                kind=info.kind,
+                title=result.title,
+                url=url,
+                width=info.width,
+                height=info.height,
+                duration=info.duration,
+                title_length=delivery.title_length,
+            )
+        paths = [part for _group, part, _info in batch]
+        try:
+            return await uploader.send_media_group(paths, captions=batch_captions)
+        except Exception:
+            logger.warning(
+                "send_media_group failed for %d items, falling back to individual sends", len(batch), exc_info=True
+            )
+            messages = []
+            for (_group, part, info), caption in zip(batch, batch_captions, strict=True):
+                messages.append(
+                    await uploader.send_file(
+                        part,
+                        caption=caption,
+                        media=info,
+                        as_document=False,
+                        title=result.title,
+                        performer=getattr(result, "artist", None) or info.performer,
+                    )
+                )
+            return messages
 
     async def _prepare_part(
         self, group: _FileGroup, part: Path, index: int, total: int, *, as_document: bool

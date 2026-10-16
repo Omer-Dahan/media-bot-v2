@@ -255,7 +255,7 @@ cp .env.example .env
 # 4 · Verify local environment readiness
 uv run python -m media_bot_v2.preflight
 
-# 5 · Run the complete test suite (1063 passing, 10 skipped as of this writing)
+# 5 · Run the complete test suite (1069 passing, 10 skipped as of this writing)
 #     the count grows over time, so treat it as a floor, not a fixed target
 uv run pytest -q
 ```
@@ -297,6 +297,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 4. **Delivery & Archiving**: The completed media is delivered with formatted captions, streamable flags, and optional separate subtitle files. The message is quietly archived to the configured `ARCHIVE_CHANNEL`.
 5. **Instant Cache Hits**: Subsequent requests for the same URL and quality are served instantly from the archive channel without re-downloading or consuming credits.
 6. **Error Recovery**: If a transient network glitch occurs, the progress message displays the failure reason and attaches a `[ 🔄 נסה שוב ]` button for immediate re-execution.
+7. **Multi-Item Delivery**: A request with several items (carousel, slideshow, playlist) is delivered as albums of up to 10 items, with the signature on the last item; split parts and "file" mode still deliver one message at a time.
 
 ### Commands & Settings
 
@@ -449,7 +450,7 @@ media-bot-v2/
 │   ├── 📄 SPEC.md                # System specification & cutover roadmap
 │   └── 📂 research/              # Provider/engine feasibility research notes
 │
-└── 📂 tests/                     # 🧪 Comprehensive Test Suite (1063 passing, 10 skipped as of this writing)
+└── 📂 tests/                     # 🧪 Comprehensive Test Suite (1069 passing, 10 skipped as of this writing)
 ```
 
 </details>

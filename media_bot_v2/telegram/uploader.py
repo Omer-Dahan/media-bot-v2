@@ -194,6 +194,35 @@ class TelethonUploader:
             kwargs["attributes"] = [DocumentAttributeAudio(**attr_kwargs)]
         return kwargs
 
+    async def send_media_group(
+        self,
+        paths: list[Path],
+        *,
+        captions: list[str],
+    ) -> list[Any]:
+        """Send up to 10 files as one Telegram album (`client.send_file` with a
+        list, which Telethon turns into `InputMedia{Photo,Document}` items
+        server-side - there is no separate `send_media_group` method on the
+        real client). `captions[i]` is the caption for `paths[i]`; Telegram
+        shows a caption only where one is non-empty, so callers put the
+        signature on the last item and "" everywhere else.
+
+        `supports_streaming=True` applies to the whole call (Telethon's album
+        path takes one flag for every file, not one per item); it is a no-op
+        for the photos in a mixed batch.
+        """
+        return await call_with_flood_retry(
+            self._client.send_file,
+            self._chat_id,
+            [str(path) for path in paths],
+            caption=captions,
+            parse_mode="html",
+            force_document=False,
+            supports_streaming=True,
+            on_flood=self._on_flood,
+            on_flood_cleared=self._on_flood_cleared,
+        )
+
     async def edit_caption(self, message: Any, caption: str) -> None:
         await call_with_flood_retry(
             self._client.edit_message,
