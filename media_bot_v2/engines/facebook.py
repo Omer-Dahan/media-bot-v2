@@ -381,7 +381,11 @@ def _extract_file_paths(entry: dict) -> list[str]:
     else:
         filename = entry.get("filepath") or entry.get("_filename")
         paths = [filename] if filename else []
-    return [rename_to_safe_display_name(entry, p) for p in paths]
+    # yt-dlp's raw `title` is Facebook's noisy "<views> · <reactions> ｜ <title>"
+    # description text, not the title a user would recognize - rename using
+    # the same cleaned value `_result_from_info` reports as `DownloadResult.title`.
+    display_entry = {**entry, "title": _clean_title(entry.get("description") or entry.get("title"))}
+    return [rename_to_safe_display_name(display_entry, p) for p in paths]
 
 
 def _result_from_info(info: dict, dest_dir: Path) -> DownloadResult:

@@ -354,6 +354,45 @@ async def test_download_success_single_file(tmp_path: Path):
 
 
 @pytest.mark.asyncio
+async def test_download_renames_file_using_cleaned_title_not_raw_counter_prefix(tmp_path: Path):
+    """The delivered file name must use the cleaned title (DownloadResult.title),
+    not yt-dlp's raw description with Facebook's view/reaction counter prefix."""
+    engine = FacebookEngine(max_download_size=100 * 1024 * 1024)
+    raw_title = "1.6K views · 13K reactions ｜ צאו לטייל החיים קצרים ｜ יוסף חיי לוי"
+    media_file = tmp_path / "1127463233306375.mp4"
+    media_file.write_bytes(b"dummy video data")
+
+    class _FakeYDL:
+        def __init__(self, opts):
+            pass
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, exc_type, exc_val, exc_tb):
+            return False
+
+        def extract_info(self, url, download=True):
+            return {
+                "id": "1127463233306375",
+                "title": raw_title,
+                "description": raw_title,
+                "requested_downloads": [{"filepath": str(media_file)}],
+            }
+
+    with patch("yt_dlp.YoutubeDL", _FakeYDL):
+        result = await engine.download("https://www.facebook.com/reel/1127463233306375", dest_dir=tmp_path)
+
+    assert len(result.file_paths) == 1
+    delivered_name = Path(result.file_paths[0]).name
+    assert "views" not in delivered_name
+    assert "reactions" not in delivered_name
+    assert delivered_name.endswith("[1127463233306375].mp4")
+    assert "צאו לטייל החיים קצרים" in delivered_name
+    assert delivered_name == result.title + " [1127463233306375].mp4"
+
+
+@pytest.mark.asyncio
 async def test_download_success_playlist_multiple_files(tmp_path: Path):
     engine = FacebookEngine(max_download_size=100 * 1024 * 1024)
     file1 = tmp_path / "a [1].mp4"

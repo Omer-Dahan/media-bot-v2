@@ -3,7 +3,7 @@
 <br>
 
 ### High-Performance Telegram Media Download Bot
-**Downloads from YouTube, TikTok, Instagram, and direct links - powered by Telethon MTProto.**<br>
+**Downloads from YouTube, TikTok, Instagram, Facebook, and direct links - powered by Telethon MTProto.**<br>
 Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallbacks, schema-compatible DB continuity, and an intuitive Hebrew interface.
 
 <br>
@@ -69,7 +69,7 @@ Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallback
 <td width="33%" valign="top">
 
 ### 🎬 Universal Media Ingestion
-Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, and **direct HTTP(S)** links. Supports YouTube playlists and TikTok/Instagram photo slideshows.
+Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, **Facebook**, and **direct HTTP(S)** links. Supports YouTube playlists and TikTok/Instagram photo slideshows.
 
 </td>
 <td width="33%" valign="top">
@@ -218,7 +218,7 @@ stateDiagram-v2
     [*] --> Ingested: URL received in private chat
     Ingested --> HostRouting: Parse netloc & check scheme
     HostRouting --> QualityMenu: YouTube -> Prompt quality / audio
-    HostRouting --> EngineDispatch: TikTok / Instagram / Direct
+    HostRouting --> EngineDispatch: TikTok / Instagram / Facebook / Direct
     QualityMenu --> EngineDispatch: User selects resolution
     EngineDispatch --> CacheCheck: Compute deterministic cache key
     CacheCheck --> CacheServe: Key exists in video_cache -> Resend from archive
@@ -255,7 +255,7 @@ cp .env.example .env
 # 4 · Verify local environment readiness
 uv run python -m media_bot_v2.preflight
 
-# 5 · Run the complete test suite (1069 passing, 10 skipped as of this writing)
+# 5 · Run the complete test suite (1177 passing, 10 skipped as of this writing)
 #     the count grows over time, so treat it as a floor, not a fixed target
 uv run pytest -q
 ```
@@ -292,7 +292,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 > The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters, shown on its own line below the size pair so it renders in plain left-to-right reading order with no bidi control characters involved; it fills toward the right as percent increases, and the last cell only turns 🌕 at exactly 100%. An LRM (U+200E) follows each Hebrew label on the lines above so the digits and units that follow stay left-to-right; the bar/percent line carries no such mark since it has no Hebrew label to anchor.
 
 1. **User Ingestion**: The user sends any supported media link in a **private chat only** - the bot does not respond in groups or channels.
-2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, and Instagram start downloading immediately.
+2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, Instagram, and Facebook start downloading immediately.
 3. **Live Progress Feedback**: The status message updates in place with a real-time progress bar, speed counter, and ETA. The inline `[ ❌ ביטול ]` button allows the user to abort the transfer cooperatively at any time.
 4. **Delivery & Archiving**: The completed media is delivered with formatted captions, streamable flags, and optional separate subtitle files. The message is quietly archived to the configured `ARCHIVE_CHANNEL`.
 5. **Instant Cache Hits**: Subsequent requests for the same URL and quality are served instantly from the archive channel without re-downloading or consuming credits.
@@ -401,6 +401,7 @@ media-bot-v2/
 │   │   ├── 📄 base.py            # Engine contract, cancellation tokens, & errors
 │   │   ├── 📄 content_check.py   # MIME & body sniffing to block non-media HTML/XML
 │   │   ├── 📄 direct.py          # Direct HTTP(S) file streaming engine
+│   │   ├── 📄 facebook.py        # Facebook reels and videos engine (curl-cffi impersonation)
 │   │   ├── 📄 instagram.py       # Instagram reels, posts, and carousels engine
 │   │   ├── 📄 safe_filename.py   # Path traversal defense & Linux byte truncation
 │   │   ├── 📄 ssrf_guard.py      # SSRF validation & redirect IP inspection
@@ -494,6 +495,7 @@ media-bot-v2/
 | `YOUTUBE_REMOTE_COMPONENTS`| YouTube | Remote solver component loading for `yt-dlp-ejs`; legacy alias `REMOTE_COMPONENTS` still works | `None` |
 | `TIKTOK_COOKIES_FILE` | TikTok | Path to cookie file for TikTok private/regional access | `None` |
 | `INSTAGRAM_COOKIES_FILE` | Instagram | Path to cookie file for Instagram gated content | `None` |
+| `FACEBOOK_COOKIES_FILE` | Facebook | Path to Netscape cookie file for login-gated or age-restricted Facebook videos (public videos need no cookies) | `None` |
 | `TIKTOK_PROVIDERS` | Providers | Comma-separated priority list for TikTok fallback extractors | `tikwm,tikdownloader,musicaldown,cobalt` |
 | `YOUTUBE_PROVIDERS` | Providers | Comma-separated priority list for YouTube fallback extractors | `ytmp3,cobalt` |
 | `DISABLED_PROVIDERS` | Providers | Comma-separated list of globally disabled provider names | `""` |
