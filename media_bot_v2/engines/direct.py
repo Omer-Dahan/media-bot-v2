@@ -51,6 +51,10 @@ _KNOWN_PLATFORM_DOMAINS = (
     "douyin.com",
     "instagram.com",
     "instagr.am",
+    "facebook.com",
+    "fb.com",
+    "fb.watch",
+    "fb.me",
 )
 _CHUNK_SIZE = 1024 * 1024
 _REQUEST_TIMEOUT = 30

@@ -177,6 +177,18 @@ def test_instagram_cookies_file_setting(monkeypatch):
     assert settings_with_cookies.instagram_cookies_file == "/path/to/ig_cookies.txt"
 
 
+def test_facebook_cookies_file_setting(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    settings = Settings(_env_file=None)
+    assert settings.facebook_cookies_file is None
+
+    monkeypatch.setenv("FACEBOOK_COOKIES_FILE", "/path/to/fb_cookies.txt")
+    settings_with_cookies = Settings(_env_file=None)
+    assert settings_with_cookies.facebook_cookies_file == "/path/to/fb_cookies.txt"
+
+
 def test_flood_sleep_threshold_defaults_to_zero_and_accepts_custom(monkeypatch):
     monkeypatch.setenv("APP_ID", "1")
     monkeypatch.setenv("APP_HASH", "h")

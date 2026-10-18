@@ -181,6 +181,7 @@ def main() -> None:
         registry=registry,
         tiktok_cookies_file=settings.tiktok_cookies_file,
         instagram_cookies_file=settings.instagram_cookies_file,
+        facebook_cookies_file=settings.facebook_cookies_file,
         error_reporter=error_reporter,
         request_log_max_lines=settings.request_log_max_lines,
     )

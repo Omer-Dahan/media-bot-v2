@@ -31,6 +31,12 @@ from media_bot_v2.db.models import Setting
 from media_bot_v2.db.session import session_scope
 from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
 from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine
+from media_bot_v2.engines.facebook import (
+    FacebookDownloadError,
+    FacebookEngine,
+    extract_facebook_id,
+    matches_facebook_url,
+)
 from media_bot_v2.engines.instagram import (
     InstagramDownloadError,
     InstagramEngine,
@@ -74,6 +80,7 @@ URL_RE = re.compile(r"https?://\S+")
 YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
 TIKTOK_HOSTS = ("tiktok.com", "douyin.com")
 INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
+FACEBOOK_HOSTS = ("facebook.com", "fb.com", "fb.watch", "fb.me")
 
 # The quality menu waits at most this long for the real title/duration; past
 # it the menu goes out with its placeholders (see fetch_title_duration).
@@ -103,6 +110,8 @@ def _infer_platform(url: str) -> str:
         return "tiktok"
     if _host_matches(url, INSTAGRAM_HOSTS):
         return "instagram"
+    if _host_matches(url, FACEBOOK_HOSTS):
+        return "facebook"
     return "direct"
 
 
@@ -251,6 +260,7 @@ def register_handlers(
     registry: ProviderRegistry | None = None,
     tiktok_cookies_file: str | None = None,
     instagram_cookies_file: str | None = None,
+    facebook_cookies_file: str | None = None,
     retry_store: RetryStore | None = None,
     error_reporter: ErrorReporter | None = None,
     request_log_max_lines: int = 300,
@@ -439,6 +449,16 @@ def register_handlers(
                     cache_key = compute_cache_key(
                         extract_instagram_id(job_url) or job_url, "instagram", delivery.send_as
                     )
+                elif job_platform == "facebook":
+                    engine = FacebookEngine(
+                        max_download_size=max_download_size,
+                        cookies_file=facebook_cookies_file,
+                        force_ipv4=force_ipv4,
+                        progress=progress,
+                    )
+                    cache_key = compute_cache_key(
+                        extract_facebook_id(job_url) or job_url, "facebook", delivery.send_as
+                    )
                 else:  # direct
                     engine = DirectEngine(max_download_size=max_download_size, progress=progress)
                     cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
@@ -486,6 +506,7 @@ def register_handlers(
                 YouTubeDownloadError,
                 TikTokDownloadError,
                 InstagramDownloadError,
+                FacebookDownloadError,
                 DownloadTooLargeError,
                 UnsupportedUrlError,
                 DirectDownloadError,
@@ -942,6 +963,30 @@ def register_handlers(
                         job_chat_id=event.chat_id,
                         job_url=url,
                         job_platform="instagram",
+                        message=message,
+                        progress=progress,
+                    )
+                    return
+                if _host_matches(url, FACEBOOK_HOSTS):
+                    if not matches_facebook_url(url):
+                        await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+                        return
+
+                    message = await call_with_flood_retry(
+                        event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                    )
+                    progress = make_progress(
+                        message,
+                        user_id=event.sender_id,
+                        chat_id=event.chat_id,
+                        url=url,
+                        platform="facebook",
+                    )
+                    await _execute_download(
+                        job_user_id=event.sender_id,
+                        job_chat_id=event.chat_id,
+                        job_url=url,
+                        job_platform="facebook",
                         message=message,
                         progress=progress,
                     )

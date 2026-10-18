@@ -69,6 +69,7 @@ from media_bot_v2.engines.base import (
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.direct import DirectDownloadError
+from media_bot_v2.engines.facebook import FacebookDownloadError
 from media_bot_v2.engines.instagram import InstagramDownloadError
 from media_bot_v2.engines.permissions import harden_path, harden_tree
 from media_bot_v2.engines.tiktok import TikTokDownloadError
@@ -676,6 +677,7 @@ class DownloadPipeline:
             YouTubeDownloadError,
             TikTokDownloadError,
             InstagramDownloadError,
+            FacebookDownloadError,
             DirectDownloadError,
         ) as exc:
             # DirectEngine already logs its own WARNING for a classified HTTP
