@@ -55,11 +55,11 @@ async def test_foreign_timeout_error_displays_download_failed_in_url_handler():
     await url_handler(event)
 
     # Must be DOWNLOAD_FAILED, not REQUEST_TIMEOUT_EXCEEDED
-    assert texts.DOWNLOAD_FAILED in msg.edits
-    assert texts.REQUEST_TIMEOUT_EXCEEDED not in msg.edits
-    assert msg.edits[-1] == texts.DOWNLOAD_FAILED
+    assert any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in msg.edits)
+    assert not any(e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS for e in msg.edits)
+    assert msg.edits[-1] in texts.DOWNLOAD_FAILED_VARIANTS
     # Progress update must have happened exactly once for terminal state
-    assert msg.edits.count(texts.DOWNLOAD_FAILED) == 1
+    assert sum(1 for e in msg.edits if e in texts.DOWNLOAD_FAILED_VARIANTS) == 1
 
 
 async def test_foreign_timeout_error_displays_download_failed_in_quality_pick():
@@ -84,10 +84,10 @@ async def test_foreign_timeout_error_displays_download_failed_in_quality_pick():
     cb_event = _FakeCallbackEvent(button_data, sender_id=42)
     await ytq_handler(cb_event)
 
-    assert texts.DOWNLOAD_FAILED in cb_event.menu_message.edits
-    assert texts.REQUEST_TIMEOUT_EXCEEDED not in cb_event.menu_message.edits
-    assert cb_event.menu_message.edits[-1] == texts.DOWNLOAD_FAILED
-    assert cb_event.menu_message.edits.count(texts.DOWNLOAD_FAILED) == 1
+    assert any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in cb_event.menu_message.edits)
+    assert not any(e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS for e in cb_event.menu_message.edits)
+    assert cb_event.menu_message.edits[-1] in texts.DOWNLOAD_FAILED_VARIANTS
+    assert sum(1 for e in cb_event.menu_message.edits if e in texts.DOWNLOAD_FAILED_VARIANTS) == 1
 
 
 async def test_real_budget_timeout_displays_timeout_message_once():
@@ -116,10 +116,10 @@ async def test_real_budget_timeout_displays_timeout_message_once():
 
     await url_handler(event)
 
-    assert texts.REQUEST_TIMEOUT_EXCEEDED in msg.edits
-    assert texts.DOWNLOAD_FAILED not in msg.edits
-    assert msg.edits[-1] == texts.REQUEST_TIMEOUT_EXCEEDED
-    assert msg.edits.count(texts.REQUEST_TIMEOUT_EXCEEDED) == 1
+    assert any(e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS for e in msg.edits)
+    assert not any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in msg.edits)
+    assert msg.edits[-1] in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS
+    assert sum(1 for e in msg.edits if e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS) == 1
 
 
 async def test_direct_download_timeout_single_ownership():
@@ -147,9 +147,9 @@ async def test_direct_download_timeout_single_ownership():
 
     await url_handler(event)
 
-    assert texts.DOWNLOAD_FAILED in msg.edits
-    assert texts.REQUEST_TIMEOUT_EXCEEDED not in msg.edits
-    assert msg.edits[-1] == texts.DOWNLOAD_FAILED
+    assert any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in msg.edits)
+    assert not any(e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS for e in msg.edits)
+    assert msg.edits[-1] in texts.DOWNLOAD_FAILED_VARIANTS
 
 
 # =============================================================================
@@ -193,7 +193,7 @@ async def test_flood_with_foreground_delete_success_sends_exactly_one_final_mess
     # Result: exactly ONE delivered failure message
     # msg.respond was called once for foreground (flooded) and once for deferred (delivered)
     assert msg.respond.call_count == 2
-    msg.respond.assert_called_with(texts.DOWNLOAD_FAILED)
+    assert msg.respond.await_args.args[0] in texts.DOWNLOAD_FAILED_VARIANTS
     # Edit was NOT attempted again on the already-deleted message
     assert msg.edit.call_count == 2  # initial 95% + 1 failed attempt in foreground
 
@@ -261,7 +261,7 @@ async def test_deferred_retry_handles_persistent_flood_and_removes_stale():
     await reporter._deferred_task
 
     # 1. Failure indication delivered via msg.respond
-    msg.respond.assert_any_call(texts.DOWNLOAD_FAILED)
+    assert any(c.args[0] in texts.DOWNLOAD_FAILED_VARIANTS for c in msg.respond.await_args_list)
     # 2. Stale 95% message deleted
     assert msg.delete.call_count >= 2
 

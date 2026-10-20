@@ -65,7 +65,7 @@ from media_bot_v2.telegram.flood_wait import (
     call_with_flood_retry,
     get_flood_wait_seconds,
 )
-from media_bot_v2.telegram.progress import MessageProgressReporter
+from media_bot_v2.telegram.progress import MessageProgressReporter, variant_key_for
 from media_bot_v2.telegram.quality_menu import QualitySelectionStore, build_quality_markup
 from media_bot_v2.telegram.retry import (
     RetryStore,
@@ -523,12 +523,13 @@ def register_handlers(
                     await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
                 _report(exc, texts.FLOOD_WAIT_FAILED)
             except TimeoutError as exc:
+                timeout_text = texts.resolve(texts.REQUEST_TIMEOUT_EXCEEDED, variant_key_for(progress))
                 if not getattr(progress, "is_terminal_completed", False):
                     try:
-                        await progress.update(texts.REQUEST_TIMEOUT_EXCEEDED, is_terminal=True)
+                        await progress.update(timeout_text, is_terminal=True)
                     except Exception:
                         logger.debug("Failed to update progress on timeout", exc_info=True)
-                _report(exc, texts.REQUEST_TIMEOUT_EXCEEDED)
+                _report(exc, timeout_text)
             except Exception as exc:
                 if traceback_mark is not None and traceback_mark.logged:
                     # pipeline.run() already logged this one with a traceback -
@@ -538,12 +539,13 @@ def register_handlers(
                     logger.warning("Download failed for user=%s url=%s", job_user_id, job_url)
                 else:
                     logger.exception("Download failed for user=%s url=%s", job_user_id, job_url)
+                failed_text = texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(progress))
                 if not getattr(progress, "is_terminal_completed", False):
                     try:
-                        await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                        await progress.update(failed_text, is_terminal=True)
                     except Exception:
                         logger.debug("Failed to update progress on general failure", exc_info=True)
-                _report(exc, texts.DOWNLOAD_FAILED)
+                _report(exc, failed_text)
 
     @client.on(events.NewMessage(pattern="/start"))
     async def start_handler(event: events.NewMessage.Event) -> None:
@@ -572,7 +574,8 @@ def register_handlers(
         start = time.monotonic()
         message = await call_with_flood_retry(event.respond, texts.PING_MESSAGE)
         elapsed_ms = max(1, round((time.monotonic() - start) * 1000))
-        await call_with_flood_retry(message.edit, texts.PING_RESULT.format(ms=elapsed_ms))
+        ping_text = texts.pick(texts.PING_RESULT_VARIANTS, variant_key_for(message)).format(ms=elapsed_ms)
+        await call_with_flood_retry(message.edit, ping_text)
 
     @client.on(events.NewMessage(pattern="/settings"))
     async def settings_handler(event: events.NewMessage.Event) -> None:
@@ -700,19 +703,20 @@ def register_handlers(
                 )
             except Exception as exc:
                 logger.exception("Early failure in quality pick for url=%s", url)
+                failed_text = texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(progress or event))
                 if progress is not None:
                     if not getattr(progress, "is_terminal_completed", False):
                         try:
-                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                            await progress.update(failed_text, is_terminal=True)
                         except Exception:
                             logger.debug("Failed to update progress on general failure", exc_info=True)
                 else:
-                    await _safe_answer_callback(event, texts.DOWNLOAD_FAILED, alert=True)
+                    await _safe_answer_callback(event, failed_text, alert=True)
                     try:
-                        await call_with_flood_retry(event.edit, texts.DOWNLOAD_FAILED, buttons=None)
+                        await call_with_flood_retry(event.edit, failed_text, buttons=None)
                     except (RPCError, ConnectionError, TimeoutError, OSError):
                         try:
-                            await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
+                            await call_with_flood_retry(event.respond, failed_text)
                         except (RPCError, ConnectionError, TimeoutError, OSError):
                             logger.debug(
                                 "Failed to report error after early failure in quality pick", exc_info=True
@@ -731,7 +735,7 @@ def register_handlers(
                         platform="youtube",
                         quality=quality,
                         kind=classify_kind(exc),
-                        user_text=texts.DOWNLOAD_FAILED,
+                        user_text=failed_text,
                         exc=exc,
                         started_at=handler_started,
                     )
@@ -860,7 +864,7 @@ def register_handlers(
                         platform=retry_ctx.platform,
                         quality=retry_ctx.quality,
                         kind=classify_kind(exc),
-                        user_text=texts.DOWNLOAD_FAILED,
+                        user_text=texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(event)),
                         exc=exc,
                         started_at=handler_started,
                     )
@@ -888,7 +892,9 @@ def register_handlers(
             return
         scheme_match = re.match(r"^([a-zA-Z0-9+.-]+)://", raw_text.strip())
         if scheme_match and scheme_match.group(1).lower() not in ("http", "https"):
-            await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+            await call_with_flood_retry(
+                event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
+            )
             return
         match = URL_RE.search(raw_text)
         if not match:
@@ -945,7 +951,9 @@ def register_handlers(
                     return
                 if _host_matches(url, INSTAGRAM_HOSTS):
                     if not matches_instagram_url(url):
-                        await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+                        await call_with_flood_retry(
+                            event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
+                        )
                         return
 
                     message = await call_with_flood_retry(
@@ -969,7 +977,9 @@ def register_handlers(
                     return
                 if _host_matches(url, FACEBOOK_HOSTS):
                     if not matches_facebook_url(url):
-                        await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+                        await call_with_flood_retry(
+                            event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
+                        )
                         return
 
                     message = await call_with_flood_retry(
@@ -993,7 +1003,9 @@ def register_handlers(
                     return
 
                 if not direct_engine.matches(url):
-                    await call_with_flood_retry(event.respond, texts.UNSUPPORTED_URL)
+                    await call_with_flood_retry(
+                        event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
+                    )
                     return
 
                 message = await call_with_flood_retry(
@@ -1016,15 +1028,16 @@ def register_handlers(
                 )
             except Exception as exc:
                 logger.exception("Handler failed for url=%s", url)
+                failed_text = texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(progress or event))
                 if progress is not None:
                     if not getattr(progress, "is_terminal_completed", False):
                         try:
-                            await progress.update(texts.DOWNLOAD_FAILED, is_terminal=True)
+                            await progress.update(failed_text, is_terminal=True)
                         except Exception:
                             logger.debug("Failed to update progress on general handler failure", exc_info=True)
                 else:
                     try:
-                        await call_with_flood_retry(event.respond, texts.DOWNLOAD_FAILED)
+                        await call_with_flood_retry(event.respond, failed_text)
                     except Exception:
                         logger.debug("Failed to send error response on handler failure", exc_info=True)
                 # Reported last, after every attempt to notify the user above
@@ -1041,7 +1054,7 @@ def register_handlers(
                         platform=_infer_platform(url),
                         quality=None,
                         kind=classify_kind(exc),
-                        user_text=texts.DOWNLOAD_FAILED,
+                        user_text=failed_text,
                         exc=exc,
                         started_at=handler_started,
                     )

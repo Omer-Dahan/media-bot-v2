@@ -13,6 +13,9 @@ request (spec/SPEC.md question 3 closed).
 
 from __future__ import annotations
 
+import random
+import zlib
+
 START = """
 🎉 **ברוכים הבאים לבוט הורדות המדיה!**
 שלחו לי קישור ואני אדאג להוריד עבורכם סרטונים, שירים וקבצי מדיה במהירות 🚀
@@ -182,6 +185,191 @@ RETRY_BUTTON = "🔄 נסה שוב"
 RETRY_NOT_OWNER = "אפשר לנסות שוב רק בקשה שהתחלת בעצמך."
 RETRY_ALREADY_RUNNING = "הבקשה כבר רצה."
 RETRY_NOT_AVAILABLE = "הכפתור כבר לא זמין."
+
+
+# --- Randomized phrasing variants ---
+#
+# Each tuple below rotates the Hebrew phrasing for one canonical status/error
+# constant. `pick` selects deterministically per `key` (e.g. a message id) so
+# a single progress message never flickers between phrasings as it's edited.
+
+DOWNLOADING_VARIANTS = (
+    "מוריד... הקובץ עוד לא יודע שהוא מוריד.",
+    "מוריד עכשיו. הקובץ מתנגד, אני מנצח.",
+    "מוריד. סבלנות, גם הקובץ צריך לרדת.",
+    "מוריד — בדרך אליי, ואז אליך.",
+    "מוריד. עוד רגע וזה אצלך ביד.",
+    "מוריד... הקובץ לא ממהר לשום מקום.",
+    "מוריד. אני עובד, הוא מתבכיין.",
+    "מוריד. תכף תקבל הודעה שזה מוכן.",
+)
+
+UPLOADING_VARIANTS = (
+    "📤 מעלה לטלגרם... כמעט אצלך.",
+    "📤 מעלה לטלגרם. הקובץ בדרך, תפנה לו מקום.",
+    "📤 מעלה לטלגרם. עוד רגע זה קופץ לצ'אט.",
+    "📤 מעלה לטלגרם — הרגע האחרון והכי איטי.",
+    "📤 מעלה לטלגרם. זה הקובץ הגדול, אז לוקח קצת.",
+    "📤 מעלה לטלגרם... זה כבר כמעט שלך.",
+    "📤 מעלה לטלגרם. הקובץ בטיסה, חגור.",
+    "📤 מעלה לטלגרם. עוד שנייה, בלי להגזים.",
+)
+
+PROCESSING_VARIANTS = (
+    "🧠 מסדר את זה לפני שמגיש.",
+    "🧠 עוד ליטוש ואתה מקבל.",
+    "🧠 מעבד. הקובץ עובר טיפול.",
+)
+
+DOWNLOAD_FROM_CACHE_VARIANTS = (
+    "⚡ כבר הורדתי את זה פעם. שולח מיד.",
+    "⚡ זה אצלי במטמון. מגיע מיד.",
+    "⚡ אותו קובץ בדיוק, אין צורך להוריד שוב.",
+)
+
+_UNSUPPORTED_URL_LINES = (
+    "❌ הקישור הזה לא מוביל לקובץ שאני יודע להוריד.",
+    "❌ מהקישור הזה אין מה להוריד.",
+    "❌ הקישור הזה לא זז בשום כיוון.",
+)
+_UNSUPPORTED_URL_TAIL = "➡️ שלח קישור מיוטיוב, טיקטוק, אינסטגרם, פייסבוק או קישור הורדה ישירה לקובץ."
+UNSUPPORTED_URL_VARIANTS = tuple(f"{line}\n{_UNSUPPORTED_URL_TAIL}" for line in _UNSUPPORTED_URL_LINES)
+
+_NOT_MEDIA_CONTENT_LINES = (
+    "❌ זה דף אינטרנט, לא קובץ. אני מוריד מדיה, לא קורא מאמרים.",
+    "❌ הקישור מוביל לדף, לא לקובץ להורדה.",
+    "❌ מצאתי טקסט, לא וידאו.",
+)
+_NOT_MEDIA_CONTENT_TAIL = "➡️ ודא שהקישור מצביע ישירות על קובץ להורדה."
+NOT_MEDIA_CONTENT_VARIANTS = tuple(f"{line}\n{_NOT_MEDIA_CONTENT_TAIL}" for line in _NOT_MEDIA_CONTENT_LINES)
+
+_NOT_FOUND_LINES = (
+    "❌ הפוסט הזה כבר לא שם. מישהו מחק אותו, או שהקישור שגוי.",
+    "❌ חיפשתי, לא מצאתי. הקישור כנראה שבור.",
+    "❌ הקובץ יצא לטיול ולא השאיר הודעה.",
+    "❌ אופס, לא מצאתי שום דבר שזז בקישור שלך. 🐕",
+)
+_NOT_FOUND_TAIL = "➡️ בדוק את הקישור ונסה שוב."
+INSTAGRAM_NOT_FOUND_VARIANTS = tuple(f"{line}\n{_NOT_FOUND_TAIL}" for line in _NOT_FOUND_LINES)
+FACEBOOK_NOT_FOUND_VARIANTS = tuple(f"{line}\n{_NOT_FOUND_TAIL}" for line in _NOT_FOUND_LINES)
+
+_PRIVATE_OR_LOGIN_LINES = (
+    "❌ זה פרטי. הדלת נעולה מבפנים.",
+    "❌ התוכן הזה דורש התחברות, ואין לי חשבון.",
+    "❌ האתר לא מרשה לי להיכנס לקישור הזה.",
+)
+_PRIVATE_OR_LOGIN_TAIL = "➡️ הבוט תומך בהורדת תוכן ציבורי בלבד - נסה קישור אחר."
+INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS = tuple(f"{line}\n{_PRIVATE_OR_LOGIN_TAIL}" for line in _PRIVATE_OR_LOGIN_LINES)
+FACEBOOK_PRIVATE_OR_LOGIN_VARIANTS = tuple(f"{line}\n{_PRIVATE_OR_LOGIN_TAIL}" for line in _PRIVATE_OR_LOGIN_LINES)
+
+DIRECT_LINK_REFUSED_VARIANTS = (
+    "❌ האתר סגר את השער בפני.\n➡️ נסה קישור אחר.",
+    "❌ האתר הזה חוסם הורדות ישירות.\n➡️ נסה קישור אחר.",
+    "❌ נדרשת הרשאה כדי להוריד את הקובץ הזה, ואין לי אותה.\n➡️ נסה קישור אחר.",
+)
+
+DIRECT_LINK_GONE_VARIANTS = (
+    "❌ הקובץ הזה כבר לא שם.\n➡️ נסה קישור אחר.",
+    "❌ הקישור מוביל לשום מקום. הקובץ נמחק מהשרת.\n➡️ נסה קישור אחר.",
+    "❌ הקובץ יצא לטיול ולא השאיר הודעה.\n➡️ נסה קישור אחר.",
+)
+
+DIRECT_LINK_SERVER_BUSY_VARIANTS = (
+    "❌ האתר עמוס ולא מוכן לדבר איתי כרגע.\n➡️ נסה שוב בעוד מספר דקות.",
+    "❌ השרת שלהם עמוס. גם אני לא אוהב לחכות בתור.\n➡️ נסה שוב בעוד מספר דקות.",
+    "❌ האתר חוסם גישה זמנית. זה יעבור.\n➡️ נסה שוב בעוד מספר דקות.",
+)
+
+DIRECT_FILE_TOO_LARGE_VARIANTS = (
+    "❌ הקובץ הזה כבד ממני: {size}. המקסימום שלי {max_size}.",
+    "❌ {size} זה יותר מדי בשבילי. התקרה היא {max_size}.",
+    "❌ {size} מול {max_size} — הקובץ הזה מנצח בגדול.",
+)
+
+_DOWNLOAD_FAILED_LINES = (
+    "❌ ניסיתי. באמת ניסיתי. הקובץ ניצח הפעם.",
+    "❌ ההורדה נכשלה. זה קורה, גם לי.",
+    "❌ לא הצלחתי הפעם.",
+)
+_DOWNLOAD_FAILED_TAIL = "נסה שוב או שלח קישור אחר."
+DOWNLOAD_FAILED_VARIANTS = tuple(f"{line} {_DOWNLOAD_FAILED_TAIL}" for line in _DOWNLOAD_FAILED_LINES)
+
+_REQUEST_TIMEOUT_LINES = (
+    "⏱️ רדפתי אחריו יותר מדי זמן, ויתרתי.",
+    "⏱️ הבקשה עברה את מגבלת הזמן.",
+    "⏱️ הקובץ הזה לוקח יותר זמן ממה שיש לי.",
+)
+_REQUEST_TIMEOUT_TAIL = "➡️ נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
+REQUEST_TIMEOUT_EXCEEDED_VARIANTS = tuple(f"{line}\n{_REQUEST_TIMEOUT_TAIL}" for line in _REQUEST_TIMEOUT_LINES)
+
+PING_RESULT_VARIANTS = (
+    "🟢 הבוט פעיל · זמן תגובה: {ms}ms",
+    "🟢 חי, נוהם ומגיב ב-{ms}ms",
+    "🟢 כאן, ערני, {ms}ms",
+)
+
+# Order matters only in that `resolve` scans by descending key length, so a
+# longer canonical string is never shadowed by a shorter one that happens to
+# be a prefix of it.
+STAGE_VARIANTS: dict[str, tuple[str, ...]] = {
+    DOWNLOADING: DOWNLOADING_VARIANTS,
+    UPLOADING: UPLOADING_VARIANTS,
+    PROCESSING: PROCESSING_VARIANTS,
+    DOWNLOAD_FROM_CACHE: DOWNLOAD_FROM_CACHE_VARIANTS,
+    DOWNLOAD_FAILED: DOWNLOAD_FAILED_VARIANTS,
+    REQUEST_TIMEOUT_EXCEEDED: REQUEST_TIMEOUT_EXCEEDED_VARIANTS,
+    UNSUPPORTED_URL: UNSUPPORTED_URL_VARIANTS,
+    NOT_MEDIA_CONTENT: NOT_MEDIA_CONTENT_VARIANTS,
+    DIRECT_LINK_REFUSED: DIRECT_LINK_REFUSED_VARIANTS,
+    DIRECT_LINK_GONE: DIRECT_LINK_GONE_VARIANTS,
+    DIRECT_LINK_SERVER_BUSY: DIRECT_LINK_SERVER_BUSY_VARIANTS,
+    INSTAGRAM_NOT_FOUND: INSTAGRAM_NOT_FOUND_VARIANTS,
+    INSTAGRAM_PRIVATE_OR_LOGIN: INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS,
+    FACEBOOK_NOT_FOUND: FACEBOOK_NOT_FOUND_VARIANTS,
+    FACEBOOK_PRIVATE_OR_LOGIN: FACEBOOK_PRIVATE_OR_LOGIN_VARIANTS,
+}
+
+_SORTED_CANONICALS = sorted(STAGE_VARIANTS, key=len, reverse=True)
+
+# Every variant of every category retry.py treats as hopeless (no retry
+# button), so a rendered variant still suppresses the retry button exactly
+# like its canonical constant does today.
+ALL_HOPELESS_VARIANTS: tuple[str, ...] = (
+    UNSUPPORTED_URL_VARIANTS
+    + NOT_MEDIA_CONTENT_VARIANTS
+    + INSTAGRAM_NOT_FOUND_VARIANTS
+    + INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS
+    + DIRECT_LINK_REFUSED_VARIANTS
+    + DIRECT_LINK_GONE_VARIANTS
+)
+
+
+def pick(variants: tuple[str, ...], key: str | None = None) -> str:
+    """Deterministically pick a variant for `key` (never Python's built-in
+    `hash()`, which is salted per process and would change on every restart)."""
+    if not key:
+        return random.choice(variants)
+    return variants[zlib.crc32(key.encode()) % len(variants)]
+
+
+def resolve(text: str, key: str | None) -> str:
+    """Render `text` through its variant tuple if it's a known canonical
+    status/error string (exact match, or a leading segment of a longer
+    message such as `f"⬇️ {DOWNLOADING}\\n45%..."`). Anything else is
+    returned unchanged - this is a boundary-only renderer, so canonical
+    constants keep flowing unresolved into classification code."""
+    if text in STAGE_VARIANTS:
+        return pick(STAGE_VARIANTS[text], key)
+
+    has_prefix = text.startswith("⬇️ ")
+    body = text[len("⬇️ "):] if has_prefix else text
+
+    for canonical in _SORTED_CANONICALS:
+        if body.startswith(canonical):
+            rendered = pick(STAGE_VARIANTS[canonical], key) + body[len(canonical):]
+            return f"⬇️ {rendered}" if has_prefix else rendered
+
+    return text
 
 
 def human_size(num_bytes: float | None) -> str:

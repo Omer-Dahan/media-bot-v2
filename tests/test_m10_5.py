@@ -119,7 +119,7 @@ async def test_double_flood_terminal_failure_deletes_stale_progress_message(capl
 
     # First simulate an in-progress update that successfully displayed 95%
     await reporter.update(f"{texts.UPLOADING} 95%", is_terminal=False)
-    assert reporter._last_text == f"{texts.UPLOADING} 95%"
+    assert reporter._last_text == texts.resolve(f"{texts.UPLOADING} 95%", reporter._variant_key)
 
     # Terminal message arrives, but both edit and fallback flood out
     with caplog.at_level("ERROR"):
@@ -248,7 +248,7 @@ async def test_exception_before_pipeline_run_notifies_user():
     # pipeline.run was not reached due to DB error
     pipeline.run.assert_not_called()
     # But user was NOT left stranded: DOWNLOAD_FAILED was sent!
-    assert texts.DOWNLOAD_FAILED in cb_event.menu_message.edits
+    assert any(e in cb_event.menu_message.edits for e in texts.DOWNLOAD_FAILED_VARIANTS)
 
 
 # -----------------------------------------------------------------------------

@@ -73,6 +73,23 @@ logger = logging.getLogger(__name__)
 # implement `edit(text)` and would reject an unexpected kwarg).
 
 
+def variant_key_for(progress_or_message: Any) -> str:
+    """Stable key for `texts.resolve`/`texts.pick`, derived from whichever
+    message a reporter, a message, or a Telegram event wraps - so router call
+    sites that bypass the reporter don't repeat this getattr chain.
+
+    Falls back to the wrapped object's Python `id()` when it has no Telegram
+    `.id` (e.g. a bare event, or a test double) - every real Telegram message
+    has `.id`, so this only kicks in for those cases, but it must still be
+    stable across repeated calls for the same object or a single progress
+    message would flicker between phrasings as it's edited."""
+    _unset = object()
+    message = getattr(progress_or_message, "_message", _unset)
+    if message is _unset:
+        message = getattr(progress_or_message, "message", progress_or_message)
+    return str(getattr(message, "id", None) or id(message))
+
+
 def _buttons_for_new_message(buttons: Any) -> Any:
     """A brand-new message via `respond`/`send_message` has no prior
     `reply_markup` to clear, and Telegram rejects an empty `ReplyInlineMarkup`
@@ -298,10 +315,11 @@ async def _deferred_terminal_retry(
                 logger.warning("Failed to delete misleading progress message after deferred retry failure", exc_info=True)
                 if hasattr(message, "edit") and callable(message.edit):
                     try:
+                        failed_text = texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(message))
                         if clear_buttons:
-                            await message.edit(texts.DOWNLOAD_FAILED, buttons=None)
+                            await message.edit(failed_text, buttons=None)
                         else:
-                            await message.edit(texts.DOWNLOAD_FAILED)
+                            await message.edit(failed_text)
                         already_deleted = True
                     except Exception:
                         logger.debug("Last-ditch edit to clear misleading progress failed", exc_info=True)
@@ -375,6 +393,7 @@ class MessageProgressReporter:
         self._logged_uneditable: bool = False
         self._async_lock: asyncio.Lock | None = None
         self._deferred_task: asyncio.Task[None] | None = None
+        self._variant_key: str = variant_key_for(message)
 
     @property
     def is_terminal_completed(self) -> bool:
@@ -422,6 +441,7 @@ class MessageProgressReporter:
         via a new message, updates `self._message` to the new message, and deletes
         the stale message so the user never stays looking at false progress."""
         terminal = _is_terminal_text(text, buttons, is_terminal)
+        text = texts.resolve(text, self._variant_key)
         self._seq += 1
         seq = self._seq
 

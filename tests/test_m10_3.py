@@ -75,11 +75,12 @@ async def test_error_message_flood_wait_retries():
 
     reporter = MessageProgressReporter(message, sleep_func=fake_sleep)
     await reporter.update(texts.DOWNLOAD_FAILED)
+    expected = texts.resolve(texts.DOWNLOAD_FAILED, reporter._variant_key)
 
     assert sleeps == [1]
     assert message.edit.call_count == 2
-    message.edit.assert_called_with(texts.DOWNLOAD_FAILED)
-    assert reporter._last_text == texts.DOWNLOAD_FAILED
+    message.edit.assert_called_with(expected)
+    assert reporter._last_text == expected
 
 
 async def test_quota_message_with_buttons_flood_wait_retries():
@@ -138,18 +139,19 @@ async def test_intermediate_progress_update_flood_wait_retries_without_chat_spam
 
     reporter = MessageProgressReporter(message, sleep_func=fake_sleep)
     await reporter.update("מעלה לטלגרם... 45%")
+    expected = texts.resolve("מעלה לטלגרם... 45%", reporter._variant_key)
 
     assert sleeps == [1]
     assert message.edit.call_count == 2
     assert message.respond.call_count == 0
-    assert reporter._last_text == "מעלה לטלגרם... 45%"
+    assert reporter._last_text == expected
 
     # Total failure on intermediate update does not call respond/delete
     message.edit.side_effect = RPCError(None, message="NETWORK_ERROR")
     await reporter.update("מעלה לטלגרם... 50%")
     assert message.respond.call_count == 0
     assert message.delete.call_count == 0
-    assert reporter._last_text == "מעלה לטלגרם... 45%"  # Not updated to 50%
+    assert reporter._last_text == expected  # Not updated to 50%
 
 
 # -----------------------------------------------------------------------------

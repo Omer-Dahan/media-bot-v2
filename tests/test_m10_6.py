@@ -56,9 +56,9 @@ async def test_timeout_message_not_overwritten_in_url_handler():
     await url_handler(event)
 
     # The final message seen by user must be REQUEST_TIMEOUT_EXCEEDED, NOT DOWNLOAD_FAILED
-    assert texts.REQUEST_TIMEOUT_EXCEEDED in msg.edits
-    assert texts.DOWNLOAD_FAILED not in msg.edits
-    assert msg.edits[-1] == texts.REQUEST_TIMEOUT_EXCEEDED
+    assert any(e in msg.edits for e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS)
+    assert not any(e in msg.edits for e in texts.DOWNLOAD_FAILED_VARIANTS)
+    assert msg.edits[-1] in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS
 
 
 async def test_timeout_message_not_overwritten_in_quality_pick_handler():
@@ -85,9 +85,9 @@ async def test_timeout_message_not_overwritten_in_quality_pick_handler():
     await ytq_handler(cb_event)
 
     # The menu message must have REQUEST_TIMEOUT_EXCEEDED and NOT DOWNLOAD_FAILED
-    assert texts.REQUEST_TIMEOUT_EXCEEDED in cb_event.menu_message.edits
-    assert texts.DOWNLOAD_FAILED not in cb_event.menu_message.edits
-    assert cb_event.menu_message.edits[-1] == texts.REQUEST_TIMEOUT_EXCEEDED
+    assert any(e in cb_event.menu_message.edits for e in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS)
+    assert not any(e in cb_event.menu_message.edits for e in texts.DOWNLOAD_FAILED_VARIANTS)
+    assert cb_event.menu_message.edits[-1] in texts.REQUEST_TIMEOUT_EXCEEDED_VARIANTS
 
 
 # =============================================================================
@@ -131,11 +131,11 @@ async def test_transient_rpc_error_does_not_freeze_progress():
 
     # Second update should still call edit (not dropped!)
     await reporter.update(f"{texts.DOWNLOADING} 20%", is_terminal=False)
-    assert reporter._last_text == f"{texts.DOWNLOADING} 20%"
+    assert any(reporter._last_text == f"{v} 20%" for v in texts.DOWNLOADING_VARIANTS)
 
     # Third update should also succeed
     await reporter.update(f"{texts.DOWNLOADING} 30%", is_terminal=False)
-    assert reporter._last_text == f"{texts.DOWNLOADING} 30%"
+    assert any(reporter._last_text == f"{v} 30%" for v in texts.DOWNLOADING_VARIANTS)
     assert msg.edit.call_count == 3
 
 
@@ -194,7 +194,7 @@ async def test_three_stage_flood_failure_delivers_error_and_deletes_stale_progre
 
     # Once flood clears:
     # 1. User MUST receive failure indication (msg.respond was called with DOWNLOAD_FAILED)
-    msg.respond.assert_any_call(texts.DOWNLOAD_FAILED)
+    assert any(c.args[0] in texts.DOWNLOAD_FAILED_VARIANTS for c in msg.respond.await_args_list)
     # 2. Stale message must be deleted (msg.delete called again)
     assert msg.delete.call_count >= 2
 
@@ -243,7 +243,8 @@ async def test_load_delivery_failure_in_url_handler_responds_with_error():
         await url_handler(event)
 
     # User received generic DOWNLOAD_FAILED message
-    event.respond.assert_awaited_once_with(texts.DOWNLOAD_FAILED)
+    event.respond.assert_awaited_once()
+    assert event.respond.await_args.args[0] in texts.DOWNLOAD_FAILED_VARIANTS
 
 
 async def test_load_delivery_failure_in_quality_pick_notifies_user():
@@ -265,8 +266,10 @@ async def test_load_delivery_failure_in_quality_pick_notifies_user():
         await ytq_handler(cb_event)
 
     # User received error callback alert and menu message was updated to DOWNLOAD_FAILED
-    cb_event.answer.assert_awaited_with(texts.DOWNLOAD_FAILED, alert=True)
-    assert texts.DOWNLOAD_FAILED in cb_event.menu_message.edits
+    cb_event.answer.assert_awaited_once()
+    assert cb_event.answer.await_args.args[0] in texts.DOWNLOAD_FAILED_VARIANTS
+    assert cb_event.answer.await_args.kwargs == {"alert": True}
+    assert any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in cb_event.menu_message.edits)
 
 
 async def test_tiktok_engine_construction_failure_updates_progress():
@@ -288,7 +291,7 @@ async def test_tiktok_engine_construction_failure_updates_progress():
     with patch("media_bot_v2.telegram.router.TikTokEngine", side_effect=RuntimeError("Corrupt cookies")):
         await url_handler(event)
 
-    assert texts.DOWNLOAD_FAILED in msg.edits
+    assert any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in msg.edits)
 
 
 async def test_instagram_engine_construction_failure_updates_progress():
@@ -310,7 +313,7 @@ async def test_instagram_engine_construction_failure_updates_progress():
     with patch("media_bot_v2.telegram.router.InstagramEngine", side_effect=RuntimeError("Invalid session")):
         await url_handler(event)
 
-    assert texts.DOWNLOAD_FAILED in msg.edits
+    assert any(e in texts.DOWNLOAD_FAILED_VARIANTS for e in msg.edits)
 
 
 # =============================================================================

@@ -4,6 +4,7 @@ never fail a download that already succeeded (see progress.py docstring)."""
 from telethon.errors import MessageNotModifiedError
 from telethon.errors.rpcbaseerrors import RPCError
 
+from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress import MessageProgressReporter
 
 
@@ -22,11 +23,12 @@ async def test_update_edits_message_once_per_distinct_text():
     message = _Message()
     reporter = MessageProgressReporter(message)
 
-    await reporter.update("מוריד...")
-    await reporter.update("מוריד...")  # same text - no-op, no extra edit call
-    await reporter.update("מעלה...")
+    downloading = texts.resolve(texts.DOWNLOADING, reporter._variant_key)
+    await reporter.update(texts.DOWNLOADING)
+    await reporter.update(texts.DOWNLOADING)  # same text - no-op, no extra edit call
+    await reporter.update("מעלה...")  # not a known canonical - passes through resolve() unchanged
 
-    assert message.edits == ["מוריד...", "מעלה..."]
+    assert message.edits == [downloading, "מעלה..."]
 
 
 async def test_update_swallows_message_not_modified_error():

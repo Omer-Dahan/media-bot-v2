@@ -510,7 +510,7 @@ async def test_url_handler_instagram_unsupported_path():
 
     pipeline.run.assert_not_called()
     assert len(url_event.responses) == 1
-    assert url_event.responses[0] == texts.UNSUPPORTED_URL
+    assert url_event.responses[0] in texts.UNSUPPORTED_URL_VARIANTS
 
 
 async def test_url_handler_instagram_private_content_shows_hebrew_error():
@@ -525,7 +525,7 @@ async def test_url_handler_instagram_private_content_shows_hebrew_error():
     pipeline.run.assert_awaited_once()
     assert len(url_event.messages) == 1
     msg = url_event.messages[0]
-    assert texts.INSTAGRAM_PRIVATE_OR_LOGIN in msg.edits
+    assert any(e in texts.INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS for e in msg.edits)
 
 
 # ==============================================================================

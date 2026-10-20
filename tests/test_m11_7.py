@@ -200,12 +200,12 @@ async def test_queue_message_does_not_interrupt_progress_lifecycle():
 
     # Step 3: slot becomes available, download proceeds
     await reporter.update(texts.DOWNLOADING)
-    assert reporter._last_text == texts.DOWNLOADING
+    assert reporter._last_text in texts.DOWNLOADING_VARIANTS
     assert not reporter.is_terminal_completed
 
     # Step 4: uploading
     await reporter.update(texts.UPLOADING)
-    assert reporter._last_text == texts.UPLOADING
+    assert reporter._last_text in texts.UPLOADING_VARIANTS
     assert not reporter.is_terminal_completed
 
     # Step 5: completed
@@ -303,5 +303,5 @@ async def test_ping_handler_measured_execution():
     assert len(sent_messages) == 1
     assert sent_messages[0] == texts.PING_MESSAGE
     assert len(edits) == 1
-    assert edits[0].startswith("🟢 הבוט פעיל · זמן תגובה: ")
+    assert any(edits[0].startswith(v.split("{ms}")[0]) for v in texts.PING_RESULT_VARIANTS)
     assert edits[0].endswith("ms")

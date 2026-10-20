@@ -132,14 +132,15 @@ async def test_entity_bounds_error_retries_as_plain_text_and_keeps_editing():
     assert not reporter._uneditable
     # First call used the normal (possibly-entity-bearing) text; the retry
     # dropped formatting entirely via parse_mode=None.
-    assert message.edit.call_args_list[0].args == (f"{texts.DOWNLOADING} 10%",)
+    first_text = message.edit.call_args_list[0].args[0]
+    assert any(first_text == f"{v} 10%" for v in texts.DOWNLOADING_VARIANTS)
     assert message.edit.call_args_list[1].kwargs.get("parse_mode") is None
-    assert message.edit.call_args_list[1].args == (f"{texts.DOWNLOADING} 10%",)
+    assert message.edit.call_args_list[1].args[0] == first_text
 
     # The reporter must still be usable for further progress - the whole
     # point of the fix is that one content error does not freeze the bar.
     await reporter.update(f"{texts.DOWNLOADING} 20%", is_terminal=False)
-    assert reporter._last_text == f"{texts.DOWNLOADING} 20%"
+    assert any(reporter._last_text == f"{v} 20%" for v in texts.DOWNLOADING_VARIANTS)
     assert message.edit.call_count == 3
 
 
@@ -241,7 +242,7 @@ async def test_content_error_does_not_permanently_disable_non_terminal_updates()
     await reporter.update(f"{texts.UPLOADING} 20%", is_terminal=False)
 
     assert message.edit.call_count == 4
-    assert reporter._last_text == f"{texts.UPLOADING} 20%"
+    assert any(reporter._last_text == f"{v} 20%" for v in texts.UPLOADING_VARIANTS)
 
 
 # =============================================================================

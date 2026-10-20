@@ -61,6 +61,7 @@ HOPELESS_TEXTS = (
     # it is simply gone - retrying the same URL repeats the same failure.
     texts.DIRECT_LINK_REFUSED,
     texts.DIRECT_LINK_GONE,
+    *texts.ALL_HOPELESS_VARIANTS,
 )
 
 
