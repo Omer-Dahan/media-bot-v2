@@ -43,7 +43,12 @@ from media_bot_v2.telegram.flood_wait import (
     call_with_flood_retry,
     get_flood_wait_seconds,
 )
-from media_bot_v2.telegram.progress_format import format_progress
+from media_bot_v2.telegram.progress_format import (
+    PROGRESS_BAR_MIN_BYTES,
+    PROGRESS_BAR_MIN_SECONDS,
+    compact_mode_for,
+    format_progress,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -370,6 +375,7 @@ class MessageProgressReporter:
         sleep_func: Callable[[float], Awaitable[None]] | None = None,
         clear_buttons_on_terminal: bool = False,
         get_failure_buttons: Callable[[str], Any] | None = None,
+        clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._message = message
         self._last_text: str | None = None
@@ -394,6 +400,13 @@ class MessageProgressReporter:
         self._async_lock: asyncio.Lock | None = None
         self._deferred_task: asyncio.Task[None] | None = None
         self._variant_key: str = variant_key_for(message)
+        self._clock = clock
+        self._created_at: float = clock()
+        # One-way latch: once a request earns the full bar render (large
+        # declared total, or enough elapsed time), it never goes back to
+        # the compact text-only render, even if later calls pass a small
+        # or unknown `total`.
+        self._bar_graduated: bool = False
 
     @property
     def is_terminal_completed(self) -> bool:
@@ -422,6 +435,19 @@ class MessageProgressReporter:
         if self._async_lock is None:
             self._async_lock = asyncio.Lock()
         return self._async_lock
+
+    def progress_mode_compact(self, total: int | None = None) -> bool:
+        """Whether this request's progress block should render compact
+        (plain-text percent, no bar) right now. One-way: switches to full
+        (returns `False`) once `total` is known and >= `PROGRESS_BAR_MIN_BYTES`,
+        or once `PROGRESS_BAR_MIN_SECONDS` have elapsed since this reporter
+        (one per request, spanning both the download and upload phases) was
+        created - whichever comes first - and never switches back."""
+        if self._bar_graduated:
+            return False
+        if total is not None and total >= PROGRESS_BAR_MIN_BYTES or self._clock() - self._created_at >= PROGRESS_BAR_MIN_SECONDS:
+            self._bar_graduated = True
+        return not self._bar_graduated
 
     async def handle_flood_wait(self, wait_seconds: int, attempts: int = 1) -> None:
         """When an operation hits a prolonged flood wait (>= 10s), update the progress
@@ -771,6 +797,7 @@ class UploadProgress:
                     total=self._total,
                     speed=self._last_speed,
                     eta=self._last_eta,
+                    compact=compact_mode_for(self._reporter, self._total),
                 )
             else:
                 text = f"⬆️ {self._label}"
@@ -808,6 +835,7 @@ class UploadProgress:
             total=self._total,
             speed=speed,
             eta=eta,
+            compact=compact_mode_for(self._reporter, self._total),
         )
         try:
             await self._reporter.update(text, is_terminal=False)

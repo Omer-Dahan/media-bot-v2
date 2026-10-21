@@ -34,7 +34,7 @@ import re
 import shutil
 import time
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from urllib.parse import parse_qs, urlparse
 
 import yt_dlp
@@ -63,7 +63,7 @@ from media_bot_v2.executor import run_in_thread
 from media_bot_v2.providers.base import mask_secrets
 from media_bot_v2.providers.downloader import download_provider_media
 from media_bot_v2.telegram import texts
-from media_bot_v2.telegram.progress_format import format_progress
+from media_bot_v2.telegram.progress_format import compact_mode_for, format_progress
 
 if TYPE_CHECKING:
     from media_bot_v2.providers.health import ProviderHealthTracker
@@ -423,15 +423,17 @@ def is_retryable_error(message: str | None) -> bool:
     return any(pattern in lowered for pattern in _NETWORK_PATTERNS) or "http error 5" in lowered
 
 
-def format_progress_text(d: dict) -> str | None:
+def format_progress_text(d: dict, progress: Any = None) -> str | None:
     status = d.get("status")
     if status == "downloading":
+        total = d.get("total_bytes") or d.get("total_bytes_estimate")
         return format_progress(
             f"⬇️ {texts.DOWNLOADING}",
             transferred=d.get("downloaded_bytes"),
-            total=d.get("total_bytes") or d.get("total_bytes_estimate"),
+            total=total,
             speed=d.get("speed"),
             eta=d.get("eta"),
+            compact=compact_mode_for(progress, total),
         )
     if status == "finished":
         return texts.PROCESSING
@@ -844,7 +846,7 @@ class YouTubeEngine(BaseEngine):
             guard.check(d)
             if self._progress is None:
                 return
-            text = format_progress_text(d)
+            text = format_progress_text(d, self._progress)
             if text is None:
                 return
             now = time.monotonic()

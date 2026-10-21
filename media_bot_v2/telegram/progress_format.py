@@ -81,6 +81,7 @@ each cell - and a verified identical match to that example is covered by
 from __future__ import annotations
 
 import math
+from typing import Any
 
 from media_bot_v2.telegram.texts import human_size
 
@@ -91,6 +92,13 @@ MOON_QUARTER = "🌒"
 MOON_HALF = "🌓"
 MOON_THREE_QUARTER = "🌔"
 LRM = "\u200e"  # left-to-right mark
+
+# A known total at/above this size starts the request straight in full
+# (bar) render mode - worth drawing a bar immediately for a download this big.
+PROGRESS_BAR_MIN_BYTES = 50 * 1024 * 1024
+# Otherwise a request switches from compact (plain-text) to full (bar) once
+# it has run this long - short-lived downloads never show a bar at all.
+PROGRESS_BAR_MIN_SECONDS = 5.0
 
 
 def _partial_moon(remainder: float) -> str:
@@ -164,6 +172,17 @@ def human_eta(seconds: float | None) -> str | None:
     return f"{hours}:{minutes:02d} שעות"
 
 
+def compact_mode_for(progress: Any, total: int | None) -> bool:
+    """Whether `progress` (normally a `MessageProgressReporter`) wants the
+    compact (no-bar) render for this call - see
+    `MessageProgressReporter.progress_mode_compact`. Reporters/test doubles
+    that don't implement it keep the pre-compact-mode full bar render."""
+    query = getattr(progress, "progress_mode_compact", None)
+    if query is None:
+        return False
+    return query(total)
+
+
 def format_progress(
     phase_label: str,
     *,
@@ -171,12 +190,19 @@ def format_progress(
     total: int | None = None,
     speed: float | None = None,
     eta: float | None = None,
+    compact: bool = False,
 ) -> str:
     """`phase_label` (already Hebrew, e.g. "⬇️ מוריד...") followed by whichever
     of the size/bar/speed/ETA lines have real data. `total` missing or falsy
     means the caller couldn't determine a total (e.g. yt-dlp without a
     Content-Length) - shown as bytes-transferred-only, never a bar frozen at
     a fake percentage.
+
+    `compact=True` (short/fast downloads, see `PROGRESS_BAR_MIN_BYTES`/
+    `PROGRESS_BAR_MIN_SECONDS`) drops the moon-bar glyphs and renders the
+    percent as plain text instead - a bar that's only ever on screen for a
+    couple of seconds is noise, not signal. The size-pair line is unchanged
+    either way.
 
     M11.19: the size pair and the bar/percent are two separate lines, not
     one - see the module docstring for why (production report of a
@@ -191,7 +217,6 @@ def format_progress(
         # fill and the "%" text, so they can never disagree with each other.
         percent = max(0.0, min(100.0, transferred / total * 100))
         percent_int = int(percent)
-        bar = render_bar(percent_int)
         size_part = f"({human_size(transferred)}/{human_size(total)})"
         # NOT wrapped in backticks (Markdown inline code): that turns this
         # run into a `MessageEntityCode` whose offset/length is fixed
@@ -204,10 +229,17 @@ def format_progress(
         # that message is rejected too. Plain text has no entity to
         # invalidate, so it can't reproduce that failure.
         lines.append(f"📊 התקדמות: {size_part}")
-        # Own line, no Hebrew label on it - see render_bar's docstring and
-        # the module docstring for why that's what makes this render in
-        # typed order with no explicit bidi control characters needed.
-        lines.append(f"{percent_int}% {bar}")
+        if compact:
+            # Plain percent, no bar glyph - still no strong L/R/AL
+            # character, so this keeps rendering in typed order per
+            # UAX#9 P2/P3 same as the full bar/percent line below.
+            lines.append(f"{percent_int}%")
+        else:
+            bar = render_bar(percent_int)
+            # Own line, no Hebrew label on it - see render_bar's docstring and
+            # the module docstring for why that's what makes this render in
+            # typed order with no explicit bidi control characters needed.
+            lines.append(f"{percent_int}% {bar}")
     elif transferred is not None:
         lines.append("📥 הורד: (סך כולל לא ידוע)")
         lines.append(f"{LRM}{human_size(transferred)}")
