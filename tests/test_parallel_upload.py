@@ -262,16 +262,17 @@ async def test_user_progress_does_not_flood_the_message_and_reaches_100(tmp_path
     assert percents == sorted(percents) and len(set(percents)) == len(percents)
     assert percents[-1] == 100 and max(percents) <= 100
     assert len(percents) <= 21  # 100/5 steps + the final one, out of 200 reports
-    # M11.19: the size pair and the percent/bar are two separate lines (see
-    # progress_format.py) - every report must keep that shape, with the
-    # Hebrew label+size header line first and a dedicated percent/bar line
-    # after it. The byte count is the sum over every lane (not reset per
-    # connection): a monotonic, never-restarting percent proves that.
+    # M11.20: the bar/percent and size are two separate lines inside a
+    # separator-framed block (see progress_format.py) - every report must
+    # keep that shape, with a dedicated bar/percent line and a Hebrew
+    # label+size line after it. The byte count is the sum over every lane
+    # (not reset per connection): a monotonic, never-restarting percent
+    # proves that.
     for text in reporter.texts:
         lines = text.split("\n")
-        assert len(lines) >= 3
-        assert "\u05d4\u05ea\u05e7\u05d3\u05de\u05d5\u05ea:" in lines[1] and "(" in lines[1]
-        assert re.match(r"^\d+% \S+$", lines[2])
+        assert len(lines) >= 5
+        assert re.match(r"^\S+ \d+%$", lines[2])
+        assert "\u05d4\u05ea\u05e7\u05d3\u05de\u05d5\u05ea:" in lines[3] and "(" not in lines[3]
 
 
 async def test_user_progress_is_time_throttled():

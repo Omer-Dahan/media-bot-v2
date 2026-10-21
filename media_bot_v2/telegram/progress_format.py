@@ -1,9 +1,9 @@
 """One progress-block renderer shared by the download hooks (yt-dlp) and the
 upload byte counter (`telegram/progress.py`'s `UploadProgress`), so both look
-like the same bot: a phase line, then a size/caption line, then its own
-bar/percent line, then speed and ETA - each omitted rather than shown as a
-misleading "None"/0 when the underlying data isn't available yet (no
-declared total, no speed sample, no ETA).
+like the same bot: a phase line, then a separator-framed block holding the
+bar/percent line, the size line, speed and ETA - each omitted rather than
+shown as a misleading "None"/0 when the underlying data isn't available yet
+(no declared total, no speed sample, no ETA).
 
 RTL note: LRM (U+200E) is itself a *strong* LTR character to the bidi
 algorithm - putting it as a line's very first character makes that whole
@@ -15,67 +15,20 @@ character) - LRM only appears *after* such a label, where its job is
 narrower: keep the digits/units that follow reading left-to-right instead
 of picking up the paragraph's RTL order.
 
-M11.19 (production report: the moon bar rendered with full/empty cells
-"reversed" and no gap between cells): the *previous* version of this module
-put the bar, percent, and size pair all on one line, after the Hebrew
-label, wrapped in an explicit LTR embedding (U+202A/U+202C) with its
-contents typed in reverse (size, percent, bar) so that the embedding's
-single L2 reversal would land the bar next to the label. That was verified
-correct *in theory* against a real bidi engine (`python-bidi` 0.6.11) at
-the time - but real Telegram clients apparently do not reproduce that
-derivation faithfully for this shape (production evidence: the owner saw
-the bar in logical/typed order, un-reversed, exactly as if the embedding
-characters had no effect). Rather than chase which client strips or
-mishandles U+202A/U+202C, the fix removes the dependency on explicit
-embedding characters entirely:
+The bar/percent line carries no Hebrew label and no Latin unit letters, so
+it has no bidi-strong (L/R/AL) character at all - per UAX#9 P2/P3 that
+falls back to the default (LTR) with no explicit directional control
+characters needed, so it always renders in exactly the order it's typed.
 
-Re-running the *old* single-line construction through `python-bidi` 0.6.11
-again for this round (both as a standalone line and embedded in the full
-multi-line message) still reproduces the original "correct" derivation,
-not the production symptom - meaning the gap between the two is a
-real-client quirk this library can't surface (most plausibly: a Telegram
-client not honoring U+202A/U+202C the way the bidi spec says, since
-explicit directional-embedding/override characters are a known target for
-sanitization by text renderers wary of RTL-spoofing attacks). Rather than
-chase which client does what, the fix sidesteps the question entirely by
-not depending on those control characters at all:
-
-The bar/percent line is now its own line, with nothing else on it - no
-Hebrew label, no size pair. Its content (digits, "%", and the moon emoji)
-is bidi type EN/ET/ON - *no strong character at all*. Per UAX#9 P2/P3, a
-paragraph with no strong L/R/AL character defaults to LTR - and every real
-multi-line text renderer (Telegram's clients included, per how every line
-of this formatter's output has always rendered independently in practice)
-resolves paragraph direction per hard-line-break, not once for the whole
-message. That means this line needs no explicit directional control
-characters at all - it displays in exactly the order it's typed, on every
-conformant renderer, with no reliance on embedding codes a client might
-sanitize. Verified with `python-bidi` 0.6.11 (installed only in a
-throwaway `/tmp` venv for this check, never a project dependency) by
-running each line through `get_display` independently across the boundary
-percents (0/1/50/99/100): `get_display(line) == line` in every case -
-confirming this renders exactly as the owner's requested example shows it
-("40% 🌑🌑🌑🌑🌑🌑🌓🌕🌕🌕", typed order, no reversal).
-
-The header line (label + size pair, e.g. "📊 התקדמות: (27.2MB/67.5MB)") does
-still open with the Hebrew label (strong RTL, same as before), with the
-size pair following as plain text - no LTR embedding needed there either:
-cross-checked with `python-bidi` 0.6.11 across a range of size pairs (zero
-bytes, matching totals, KB/MB/GB units), the implicit bidi algorithm's N0
-bracket-pair rule resolves the parenthesised "(a/b)" run correctly inside
-an RTL paragraph on its own - wrapping it in an explicit embedding produced
-a byte-for-byte identical result in every case tested, i.e. the embedding
-was already a no-op for this shape and its removal changes nothing other
-than deleting characters a client could mishandle.
-
-Moon-to-moon spacing: the owner also reported "no space between" the
-cells. No space character was added between them (see `render_bar` below -
-unchanged from before). The owner's own corrected example also has no
-space between the moons, which points to the "no space" complaint being a
-symptom of the old bidi corruption (bar glyphs visually smeared into the
-neighbouring percent/size digits) rather than a request to literally widen
-each cell - and a verified identical match to that example is covered by
-`test_format_progress_matches_owner_reported_upload_example` below.
+M11.20 (production report: the block "doesn't come together" - the size
+sat in parentheses glued to the "progress:" label line, and the bar/percent
+sat alone on a line in between, reading as a pile of disconnected lines
+rather than one unit): this version frames the whole bar/size/speed/ETA
+block between two separator lines (plain box-drawing characters, no strong
+bidi character either, same reasoning as the bar line), matching the
+previous bot's layout - so Telegram renders it as one visual card instead
+of loose lines. The phase line sits above the top separator; everything
+measured (bar, size, speed, ETA) sits between the separators.
 """
 
 from __future__ import annotations
@@ -92,6 +45,7 @@ MOON_QUARTER = "🌒"
 MOON_HALF = "🌓"
 MOON_THREE_QUARTER = "🌔"
 LRM = "\u200e"  # left-to-right mark
+SEPARATOR = "\u2501" * 18  # box-drawing: no bidi-strong character, renders the same either direction
 
 # A known total at/above this size starts the request straight in full
 # (bar) render mode - worth drawing a bar immediately for a download this big.
@@ -199,25 +153,24 @@ def format_progress(
     a fake percentage.
 
     `compact=True` (short/fast downloads, see `PROGRESS_BAR_MIN_BYTES`/
-    `PROGRESS_BAR_MIN_SECONDS`) drops the moon-bar glyphs and renders the
+    `PROGRESS_BAR_MIN_SECONDS`) drops the moon-bar glyph and renders the
     percent as plain text instead - a bar that's only ever on screen for a
-    couple of seconds is noise, not signal. The size-pair line is unchanged
+    couple of seconds is noise, not signal. The size line is unchanged
     either way.
 
-    M11.19: the size pair and the bar/percent are two separate lines, not
-    one - see the module docstring for why (production report of a
-    "reversed"-looking bar; the fix drops the explicit LTR-embedding trick
-    the single-line version relied on, in favor of a bar line with no
-    Hebrew label on it at all, which needs no explicit bidi control
-    characters to render correctly)."""
+    M11.20: the bar/percent, size, speed and ETA lines are framed between
+    two separator lines (see `SEPARATOR`/module docstring) so they read as
+    one block rather than loose lines; the phase label stays above the top
+    separator. When there's no data at all (no `transferred`), the block is
+    empty and omitted entirely - no bare separator pair."""
     lines = [phase_label]
+    block: list[str] = []
 
     if transferred is not None and total:
         # Single source of truth: this truncated percent feeds both the bar
         # fill and the "%" text, so they can never disagree with each other.
         percent = max(0.0, min(100.0, transferred / total * 100))
         percent_int = int(percent)
-        size_part = f"({human_size(transferred)}/{human_size(total)})"
         # NOT wrapped in backticks (Markdown inline code): that turns this
         # run into a `MessageEntityCode` whose offset/length is fixed
         # against the text as *we* send it - if Telegram strips or otherwise
@@ -228,27 +181,32 @@ def format_progress(
         # the text Telegram actually stored, and every subsequent edit to
         # that message is rejected too. Plain text has no entity to
         # invalidate, so it can't reproduce that failure.
-        lines.append(f"📊 התקדמות: {size_part}")
         if compact:
             # Plain percent, no bar glyph - still no strong L/R/AL
             # character, so this keeps rendering in typed order per
             # UAX#9 P2/P3 same as the full bar/percent line below.
-            lines.append(f"{percent_int}%")
+            block.append(f"{percent_int}%")
         else:
             bar = render_bar(percent_int)
             # Own line, no Hebrew label on it - see render_bar's docstring and
             # the module docstring for why that's what makes this render in
             # typed order with no explicit bidi control characters needed.
-            lines.append(f"{percent_int}% {bar}")
+            block.append(f"{bar} {percent_int}%")
+        block.append(f"📊 התקדמות: {human_size(transferred)}/{human_size(total)}")
     elif transferred is not None:
-        lines.append("📥 הורד: (סך כולל לא ידוע)")
-        lines.append(f"{LRM}{human_size(transferred)}")
+        block.append("📥 הורד: (סך כולל לא ידוע)")
+        block.append(f"{LRM}{human_size(transferred)}")
 
     if _is_real_number(speed) and speed > 0 and math.isfinite(speed):
-        lines.append(f"⚡ מהירות: {LRM}{human_size(speed)}/s")
+        block.append(f"⚡ מהירות: {LRM}{human_size(speed)}/s")
 
     eta_text = human_eta(eta)
     if eta_text:
-        lines.append(f"⏱️ זמן משוער: {LRM}{eta_text}")
+        block.append(f"⏱️ זמן משוער: {LRM}{eta_text}")
+
+    if block:
+        lines.append(SEPARATOR)
+        lines.extend(block)
+        lines.append(SEPARATOR)
 
     return "\n".join(lines)

@@ -12,6 +12,7 @@ from media_bot_v2.telegram.progress_format import (
     MOON_HALF,
     MOON_QUARTER,
     MOON_THREE_QUARTER,
+    SEPARATOR,
     format_progress,
     human_eta,
     render_bar,
@@ -294,25 +295,28 @@ def test_bar_at_99_percent_has_at_least_one_empty_cell():
     assert bar_line.count(BAR_FILLED) < BAR_WIDTH
 
 
-# --- M11.19: two-line layout (header = label + size; bar line = percent + bar)
+# --- M11.20: one separator-framed block (bar line, then size, then speed/ETA)
 
 
-def test_format_progress_splits_size_and_bar_onto_separate_lines():
-    """The production report this round fixes: the owner explicitly asked
-    for the size pair and the percent/bar to be on two separate lines, not
-    joined into one. Line 0 is the phase, line 1 is "label: (size)", line 2
-    is "percent% bar"."""
+def test_format_progress_frames_block_with_separators():
+    """The production report this round fixes: the size sat glued in
+    parentheses to the "progress:" label, and the bar/percent sat alone on
+    a line between other lines - a pile of disconnected lines rather than
+    one block. Line 0 is the phase, line 1 and the last line are the
+    separator, and everything measured sits between them: bar+percent,
+    then size (no parens), then speed/ETA if present."""
     text = format_progress(PHASE, transferred=45 * 1024 * 1024, total=100 * 1024 * 1024)
     lines = text.split("\n")
-    assert len(lines) == 3
+    assert len(lines) == 5
     assert lines[0] == PHASE
-    assert "התקדמות" in lines[1]
-    assert "(45.0MB/100.0MB)" in lines[1]
-    assert "%" not in lines[1]
-    assert BAR_FILLED not in lines[1] and BAR_EMPTY not in lines[1]
-    assert lines[2].startswith("45%")
-    assert BAR_FILLED in lines[2] or BAR_EMPTY in lines[2]
-    assert "(" not in lines[2]  # the size pair stayed on the header line
+    assert lines[1] == SEPARATOR
+    assert lines[2].startswith(BAR_FILLED) or lines[2].startswith(BAR_EMPTY)
+    assert lines[2].endswith("45%")
+    assert "התקדמות" in lines[3]
+    assert "45.0MB/100.0MB" in lines[3]
+    assert "(" not in lines[3]
+    assert "%" not in lines[3]
+    assert lines[4] == SEPARATOR
 
 
 def test_bar_line_has_no_strong_bidi_character():
@@ -333,18 +337,18 @@ def test_bar_line_has_no_strong_bidi_character():
         )
 
 
-def test_header_line_opens_with_hebrew_label_and_carries_only_the_size_pair():
+def test_size_line_opens_with_hebrew_label_and_carries_the_size_pair():
     text = format_progress(PHASE, transferred=45, total=100)
-    header_line = text.split("\n")[1]
-    assert _first_strong_is_rtl(header_line)
-    assert header_line.index("התקדמות") < header_line.index("(")
+    size_line = text.split("\n")[3]
+    assert _first_strong_is_rtl(size_line)
+    assert size_line.index("התקדמות") < size_line.index("45")
     # NOT wrapped in backticks (Markdown inline code): that turns this run
     # into a `MessageEntityCode` whose offset/length is fixed against the
     # text as sent - production hit `EntityBoundsInvalidError` on edit from
     # exactly this (2026-09-30), which then froze all further progress
     # updates for the message. See progress_format.py's `format_progress`
     # for the full incident note.
-    assert "`" not in header_line
+    assert "`" not in size_line
 
 
 def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():
@@ -360,19 +364,21 @@ def test_speed_and_eta_lines_are_prefixed_with_left_to_right_mark():
 
 
 def test_unknown_total_splits_label_and_volume_onto_separate_lines():
-    """Same two-line principle as the known-total case (M11.19): the header
-    line carries what's known (the label plus the "total unknown"
+    """Same separator-framed block as the known-total case (M11.20): the
+    label line carries what's known (the label plus the "total unknown"
     qualifier), and a separate line carries the one real data point (bytes
     transferred so far) - there's no percent/bar to show, so that second
     line holds just the volume."""
     text = format_progress(PHASE, transferred=12 * 1024 * 1024, total=None)
     lines = text.split("\n")
-    assert len(lines) == 3
+    assert len(lines) == 5
     assert lines[0] == PHASE
-    assert "הורד" in lines[1]
-    assert "לא ידוע" in lines[1]
-    assert "12.0MB" not in lines[1]
-    assert lines[2] == f"{LRM}12.0MB"
+    assert lines[1] == SEPARATOR
+    assert "הורד" in lines[2]
+    assert "לא ידוע" in lines[2]
+    assert "12.0MB" not in lines[2]
+    assert lines[3] == f"{LRM}12.0MB"
+    assert lines[4] == SEPARATOR
 
 
 def test_every_line_that_carries_a_hebrew_label_opens_with_a_strong_rtl_character():
@@ -401,8 +407,8 @@ def test_every_line_that_carries_a_hebrew_label_opens_with_a_strong_rtl_characte
     unknown_total_text = format_progress(PHASE, transferred=12 * 1024 * 1024, total=None)
     unknown_lines = unknown_total_text.split("\n")
     assert _first_strong_is_rtl(unknown_lines[0])
-    assert _first_strong_is_rtl(unknown_lines[1])  # "📥 הורד: (סך כולל לא ידוע)"
-    # unknown_lines[2] (the bare volume, "<LRM>12.0MB") intentionally does not -
+    assert _first_strong_is_rtl(unknown_lines[2])  # "📥 הורד: (סך כולל לא ידוע)"
+    # unknown_lines[3] (the bare volume, "<LRM>12.0MB") intentionally does not -
     # LRM itself is strong-L, by design (see progress_format.py's RTL note).
 
     # NOTE: a string-level check like this confirms the *bidi type* of each
@@ -412,29 +418,33 @@ def test_every_line_that_carries_a_hebrew_label_opens_with_a_strong_rtl_characte
     # each client against a real in-progress download/upload message.
 
 
-# --- M11.19: exact match to the production report's requested rendering -----
+# --- M11.20: exact match to the production report's pasted message ---------
 
 
 def test_format_progress_matches_owner_reported_upload_example():
-    """The exact case from the production report: an upload at 27.2MB of
-    67.5MB (40%), 4.4MB/s, 9 seconds left. The owner's requested corrected
-    rendering (two lines: header with label+size, then a separate
-    percent+bar line) is reproduced here byte-for-byte, including the LRM
-    marks before the speed/ETA numbers (invisible, but present in the
-    owner's own pasted example)."""
+    """The exact case from the 2026-10-21 production report: an upload at
+    79.2MB of 138.7MB (57%), 6.3MB/s, 9 seconds left. The complaint was that
+    the pieces did not read as one block (size glued in parens to the
+    label line, bar/percent stranded alone in between). The fix frames the
+    bar/percent, size, speed and ETA between two separator lines, with the
+    bar before the percent (matching the previous bot's layout), and no
+    parens around the size pair. Reproduced here byte-for-byte, including
+    the LRM marks before the speed/ETA numbers."""
     text = format_progress(
         "⬆️ מעלה לטלגרם...",
-        transferred=27.2 * 1024 * 1024,
-        total=67.5 * 1024 * 1024,
-        speed=4.4 * 1024 * 1024,
+        transferred=79.2 * 1024 * 1024,
+        total=138.7 * 1024 * 1024,
+        speed=6.3 * 1024 * 1024,
         eta=9,
     )
     expected = (
         "⬆️ מעלה לטלגרם...\n"
-        "📊 התקדמות: (27.2MB/67.5MB)\n"
-        "40% 🌑🌑🌑🌑🌑🌑🌓🌕🌕🌕\n"
-        f"⚡ מהירות: {LRM}4.4MB/s\n"
-        f"⏱️ זמן משוער: {LRM}9 שניות"
+        f"{SEPARATOR}\n"
+        "🌑🌑🌑🌑🌒🌕🌕🌕🌕🌕 57%\n"
+        "📊 התקדמות: 79.2MB/138.7MB\n"
+        f"⚡ מהירות: {LRM}6.3MB/s\n"
+        f"⏱️ זמן משוער: {LRM}9 שניות\n"
+        f"{SEPARATOR}"
     )
     assert text == expected
 
