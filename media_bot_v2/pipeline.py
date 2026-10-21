@@ -199,6 +199,21 @@ def _original_name_for_group(group: _FileGroup) -> str:
     return _RAW_SPLIT_PART_SUFFIX_RE.sub("", group.parts[0].name)
 
 
+def _upload_label_for(group: _FileGroup, result: DownloadResult, part_label: str) -> str:
+    """The upload progress header's identity for the file currently being
+    sent: its real title (falling back to the request's own title, then to
+    the delivered filename), plus its part label when it was split - instead
+    of the generic "מעלה לטלגרם..." phase name, which tells the user nothing
+    once real byte progress is on screen. Only falls back to the generic
+    phase name when none of title/filename is available at all."""
+    name = (group.info.title or result.title or _original_name_for_group(group)).strip()
+    if not name:
+        return texts.UPLOADING
+    if part_label:
+        return f"מעלה: {name} ({part_label.lstrip('📎').strip()})"
+    return f"מעלה: {name}"
+
+
 class DownloadPipeline:
     def __init__(
         self,
@@ -489,6 +504,7 @@ class DownloadPipeline:
                             reserved_units=captions.utf16_units(label) + 2 if label else 0,
                         )
                         caption = captions.with_part_label(label, full_caption) if label else full_caption
+                        upload_progress.set_label(_upload_label_for(group, result, label))
                         upload_progress.start_part(sum(delivered_sizes))
                         message = await uploader.send_file(
                             part,

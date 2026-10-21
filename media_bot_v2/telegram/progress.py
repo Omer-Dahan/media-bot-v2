@@ -132,6 +132,13 @@ def _is_terminal_text(text: str, buttons: Any = None, is_terminal: bool | None =
         return False
     if "מוריד..." in text or "מעלה לטלגרם..." in text:
         return False
+    # The byte-progress phase line carries the item's real title instead of
+    # the generic "מעלה לטלגרם..." once upload is under way (see
+    # `UploadProgress`/`pipeline._upload_label_for`) - a title containing
+    # "נכשלה"/"בוטלה" must not be misread as a terminal failure/cancel
+    # report below, so this is checked before those substring checks.
+    if text.startswith("⬆️ "):
+        return False
     if text.startswith((texts.DOWNLOAD_DONE, "הושלם")):
         return True
     if text.startswith(("❌", "⏱️")):
@@ -772,6 +779,13 @@ class UploadProgress:
 
     def start_part(self, bytes_done_before: int) -> None:
         self._base = bytes_done_before
+
+    def set_label(self, label: str) -> None:
+        """Swap the phase-line label (e.g. to the next file's title) before
+        its first byte-progress edit - `__call__`/`handle_flood_cleared`
+        read `self._label` fresh on every edit, so this takes effect on the
+        very next progress update without needing a new reporter."""
+        self._label = label
 
     async def handle_flood_wait(self, wait_seconds: int, attempts: int = 1) -> None:
         """When an upload operation hits a prolonged flood wait (>= 10s),
