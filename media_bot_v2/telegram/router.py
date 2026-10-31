@@ -102,6 +102,39 @@ MENU_LOOKUP_TIMEOUT_SECONDS = 8.0
 MENU_STATUS_TIMEOUT_SECONDS = 12.0
 _MARKDOWN_SPECIALS = str.maketrans({"*": " ", "_": " ", "`": "'", "[": "(", "]": ")"})
 
+_HLS_RETRY_POLICY = {
+    "live": False,
+    "window_expired": False,
+    "window_too_short": False,
+    "drm": False,
+    "drm_unsupported": False,
+    "malformed": False,
+    "sample_aes_unsupported": False,
+    "https_key_required": False,
+    "size_cap": False,
+    "transport": True,
+}
+_HLS_KIND_TEXT = {
+    "live": texts.HLS_LIVE_NO_WINDOW,
+    "window_expired": texts.HLS_WINDOW_EXPIRED,
+    "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
+    "drm": texts.HLS_DRM_FAILURE,
+    "drm_unsupported": texts.HLS_DRM_FAILURE,
+    "malformed": texts.HLS_MALFORMED_FAILURE,
+    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_FAILURE,
+    "https_key_required": texts.HLS_HTTPS_KEY_FAILURE,
+    "size_cap": texts.HLS_SIZE_CAP,
+}
+_HLS_FAILURE_TEXT_KINDS = {message: kind for kind, message in _HLS_KIND_TEXT.items()}
+
+
+def _hls_retry_is_offered(kind: str) -> bool:
+    return _HLS_RETRY_POLICY.get(kind, True)
+
+
+def _hls_failure_text(kind: str) -> str:
+    return _HLS_KIND_TEXT.get(kind, texts.DOWNLOAD_FAILED)
+
 
 def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
     try:
@@ -210,11 +243,9 @@ class _HlsWindowEngine(BaseEngine):
                 max_gap_ratio=self._max_gap_ratio,
             )
         except HlsUnsupportedError as exc:
-            kind_text = {
-                "window_expired": texts.HLS_WINDOW_EXPIRED,
-                "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
-            }
-            raise HlsUnsupportedError(exc.kind, kind_text.get(exc.kind, str(exc))) from exc
+            raise HlsUnsupportedError(exc.kind, _hls_failure_text(exc.kind)) from exc
+        except DownloadTooLargeError as exc:
+            raise DownloadTooLargeError(_hls_failure_text("size_cap")) from exc
 
 
 def _format_duration(seconds: float) -> str:
@@ -443,6 +474,9 @@ def register_handlers(
         quality: str | None = None,
     ) -> MessageProgressReporter:
         def get_failure_buttons(text: str) -> Any:
+            hls_kind = _HLS_FAILURE_TEXT_KINDS.get(text)
+            if hls_kind is not None and not _hls_retry_is_offered(hls_kind):
+                return None
             if is_hopeless_failure(text=text):
                 return None
             msg = getattr(progress, "_message", message) if progress is not None else message

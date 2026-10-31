@@ -178,6 +178,55 @@ async def test_pipeline_partial_delivery_charges_only_what_was_delivered(session
         assert session.query(User).one().bandwidth_used == 500 * MB
 
 
+async def test_failed_first_upload_charges_nothing(session_factory, tmp_path):
+    with pytest.raises(RuntimeError, match="upload dropped"):
+        await _run(
+            session_factory,
+            tmp_path,
+            [525 * MB],
+            uploader=_Uploader(fail_on_call=1),
+            mb_per_credit=200,
+        )
+    assert _free(session_factory) == 10
+
+
+async def test_large_window_uses_split_parts_and_charges_delivered_total(
+    session_factory, tmp_path, monkeypatch
+):
+    produced_file: Path | None = None
+    produced_size = 0
+    delivered_parts: list[Path] = []
+
+    def fake_split(source: Path):
+        nonlocal produced_file, produced_size
+        produced_file = source
+        produced_size = source.stat().st_size
+        parts = [source.with_name("window.part000.bin"), source.with_name("window.part001.bin")]
+        for part, size in zip(parts, (300 * MB, 225 * MB), strict=True):
+            with part.open("wb") as fh:
+                fh.truncate(size)
+        source.unlink()
+        delivered_parts.extend(parts)
+        return parts
+
+    uploader = _Uploader()
+    monkeypatch.setattr("media_bot_v2.upload.splitter.TG_NORMAL_MAX_SIZE", 500 * MB)
+    monkeypatch.setattr("media_bot_v2.pipeline.splitter.split_file", fake_split)
+
+    await _run(
+        session_factory,
+        tmp_path,
+        [525 * MB],
+        uploader=uploader,
+        mb_per_credit=200,
+    )
+
+    assert produced_file is not None and produced_file.name == "part0.bin"
+    assert produced_size > 500 * MB
+    assert uploader.calls == len(delivered_parts) == 2
+    assert _free(session_factory) == 7
+
+
 async def test_pipeline_first_part_failing_charges_nothing(session_factory, tmp_path):
     with pytest.raises(RuntimeError):
         await _run(session_factory, tmp_path, [250 * MB] * 3, uploader=_Uploader(fail_on_call=1))

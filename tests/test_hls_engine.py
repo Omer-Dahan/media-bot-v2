@@ -485,6 +485,50 @@ def test_http_key_is_refused_without_fetch(tmp_path, monkeypatch):
     assert list(tmp_path.iterdir()) == []
 
 
+@pytest.mark.parametrize(
+    ("key_tag", "expected_kind"),
+    [
+        ('METHOD=SAMPLE-AES,URI="https://keys.test/key"', "sample_aes_unsupported"),
+        ('METHOD=SAMPLE-AES-CTR,URI="https://keys.test/key"', "sample_aes_unsupported"),
+        (
+            'METHOD=AES-128,URI="https://keys.test/key",KEYFORMAT="com.apple.streamingkeydelivery"',
+            "drm_unsupported",
+        ),
+        (
+            'METHOD=AES-128,URI="https://keys.test/key",KEYFORMAT="urn:uuid:edef8ba9-79d6-4ace-a3c8-27dcd51d21ed"',
+            "drm_unsupported",
+        ),
+        (
+            'METHOD=AES-128,URI="https://keys.test/key",KEYFORMAT="com.microsoft.playready"',
+            "drm_unsupported",
+        ),
+    ],
+)
+def test_sample_aes_and_drm_are_refused_before_media_or_key_fetch(
+    tmp_path, monkeypatch, key_tag, expected_kind
+):
+    playlist_url = "https://media.test/index.m3u8"
+    playlist = (
+        f"#EXTM3U\n#EXT-X-KEY:{key_tag}\n"
+        "#EXTINF:1,\nsegment.ts\n#EXT-X-ENDLIST\n"
+    ).encode()
+    requests_issued: list[str] = []
+
+    def recording_request(method, url, **kwargs):
+        requests_issued.append(url)
+        if url == playlist_url:
+            return _response(url, playlist)
+        raise AssertionError(f"media or key request issued before refusal: {url}")
+
+    monkeypatch.setattr(hls, "safe_request", recording_request)
+    with pytest.raises(hls.HlsUnsupportedError) as excinfo:
+        hls.download_hls(playlist_url, tmp_path)
+
+    assert excinfo.value.kind == expected_kind
+    assert requests_issued == [playlist_url]
+    assert not any(url.endswith("segment.ts") or "keys.test" in url for url in requests_issued)
+
+
 def test_ignored_byte_range_fails_before_writing(tmp_path, monkeypatch):
     response = _response("https://media.test/file.ts", b"x" * 100)
     monkeypatch.setattr(hls, "_guarded_get", lambda *args, **kwargs: response)

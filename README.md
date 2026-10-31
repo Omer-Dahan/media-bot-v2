@@ -307,6 +307,14 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 - **Playlists**: a YouTube playlist download is trimmed to however many items the user's remaining credits can afford; a trimmed delivery says so explicitly rather than silently dropping items.
 - **`SESSION_NAME=main` is hard-blocked**: this collides with the legacy bot's live session file, so `media_bot_v2.config.Settings` raises a `ValidationError` at startup (not just a warning) if `SESSION_NAME` is left at `main`.
 - **Hard limits**: 2000MiB per delivered file (Telegram bot API ceiling; larger files are split) and `MAX_DOWNLOAD_SIZE` (default 4GiB, configurable) per source download, enforced by `DownloadGuard`. An exact `Content-Length`/real downloaded bytes over the cap always rejects; a `total_bytes_estimate` (yt-dlp's extrapolation for split formats) rejects on its own only once it clears **2x** the cap with at least 1MiB of real traffic behind it, so a first-fragment spike cannot refuse a video that would have fit. Trade-off: a borderline-over estimate is let through, and up to one cap's worth of bandwidth/disk can be spent on a file whose estimate turns out wrong.
+
+### HLS Support Boundary
+
+Supported HLS inputs are finite VOD playlists and the currently published window of a live playlist. MPEG-TS and fMP4/CMAF media are supported, both clear and AES-128 encrypted. Master playlists are capped by `HLS_MAX_HEIGHT`, which defaults to 720, and live playlists offer the whole window, the last 30 minutes, or the last 10 minutes.
+
+The bot refuses forward recording, playlists with no readable window, SAMPLE-AES, commercial DRM, keys served over plain HTTP, and absolute time ranges when the measured stream has no `EXT-X-PROGRAM-DATE-TIME` tags.
+
+The published window slides as the stream continues, so old segments can expire. A download can report gaps, and starting later can shrink the available window.
 - **Failure reports**: a failed download sends a Hebrew report (user, url, platform, quality, the message shown to the user, the exception, and the request's own log tail) to `ERROR_REPORT_CHANNEL` (or `ARCHIVE_CHANNEL` if unset); the full log is attached as a `.txt` when the report had to be truncated. The report is skipped when the requesting chat equals the report channel, and cancellation, credits-exhausted, bandwidth-exhausted, and blocked-user failures are never reported.
 
 ---
@@ -481,6 +489,7 @@ media-bot-v2/
 | `ERROR_REPORT_MAX_PER_MINUTE` | Error reports | Per-minute ceiling on sends to the error report channel (report message and truncated-log `.txt` each spend one slot; minimum `1`) | `10` |
 | `REQUEST_LOG_MAX_LINES` | Error reports | Lines kept in the per-request in-memory log buffer attached to a failure report | `300` |
 | `MAX_DOWNLOAD_SIZE` | Storage | Download-side size cap in bytes enforced by `DownloadGuard`, independent of Telegram's 2000MiB per-file split limit (minimum: the splitter's 2000MiB-per-part cap; a lower value is rejected at startup) | `4294967296` (4 GiB) |
+| `HLS_MAX_HEIGHT` | HLS | Maximum selected master-playlist variant height | `720` |
 | `HLS_SEGMENT_WORKERS` | HLS | Parallel segment fetches for a live window, from 1 to 32 | `8` |
 | `HLS_MAX_GAP_RATIO` | HLS | Maximum missing segment ratio accepted in a live window, from 0 to 1 | `0.02` |
 | `HLS_WINDOW_SAMPLE_REQUESTS` | HLS | Bounded HEAD samples used for the live-window size estimate, from 3 to 10 | `6` |

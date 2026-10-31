@@ -95,14 +95,16 @@ class DirectDownloadError(Exception):
 # keyformats) the same way from the user's point of view: this milestone
 # only downloads clear streams, so all of them render as "protected content".
 _HLS_KIND_TEXT: dict[str, str] = {
-    "live": texts.HLS_LIVE_UNSUPPORTED,
-    "malformed": texts.HLS_MALFORMED,
-    "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
-    "sample_aes_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "live": texts.HLS_LIVE_NO_WINDOW,
+    "malformed": texts.HLS_MALFORMED_FAILURE,
+    "drm": texts.HLS_DRM_FAILURE,
+    "drm_unsupported": texts.HLS_DRM_FAILURE,
+    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_FAILURE,
     "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
-    "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
+    "https_key_required": texts.HLS_HTTPS_KEY_FAILURE,
     "window_expired": texts.HLS_WINDOW_EXPIRED,
     "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
+    "size_cap": texts.HLS_SIZE_CAP,
 }
 
 
@@ -132,6 +134,8 @@ def _download_hls(
         raise _mark_logged(
             HlsUnsupportedError(exc.kind, _HLS_KIND_TEXT.get(exc.kind, texts.UNSUPPORTED_URL))
         ) from exc
+    except DownloadTooLargeError as exc:
+        raise DownloadTooLargeError(_HLS_KIND_TEXT["size_cap"]) from exc
     except HlsDownloadError as exc:
         logger.warning("HLS transient download failure for %s: %s", url, exc)
         raise _mark_logged(HlsDownloadError(texts.DOWNLOAD_FAILED)) from exc

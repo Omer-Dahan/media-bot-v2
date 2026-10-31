@@ -34,7 +34,7 @@ from media_bot_v2.queue.limiter import ConcurrencyLimiter
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.callback_data import encode
 from media_bot_v2.telegram.retry import RetryStore, is_hopeless_failure
-from media_bot_v2.telegram.router import register_handlers
+from media_bot_v2.telegram.router import _hls_retry_is_offered, register_handlers
 from tests.fakes_telegram import FakeTelegramClient
 
 
@@ -189,6 +189,44 @@ def _extract_retry_id(buttons: Any) -> str | None:
                         parts = str(data).split(":")
                     return parts[1] if len(parts) > 1 else None
     return None
+
+
+@pytest.mark.parametrize(
+    ("kind", "retry_offered"),
+    [
+        ("live", False),
+        ("window_expired", False),
+        ("window_too_short", False),
+        ("drm", False),
+        ("drm_unsupported", False),
+        ("malformed", False),
+        ("sample_aes_unsupported", False),
+        ("https_key_required", False),
+        ("size_cap", False),
+        ("transport", True),
+        ("timeout", True),
+        ("http_5xx", True),
+        ("connection_reset", True),
+    ],
+)
+def test_hls_retry_policy_by_failure_kind(kind, retry_offered):
+    assert _hls_retry_is_offered(kind) is retry_offered
+
+
+def test_hopeless_hls_kinds_have_distinct_structured_texts():
+    messages = [
+        texts.HLS_LIVE_NO_WINDOW,
+        texts.HLS_WINDOW_EXPIRED,
+        texts.HLS_WINDOW_TOO_SHORT,
+        texts.HLS_DRM_FAILURE,
+        texts.HLS_MALFORMED_FAILURE,
+        texts.HLS_SAMPLE_AES_FAILURE,
+        texts.HLS_HTTPS_KEY_FAILURE,
+        texts.HLS_SIZE_CAP,
+    ]
+    assert len(set(messages)) == len(messages)
+    assert all("❌ מה קרה" in message and "➡️ מה לעשות" in message for message in messages)
+    assert "טווח קצר יותר" in texts.HLS_WINDOW_EXPIRED
 
 
 @pytest.mark.asyncio
