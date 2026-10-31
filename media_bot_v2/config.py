@@ -212,6 +212,12 @@ class Settings(BaseSettings):
         default=4 * 1024 * 1024 * 1024, gt=0, validation_alias="MAX_DOWNLOAD_SIZE"
     )
 
+    # --- HLS (m3u8) ---
+    # Automatic master-playlist variant cap: highest declared RESOLUTION
+    # height <= this value, falling back to the lowest variant if none
+    # qualify. Matches the router's existing YouTube default (spec/PLAN-M3U8.md).
+    hls_max_height: int = Field(default=720, gt=0, validation_alias="HLS_MAX_HEIGHT")
+
     @field_validator("max_download_size")
     @classmethod
     def _max_download_size_at_least_split_threshold(cls, value: int, info: ValidationInfo) -> int:
