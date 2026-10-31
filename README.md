@@ -69,7 +69,7 @@ Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallback
 <td width="33%" valign="top">
 
 ### 🎬 Universal Media Ingestion
-Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, **Facebook**, and **direct HTTP(S)** links. Supports YouTube playlists and TikTok/Instagram photo slideshows.
+Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, **Facebook**, **direct HTTP(S)** links, and finite **HLS (`.m3u8`)** VOD playlists. Supports YouTube playlists and TikTok/Instagram photo slideshows.
 
 </td>
 <td width="33%" valign="top">
@@ -544,6 +544,7 @@ In accordance with architectural reviews documented in [`docs/LESSONS.md`](docs/
 3. **Status Message Residue during Global Flood**: Under rare circumstances where every Telegram call is throttled at once, a progress status message may remain alongside the failure explanation.
 4. **Binary-Disguised Plain Text Detection**: Text files served as `application/octet-stream` without standard HTML/XML/JSON markup openers will bypass initial body sniffers and reach the download stage before handling.
 5. **External Provider API Drift**: Public extraction endpoints (TikWM, musicaldown, ytmp3) operate without formal SLAs and may alter response schemas, triggering fallback to local `yt-dlp`.
+6. **HLS Support Is Finite-VOD Only**: A `.m3u8` link, an HLS MIME type, or a buffered `#EXTM3U` body is detected and routed through a dedicated guarded fetch + local `ffmpeg` remux before any destination file is opened - but only a finite media playlist (one carrying `EXT-X-ENDLIST`) with clear (unencrypted) segments is downloaded. A live playlist (no `EXT-X-ENDLIST`) or any encrypted/DRM-protected stream (SAMPLE-AES, AES-128, FairPlay/Widevine/PlayReady) is rejected with a classified Hebrew message and no retry button; it is never downloaded.
 
 ---
 

@@ -175,6 +175,16 @@ DIRECT_LINK_SERVER_BUSY = (
 )
 REQUEST_TIMEOUT_EXCEEDED = "⏱️ הבקשה בוטלה עקב חריגה ממגבלת הזמן.\n➡️ נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
 
+HLS_LIVE_UNSUPPORTED = (
+    "❌ זה שידור חי (Live) - אין עדיין תמיכה בשידורים חיים.\n➡️ נסה קישור להקלטה שהסתיימה (VOD)."
+)
+HLS_MALFORMED = (
+    "❌ הפלייליסט בקישור הזה פגום או לא תקין.\n➡️ ודא שהקישור מצביע על פלייליסט HLS (m3u8) תקין."
+)
+HLS_DRM_UNSUPPORTED = (
+    "❌ התוכן מוגן (DRM) או מוצפן בשיטה שלא נתמכת.\n➡️ הבוט מוריד רק תוכן פתוח, לא מוגן."
+)
+
 CANCEL_BUTTON = "❌ ביטול"
 REQUEST_CANCELLED = "❌ הבקשה בוטלה."
 CANCEL_TOAST = "מבטל את הבקשה..."
@@ -308,6 +318,24 @@ PING_RESULT_VARIANTS = (
     "🟢 כאן, ערני, {ms}ms",
 )
 
+HLS_LIVE_UNSUPPORTED_VARIANTS = (
+    "❌ זה שידור חי, ושידורים חיים לא נתמכים עדיין.\n➡️ נסה קישור להקלטה גמורה (VOD).",
+    "❌ הקישור הזה הוא שידור בשידור ישיר - זה עוד לא בתפריט שלי.\n➡️ נסה קישור ל-VOD שהסתיים.",
+    "❌ שידורים חיים עדיין לא נתמכים.\n➡️ נסה שוב כשהשידור יסתיים ויהפוך להקלטה, או שלח קישור VOD.",
+)
+
+HLS_MALFORMED_VARIANTS = (
+    "❌ לא הצלחתי לקרוא את הפלייליסט הזה - הוא לא תקין.\n➡️ בדוק את הקישור או נסה קישור HLS אחר.",
+    "❌ הפלייליסט פגום או כתוב בצורה לא צפויה.\n➡️ ודא שזה קישור m3u8 תקין ונסה שוב.",
+    "❌ הקובץ הזה אמור להיות פלייליסט HLS, אבל התוכן שלו לא תואם.\n➡️ נסה קישור אחר.",
+)
+
+HLS_DRM_UNSUPPORTED_VARIANTS = (
+    "❌ הסטרים הזה מוגן ב-DRM או בהצפנה לא נתמכת.\n➡️ הבוט לא פורץ הגנות - נסה תוכן פתוח.",
+    "❌ זה תוכן מוגן, ואין לי מפתח אליו.\n➡️ נסה קישור לתוכן ללא הגנת DRM/הצפנה.",
+    "❌ ההצפנה כאן לא נתמכת (DRM או שיטה לא מוכרת).\n➡️ שלח קישור לתוכן פתוח.",
+)
+
 # Order matters only in that `resolve` scans by descending key length, so a
 # longer canonical string is never shadowed by a shorter one that happens to
 # be a prefix of it.
@@ -327,6 +355,9 @@ STAGE_VARIANTS: dict[str, tuple[str, ...]] = {
     INSTAGRAM_PRIVATE_OR_LOGIN: INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS,
     FACEBOOK_NOT_FOUND: FACEBOOK_NOT_FOUND_VARIANTS,
     FACEBOOK_PRIVATE_OR_LOGIN: FACEBOOK_PRIVATE_OR_LOGIN_VARIANTS,
+    HLS_LIVE_UNSUPPORTED: HLS_LIVE_UNSUPPORTED_VARIANTS,
+    HLS_MALFORMED: HLS_MALFORMED_VARIANTS,
+    HLS_DRM_UNSUPPORTED: HLS_DRM_UNSUPPORTED_VARIANTS,
 }
 
 _SORTED_CANONICALS = sorted(STAGE_VARIANTS, key=len, reverse=True)
@@ -341,6 +372,9 @@ ALL_HOPELESS_VARIANTS: tuple[str, ...] = (
     + INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS
     + DIRECT_LINK_REFUSED_VARIANTS
     + DIRECT_LINK_GONE_VARIANTS
+    + HLS_LIVE_UNSUPPORTED_VARIANTS
+    + HLS_MALFORMED_VARIANTS
+    + HLS_DRM_UNSUPPORTED_VARIANTS
 )
 
 

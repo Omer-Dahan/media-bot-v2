@@ -35,6 +35,13 @@ from media_bot_v2.engines.content_check import (
     reject_if_not_media_body,
     reject_if_not_media_content_type,
 )
+from media_bot_v2.engines.hls import (
+    HlsDownloadError,
+    HlsUnsupportedError,
+    detect_hls,
+    download_hls,
+    looks_like_hls_body,
+)
 from media_bot_v2.engines.safe_filename import safe_basename_from_url_path, within_directory
 from media_bot_v2.engines.ssrf_guard import SSRFBlockedError, safe_request
 from media_bot_v2.executor import run_in_thread
@@ -81,6 +88,34 @@ class DirectLinkRefusedError(UnsupportedUrlError):
 class DirectDownloadError(Exception):
     """Raised with an already-classified, Hebrew, user-facing message for a
     transient (429/5xx) direct-link failure - still worth a retry."""
+
+
+# Maps engines.hls.HlsUnsupportedError.kind to the Hebrew text the user sees.
+# M1 treats every active-key variant (SAMPLE-AES, identity AES-128, DRM
+# keyformats) the same way from the user's point of view: this milestone
+# only downloads clear streams, so all of them render as "protected content".
+_HLS_KIND_TEXT: dict[str, str] = {
+    "live": texts.HLS_LIVE_UNSUPPORTED,
+    "malformed": texts.HLS_MALFORMED,
+    "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "sample_aes_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
+}
+
+
+def _download_hls(url: str, dest_dir: Path, max_size: int | None, cancel_token: CancellationToken | None) -> DownloadResult:
+    """Runs the guarded HLS fetch/remux and translates its internal
+    kind/debug-message classification into the Hebrew text the user sees,
+    while keeping HlsUnsupportedError's UnsupportedUrlError ancestry so
+    pipeline.py/retry.py's existing hopeless-classification keeps working."""
+    try:
+        return download_hls(url, dest_dir, max_size=max_size, cancel_token=cancel_token)
+    except HlsUnsupportedError as exc:
+        logger.warning("HLS input unsupported (%s) for %s: %s", exc.kind, url, exc)
+        raise _mark_logged(HlsUnsupportedError(exc.kind, _HLS_KIND_TEXT.get(exc.kind, texts.UNSUPPORTED_URL))) from exc
+    except HlsDownloadError as exc:
+        logger.warning("HLS transient download failure for %s: %s", url, exc)
+        raise _mark_logged(HlsDownloadError(texts.DOWNLOAD_FAILED)) from exc
 
 
 def _classify_http_error(exc: requests.HTTPError, url: str) -> Exception:
@@ -174,7 +209,7 @@ class DirectEngine(BaseEngine):
         dest_dir.mkdir(parents=True, exist_ok=True)
         loop = asyncio.get_running_loop() if self._progress is not None else None
         try:
-            dest_path = await run_in_thread(
+            result = await run_in_thread(
                 _preflight_and_stream_to_file,
                 url,
                 dest_dir,
@@ -193,7 +228,7 @@ class DirectEngine(BaseEngine):
             raise classified from exc
         if cancel_token is not None and cancel_token.is_set():
             return DownloadResult(file_paths=[])
-        return DownloadResult(file_paths=[str(dest_path)], title=dest_path.name)
+        return result
 
 
 _CD_FILENAME_STAR_RE = re.compile(r"filename\*\s*=\s*[^']*''([^;]+)", re.IGNORECASE)
@@ -257,16 +292,24 @@ def _preflight_and_stream_to_file(
     cancel_token: CancellationToken | None = None,
     progress=None,
     loop=None,
-) -> Path:
+) -> DownloadResult:
+    head_content_type: str | None = None
     try:
         with safe_request("HEAD", url, timeout=10) as head_resp:
             if head_resp.status_code < 400:
-                reject_if_not_media_content_type(head_resp)
-                _reject_if_declared_size_too_large(head_resp, url, max_size)
+                head_content_type = head_resp.headers.get("Content-Type")
+                if not detect_hls(url, content_type=head_content_type):
+                    reject_if_not_media_content_type(head_resp)
+                    _reject_if_declared_size_too_large(head_resp, url, max_size)
     except (DownloadTooLargeError, UnsupportedUrlError, SSRFBlockedError):
         raise
     except Exception as exc:  # noqa: BLE001
         logger.debug("Preflight HEAD request failed for %s: %s; proceeding to GET", url, exc)
+
+    # Path extension or HEAD Content-Type already says HLS: go straight to
+    # the HLS module without ever opening a direct-download destination file.
+    if detect_hls(url, content_type=head_content_type):
+        return _download_hls(url, dest_dir, max_size, cancel_token)
 
     return _stream_to_file(url, dest_dir, max_size, cancel_token, progress, loop)
 
@@ -278,9 +321,14 @@ def _stream_to_file(
     cancel_token: CancellationToken | None = None,
     progress=None,
     loop=None,
-) -> Path:
+) -> DownloadResult:
     with safe_request("GET", url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
+        # GET's Content-Type can disagree with HEAD's, or HEAD may have
+        # failed outright - re-check before any destination file is opened.
+        if detect_hls(url, content_type=response.headers.get("Content-Type")):
+            response.close()
+            return _download_hls(url, dest_dir, max_size, cancel_token)
         reject_if_not_media_content_type(response)
         _reject_if_declared_size_too_large(response, url, max_size)
         # Only decided now, not before the request: a redirect can land on a
@@ -295,7 +343,7 @@ def _stream_to_file(
         if cancel_token is not None:
             if cancel_token.is_set():
                 response.close()
-                return dest_path
+                return DownloadResult(file_paths=[])
             cancel_token.on_cancel(response.close)
 
         # Parsed once: also the total shown in the progress bar below
@@ -310,23 +358,40 @@ def _stream_to_file(
 
         total = 0
         head = b""
+        sniffed = False
+        f = None
         report_state = {"last_forward": 0.0}
         start_time = time.monotonic()
         try:
-            with open(dest_path, "wb") as f:
-                for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
-                    if cancel_token is not None and cancel_token.is_set():
-                        response.close()
-                        break
-                    if not chunk:
-                        continue
-                    # Sniff once enough bytes have arrived (a first chunk can be
-                    # tiny); the tail of a short body is checked after the loop.
-                    if len(head) < SNIFF_BYTES:
-                        head += chunk[: SNIFF_BYTES - len(head)]
-                        if len(head) >= SNIFF_BYTES:
-                            reject_if_not_media_body(head)
-                    total += len(chunk)
+            for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+                if cancel_token is not None and cancel_token.is_set():
+                    response.close()
+                    break
+                if not chunk:
+                    continue
+                total += len(chunk)
+                if not sniffed:
+                    # Buffer without opening the destination file yet, so a
+                    # buffered `#EXTM3U` prefix (no extension, no HLS
+                    # Content-Type) can still redirect to download_hls
+                    # before a single byte is ever written to disk.
+                    head += chunk
+                    if len(head) >= SNIFF_BYTES:
+                        sniffed = True
+                        if looks_like_hls_body(head):
+                            response.close()
+                            return _download_hls(url, dest_dir, max_size, cancel_token)
+                        reject_if_not_media_body(head)
+                        if max_size is not None and total > max_size:
+                            raise DownloadTooLargeError(
+                                texts.format_download_too_large(total, max_size),
+                                file_size=total,
+                                max_size=max_size,
+                                url=url,
+                            )
+                        f = open(dest_path, "wb")  # noqa: SIM115 - opened lazily after the sniff, closed in `finally` below
+                        f.write(head)
+                else:
                     if max_size is not None and total > max_size:
                         raise DownloadTooLargeError(
                             texts.format_download_too_large(total, max_size),
@@ -335,30 +400,48 @@ def _stream_to_file(
                             url=url,
                         )
                     f.write(chunk)
-                    if progress is not None and loop is not None:
-                        _report_stream_progress(
-                            progress,
-                            loop,
-                            report_state,
-                            start_time,
-                            transferred=total,
-                            total=declared_total,
-                        )
+                if progress is not None and loop is not None:
+                    _report_stream_progress(
+                        progress,
+                        loop,
+                        report_state,
+                        start_time,
+                        transferred=total,
+                        total=declared_total,
+                    )
             if cancel_token is not None and cancel_token.is_set():
                 # Cancelled mid-stream: what is on disk is a truncated file, not a result.
                 dest_path.unlink(missing_ok=True)
-                return dest_path
-            if 0 < len(head) < SNIFF_BYTES:
-                reject_if_not_media_body(head)
+                return DownloadResult(file_paths=[])
+            if not sniffed:
+                # The whole body was shorter than SNIFF_BYTES - sniff and
+                # write it now, at end of stream.
+                if looks_like_hls_body(head):
+                    response.close()
+                    return _download_hls(url, dest_dir, max_size, cancel_token)
+                if head:
+                    reject_if_not_media_body(head)
+                if max_size is not None and total > max_size:
+                    raise DownloadTooLargeError(
+                        texts.format_download_too_large(total, max_size),
+                        file_size=total,
+                        max_size=max_size,
+                        url=url,
+                    )
+                f = open(dest_path, "wb")  # noqa: SIM115 - opened lazily after the sniff, closed in `finally` below
+                f.write(head)
         except (DownloadTooLargeError, UnsupportedUrlError):
             dest_path.unlink(missing_ok=True)
             raise
         except Exception:
             dest_path.unlink(missing_ok=True)
             if cancel_token is not None and cancel_token.is_set():
-                return dest_path
+                return DownloadResult(file_paths=[])
             raise
-    return dest_path
+        finally:
+            if f is not None:
+                f.close()
+    return DownloadResult(file_paths=[str(dest_path)], title=dest_path.name)
 
 
 def _reject_if_declared_size_too_large(response, url: str, max_size: int | None) -> None:

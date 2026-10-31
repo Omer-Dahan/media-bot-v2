@@ -37,6 +37,7 @@ from media_bot_v2.engines.facebook import (
     extract_facebook_id,
     matches_facebook_url,
 )
+from media_bot_v2.engines.hls import HlsDownloadError, HlsUnsupportedError
 from media_bot_v2.engines.instagram import (
     InstagramDownloadError,
     InstagramEngine,
@@ -510,6 +511,8 @@ def register_handlers(
                 DownloadTooLargeError,
                 UnsupportedUrlError,
                 DirectDownloadError,
+                HlsUnsupportedError,
+                HlsDownloadError,
             ) as exc:
                 if not getattr(progress, "is_terminal_completed", False):
                     await progress.update(str(exc), is_terminal=True)
