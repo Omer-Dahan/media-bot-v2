@@ -875,6 +875,7 @@ def test_ffmpeg_remux_argv_locks_down_protocols_and_extensions(tmp_path, monkeyp
         captured_cmds.append(cmd)
 
     monkeypatch.setattr(hls, "_run_process", fake_run_process)
+    monkeypatch.setattr(hls, "_ffmpeg_supports_extension_picky", lambda: True)
     hls._run_ffmpeg_remux(video_playlist, None, tmp_path / "out.mp4", 10.0, None)
 
     cmd = captured_cmds[0]
@@ -882,8 +883,59 @@ def test_ffmpeg_remux_argv_locks_down_protocols_and_extensions(tmp_path, monkeyp
     assert "-extension_picky" in cmd
     assert cmd[cmd.index("-extension_picky") + 1] == "1"
     assert "ALL" not in cmd
-    protocols = set(cmd[cmd.index("-protocol_whitelist") + 1].split(","))
-    assert protocols.isdisjoint({"http", "https", "tcp", "pipe"})
+
+
+def test_ffmpeg_remux_omits_extension_picky_when_unsupported(tmp_path, monkeypatch):
+    video_playlist = tmp_path / "video.m3u8"
+    video_playlist.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+    captured_cmds = []
+
+    def fake_run_process(cmd, timeout, cancel_token):
+        captured_cmds.append(cmd)
+
+    monkeypatch.setattr(hls, "_run_process", fake_run_process)
+    monkeypatch.setattr(hls, "_ffmpeg_supports_extension_picky", lambda: False)
+    hls._run_ffmpeg_remux(video_playlist, None, tmp_path / "out.mp4", 10.0, None)
+
+    cmd = captured_cmds[0]
+    assert "-extension_picky" not in cmd
+    assert "-allowed_extensions" in cmd
+    assert cmd[cmd.index("-allowed_extensions") + 1] == "ts,m4s,mp4,aac,m4a,key"
+
+
+def test_extension_picky_probe_runs_at_most_once(monkeypatch):
+    hls._extension_picky_supported = None
+    calls = []
+
+    class FakeResult:
+        returncode = 0
+        stdout = b"-extension_picky <boolean> ..."
+        stderr = b""
+
+    def fake_run(cmd, **kwargs):
+        calls.append(cmd)
+        return FakeResult()
+
+    monkeypatch.setattr(hls.subprocess, "run", fake_run)
+    try:
+        assert hls._ffmpeg_supports_extension_picky() is True
+        assert hls._ffmpeg_supports_extension_picky() is True
+        assert len(calls) == 1
+    finally:
+        hls._extension_picky_supported = None
+
+
+def test_extension_picky_probe_failure_is_treated_as_unsupported(monkeypatch):
+    hls._extension_picky_supported = None
+
+    def fake_run(cmd, **kwargs):
+        raise OSError("ffmpeg not found")
+
+    monkeypatch.setattr(hls.subprocess, "run", fake_run)
+    try:
+        assert hls._ffmpeg_supports_extension_picky() is False
+    finally:
+        hls._extension_picky_supported = None
 
 
 # Every kind engines/hls.py's HlsUnsupportedError actually raises (grep

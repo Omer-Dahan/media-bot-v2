@@ -873,6 +873,37 @@ def _run_process(cmd: list[str], timeout: float, cancel_token: CancellationToken
         raise HlsDownloadError("ffmpeg remux failed")
 
 
+_extension_picky_supported: bool | None = None
+
+
+def _ffmpeg_supports_extension_picky() -> bool:
+    """Probe once per process whether this ffmpeg build accepts
+    -extension_picky on the hls demuxer. Older builds (e.g. Debian 12's
+    ffmpeg 5.x) reject it outright and exit immediately, which would break
+    every HLS download, so the probe result is cached and never re-run."""
+    global _extension_picky_supported
+    if _extension_picky_supported is not None:
+        return _extension_picky_supported
+    try:
+        result = subprocess.run(
+            ["ffmpeg", "-hide_banner", "-h", "demuxer=hls"],
+            capture_output=True,
+            timeout=5,
+            check=False,
+        )
+        output = (result.stdout or b"") + (result.stderr or b"")
+        supported = result.returncode == 0 and b"extension_picky" in output
+    except (OSError, subprocess.TimeoutExpired):
+        supported = False
+    if not supported:
+        logger.warning(
+            "ffmpeg build does not support -extension_picky; "
+            "falling back to -allowed_extensions only"
+        )
+    _extension_picky_supported = supported
+    return supported
+
+
 def _run_ffmpeg_remux(
     video_playlist: Path,
     audio_playlist: Path | None,
@@ -889,6 +920,7 @@ def _run_ffmpeg_remux(
         )
     protocols = "file,crypto" if encrypted else "file"
     allowed_extensions = "ts,m4s,mp4,aac,m4a,key"
+    picky = _ffmpeg_supports_extension_picky()
     cmd = [
         "ffmpeg",
         "-y",
@@ -897,8 +929,10 @@ def _run_ffmpeg_remux(
         "hls",
         "-protocol_whitelist",
         protocols,
-        "-extension_picky",
-        "1",
+    ]
+    if picky:
+        cmd += ["-extension_picky", "1"]
+    cmd += [
         "-allowed_extensions",
         allowed_extensions,
         "-i",
@@ -910,8 +944,10 @@ def _run_ffmpeg_remux(
             "hls",
             "-protocol_whitelist",
             protocols,
-            "-extension_picky",
-            "1",
+        ]
+        if picky:
+            cmd += ["-extension_picky", "1"]
+        cmd += [
             "-allowed_extensions",
             allowed_extensions,
             "-i",
