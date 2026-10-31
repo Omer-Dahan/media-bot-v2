@@ -91,17 +91,16 @@ class DirectDownloadError(Exception):
 
 
 # Maps engines.hls.HlsUnsupportedError.kind to the Hebrew text the user sees.
-# M1 treats every active-key variant (SAMPLE-AES, identity AES-128, DRM
-# keyformats) the same way from the user's point of view: this milestone
-# only downloads clear streams, so all of them render as "protected content".
+# AES-128 streams are supported; DRM, SAMPLE-AES, and insecure key delivery
+# retain distinct classifications.
 _HLS_KIND_TEXT: dict[str, str] = {
-    "live": texts.HLS_LIVE_NO_WINDOW,
-    "malformed": texts.HLS_MALFORMED_FAILURE,
-    "drm": texts.HLS_DRM_FAILURE,
-    "drm_unsupported": texts.HLS_DRM_FAILURE,
-    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_FAILURE,
+    "live": texts.HLS_LIVE_UNSUPPORTED,
+    "malformed": texts.HLS_MALFORMED,
+    "drm": texts.HLS_DRM_UNSUPPORTED,
+    "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_UNSUPPORTED,
     "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
-    "https_key_required": texts.HLS_HTTPS_KEY_FAILURE,
+    "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
     "window_expired": texts.HLS_WINDOW_EXPIRED,
     "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
     "size_cap": texts.HLS_SIZE_CAP,

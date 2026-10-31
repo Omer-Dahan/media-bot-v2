@@ -115,14 +115,14 @@ _HLS_RETRY_POLICY = {
     "transport": True,
 }
 _HLS_KIND_TEXT = {
-    "live": texts.HLS_LIVE_NO_WINDOW,
+    "live": texts.HLS_LIVE_UNSUPPORTED,
     "window_expired": texts.HLS_WINDOW_EXPIRED,
     "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
-    "drm": texts.HLS_DRM_FAILURE,
-    "drm_unsupported": texts.HLS_DRM_FAILURE,
-    "malformed": texts.HLS_MALFORMED_FAILURE,
-    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_FAILURE,
-    "https_key_required": texts.HLS_HTTPS_KEY_FAILURE,
+    "drm": texts.HLS_DRM_UNSUPPORTED,
+    "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "malformed": texts.HLS_MALFORMED,
+    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_UNSUPPORTED,
+    "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
     "size_cap": texts.HLS_SIZE_CAP,
 }
 _HLS_FAILURE_TEXT_KINDS = {message: kind for kind, message in _HLS_KIND_TEXT.items()}

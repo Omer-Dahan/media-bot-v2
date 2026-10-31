@@ -215,13 +215,13 @@ def test_hls_retry_policy_by_failure_kind(kind, retry_offered):
 
 def test_hopeless_hls_kinds_have_distinct_structured_texts():
     messages = [
-        texts.HLS_LIVE_NO_WINDOW,
+        texts.HLS_LIVE_UNSUPPORTED,
         texts.HLS_WINDOW_EXPIRED,
         texts.HLS_WINDOW_TOO_SHORT,
-        texts.HLS_DRM_FAILURE,
-        texts.HLS_MALFORMED_FAILURE,
-        texts.HLS_SAMPLE_AES_FAILURE,
-        texts.HLS_HTTPS_KEY_FAILURE,
+        texts.HLS_DRM_UNSUPPORTED,
+        texts.HLS_MALFORMED,
+        texts.HLS_SAMPLE_AES_UNSUPPORTED,
+        texts.HLS_HTTPS_KEY_REQUIRED,
         texts.HLS_SIZE_CAP,
     ]
     assert len(set(messages)) == len(messages)
