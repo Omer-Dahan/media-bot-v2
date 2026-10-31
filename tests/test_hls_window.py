@@ -170,7 +170,13 @@ def test_window_download_has_no_duplicates(live_server, tmp_path, bypass_ssrf_gu
 
 
 def test_window_segments_start_in_parallel(live_server, tmp_path, bypass_ssrf_guard):
-    url, state = live_server(count=24, segment_delay=0.2)
+    # A long per-segment delay, not a short one, is what makes the
+    # concurrency count itself (not a wall-clock elapsed time) reliable
+    # under full-suite load: it gives every one of the 8 pool threads a wide
+    # window to actually reach the server before the first ones finish, so a
+    # busy test runner doesn't shrink the observed overlap below 8 even
+    # though the segments really were started in parallel.
+    url, state = live_server(count=24, segment_delay=1.0)
 
     hls.download_hls_window(url, tmp_path, None, None, segment_workers=8)
 

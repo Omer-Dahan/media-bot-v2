@@ -13,9 +13,10 @@ from media_bot_v2.credits.service import CreditsService
 from media_bot_v2.db.models import Base
 from media_bot_v2.engines.base import DownloadResult
 from media_bot_v2.engines.direct import DirectEngine
-from media_bot_v2.engines.hls import HlsUnsupportedError, HlsWindowInfo
+from media_bot_v2.engines.hls import HlsDownloadError, HlsUnsupportedError, HlsWindowInfo
 from media_bot_v2.telegram import router, texts
 from media_bot_v2.telegram.callback_data import encode
+from media_bot_v2.telegram.retry import RetryStore
 from media_bot_v2.telegram.router import register_handlers
 
 
@@ -304,3 +305,112 @@ async def test_live_window_download_uses_cancel_registry_and_unregisters(monkeyp
     second_click = _CallbackEvent(encode("cancel"), message)
     await _handler(client, events.CallbackQuery, b"cancel")(second_click)
     assert second_click.answers == [(texts.CANCEL_NOT_ACTIVE, True)]
+
+
+async def test_mime_only_live_url_reaches_preflight_without_m3u8_extension(monkeypatch):
+    """B2.4: a live playlist with no `.m3u8` extension - only its HLS
+    Content-Type identifies it - must still show the live-window
+    confirmation, not an unconfirmed direct download."""
+    monkeypatch.setattr(router, "probe_hls_signal", lambda url: True)
+    monkeypatch.setattr(router, "analyze_hls_window", lambda *args, **kwargs: _window())
+    pipeline = _Pipeline()
+    client = _make_router(pipeline)
+    event = _UrlEvent("https://live.example/mime-only-stream")
+
+    await _handler(client, events.NewMessage)(event)
+
+    assert pipeline.calls == []
+    text, _response = event.responses[0]
+    assert text.startswith("🔴 זוהה שידור חי")
+
+
+async def test_signature_only_live_url_reaches_preflight_without_m3u8_extension(monkeypatch):
+    """B2.4: a live playlist with no extension and a generic Content-Type -
+    only the buffered `#EXTM3U` body signature identifies it - must also
+    reach the preflight."""
+    monkeypatch.setattr(router, "probe_hls_signal", lambda url: True)
+    monkeypatch.setattr(router, "analyze_hls_window", lambda *args, **kwargs: _window())
+    pipeline = _Pipeline()
+    client = _make_router(pipeline)
+    event = _UrlEvent("https://live.example/opaque-signature")
+
+    await _handler(client, events.NewMessage)(event)
+
+    assert pipeline.calls == []
+    text, _response = event.responses[0]
+    assert text.startswith("🔴 זוהה שידור חי")
+
+
+async def test_non_hls_direct_url_skips_the_probe_based_preflight(monkeypatch):
+    """A plain, non-HLS direct link (probe returns False) must go straight
+    to the ordinary direct-download path - no live-window confirmation."""
+    probed = []
+    monkeypatch.setattr(router, "probe_hls_signal", lambda url: probed.append(url) or False)
+    pipeline = _Pipeline()
+    client = _make_router(pipeline)
+    event = _UrlEvent("https://example.com/video.mp4")
+
+    await _handler(client, events.NewMessage)(event)
+
+    assert probed == ["https://example.com/video.mp4"]
+    assert len(pipeline.calls) == 1
+    assert isinstance(pipeline.calls[0]["engine"], DirectEngine)
+    assert event.responses[0][0] == texts.DOWNLOAD_STARTED
+
+
+async def test_unknown_preflight_kind_gets_a_classified_hebrew_text_not_raw_str(monkeypatch):
+    """B2.2/B2.1: a preflight failure kind that isn't `window_too_short` or
+    `malformed` must never fall back to the raw `str(exception)` - it goes
+    through the shared kind -> Hebrew text table, same as every other HLS
+    failure site."""
+
+    def raise_playlist_cycle(*args, **kwargs):
+        raise HlsUnsupportedError("playlist_cycle", "visited https://live.example/a.m3u8 again")
+
+    monkeypatch.setattr(router, "analyze_hls_window", raise_playlist_cycle)
+    pipeline = _Pipeline()
+    client = _make_router(pipeline)
+    event = _UrlEvent("https://live.example/index.m3u8")
+
+    await _handler(client, events.NewMessage)(event)
+
+    assert pipeline.calls == []
+    text, _response = event.responses[0]
+    assert text == texts.HLS_PLAYLIST_CYCLE
+    assert "https://live.example/a.m3u8" not in text
+
+
+async def test_retry_after_live_window_failure_keeps_selected_range(monkeypatch):
+    """B2.3: router.py used to rebuild the retried job without `quality`,
+    so clicking retry on a failed live-window download re-ran the whole
+    window instead of the range the user originally picked."""
+    monkeypatch.setattr(router, "analyze_hls_window", lambda *args, **kwargs: _window(3601))
+    received: list[float | None] = []
+    state = {"calls": 0}
+
+    def fake_download(url, dest_dir, max_size, cancel_token, window_seconds=None, **kwargs):
+        received.append(window_seconds)
+        state["calls"] += 1
+        if state["calls"] == 1:
+            raise HlsDownloadError("ffmpeg remux failed")
+        return DownloadResult(file_paths=[])
+
+    monkeypatch.setattr(router, "download_hls_window", fake_download)
+    pipeline = _Pipeline(invoke_engine=True)
+    retry_store = RetryStore()
+    client = _make_router(pipeline, retry_store=retry_store)
+    url_event = _UrlEvent("https://live.example/index.m3u8")
+    await _handler(client, events.NewMessage)(url_event)
+    message = url_event.messages[0]
+
+    callback = _CallbackEvent(encode("hlsc", "600"), message)
+    await _handler(client, events.CallbackQuery, b"hlsc:600")(callback)
+
+    retry_ctx = retry_store.get((callback.chat_id, message.id))
+    assert retry_ctx is not None
+    assert retry_ctx.quality == "hls-window:600"
+
+    retry_click = _CallbackEvent(encode("retry", retry_ctx.retry_id), message)
+    await _handler(client, events.CallbackQuery, b"retry")(retry_click)
+
+    assert received == [600.0, 600.0]

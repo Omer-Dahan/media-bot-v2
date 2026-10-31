@@ -110,6 +110,39 @@ def detect_hls(url: str, content_type: str | None = None, body_head: bytes | Non
     return body_head is not None and looks_like_hls_body(body_head)
 
 
+def probe_hls_signal(url: str) -> bool:
+    """Best-effort MIME/body-signature probe for a URL whose path extension
+    alone doesn't already say it's HLS (`is_hls_path`) - a live playlist
+    served with the HLS Content-Type, or with no extension at all, must
+    still be recognised so callers can route it through the live-window
+    preflight instead of an ordinary direct download. Never raises: a
+    network error here just means "not detected", the same as if the probe
+    had never run."""
+    try:
+        with safe_request("HEAD", url, timeout=_REQUEST_TIMEOUT) as response:
+            if response.status_code < 400 and is_hls_content_type(response.headers.get("Content-Type")):
+                return True
+    except Exception as exc:  # noqa: BLE001 - a failed probe just means "not detected"
+        logger.debug("HLS HEAD probe failed for %s: %s; trying a GET probe", url, exc)
+    try:
+        with safe_request("GET", url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
+            if response.status_code >= 400:
+                return False
+            if is_hls_content_type(response.headers.get("Content-Type")):
+                return True
+            head = b""
+            for chunk in response.iter_content(chunk_size=_CHUNK_SIZE):
+                if not chunk:
+                    continue
+                head += chunk
+                if len(head) >= 16:
+                    break
+            return looks_like_hls_body(head)
+    except Exception as exc:  # noqa: BLE001 - a failed probe just means "not detected"
+        logger.debug("HLS GET probe failed for %s: %s", url, exc)
+        return False
+
+
 # ---------------------------------------------------------------------------
 # Playlist model
 # ---------------------------------------------------------------------------

@@ -17,6 +17,7 @@ import requests
 from media_bot_v2.engines import hls
 from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError
 from media_bot_v2.engines.ssrf_guard import safe_request as real_safe_request
+from media_bot_v2.telegram import texts
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -193,6 +194,79 @@ def test_detect_extensionless_hls_by_body_signature():
     assert not hls.detect_hls(
         "https://example.com/opaque", content_type="application/octet-stream", body_head=b"not hls"
     )
+
+
+def _probe_handler():
+    """No ffmpeg/real segments needed - `probe_hls_signal` never reads past
+    the first few bytes of a body or the playlist text itself."""
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_HEAD(self):
+            if self.path == "/mime-only-live":
+                self.send_response(200)
+                self.send_header("Content-Type", "application/vnd.apple.mpegurl")
+                self.end_headers()
+            else:
+                # No HEAD support for any other path - forces probe_hls_signal
+                # to fall through to its GET-based check, same as a server
+                # that simply doesn't implement HEAD.
+                self.send_response(501)
+                self.end_headers()
+
+        def do_GET(self):
+            if self.path == "/mime-only-live":
+                self._text(LIVE_PLAYLIST, "application/vnd.apple.mpegurl")
+            elif self.path == "/signature-only-live":
+                # Generic Content-Type on both HEAD (unsupported, 501) and
+                # GET - only the #EXTM3U body signature identifies this.
+                self._text(LIVE_PLAYLIST, "application/octet-stream")
+            elif self.path == "/ordinary-binary":
+                self._text("not a playlist at all", "application/octet-stream")
+            else:
+                self.send_response(404)
+                self.end_headers()
+
+        def _text(self, text, content_type):
+            body = text.encode("utf-8")
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(body)))
+            self.end_headers()
+            self.wfile.write(body)
+
+        def log_message(self, *args):
+            pass
+
+    return Handler
+
+
+@pytest.fixture
+def probe_server():
+    server = http.server.HTTPServer(("127.0.0.1", 0), _probe_handler())
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}"
+    finally:
+        server.shutdown()
+        thread.join()
+
+
+def test_probe_hls_signal_detects_mime_only_live_playlist(probe_server, bypass_ssrf_guard):
+    """No `.m3u8` extension - only the HLS Content-Type (seen on HEAD)
+    identifies this as HLS (B2.4: a live playlist served this way must
+    still reach the live-window preflight, not an unconfirmed download)."""
+    assert hls.probe_hls_signal(f"{probe_server}/mime-only-live") is True
+
+
+def test_probe_hls_signal_detects_signature_only_live_playlist(probe_server, bypass_ssrf_guard):
+    """No extension and a generic Content-Type on both HEAD and GET - only
+    the buffered `#EXTM3U` body signature identifies this as HLS."""
+    assert hls.probe_hls_signal(f"{probe_server}/signature-only-live") is True
+
+
+def test_probe_hls_signal_rejects_ordinary_binary(probe_server, bypass_ssrf_guard):
+    assert hls.probe_hls_signal(f"{probe_server}/ordinary-binary") is False
 
 
 # ---------------------------------------------------------------------------
@@ -810,3 +884,56 @@ def test_ffmpeg_remux_argv_locks_down_protocols_and_extensions(tmp_path, monkeyp
     assert "ALL" not in cmd
     protocols = set(cmd[cmd.index("-protocol_whitelist") + 1].split(","))
     assert protocols.isdisjoint({"http", "https", "tcp", "pipe"})
+
+
+# Every kind engines/hls.py's HlsUnsupportedError actually raises (grep
+# `raise HlsUnsupportedError("<kind>"`). Kept explicit, not derived from
+# texts.HLS_KIND_TEXT, so this test fails loudly the day a new raise site
+# invents a kind the shared classification table doesn't know about yet.
+_ALL_HLS_KINDS = (
+    "live",
+    "malformed",
+    "sample_aes_unsupported",
+    "drm_unsupported",
+    "https_key_required",
+    "playlist_too_large",
+    "segment_limit_exceeded",
+    "playlist_cycle",
+    "playlist_depth_exceeded",
+    "window_too_short",
+    "window_expired",
+    "audio_rendition_unavailable",
+)
+
+
+def test_every_hls_kind_has_a_distinct_hebrew_text():
+    """B2.2: one kind -> Hebrew text mapping, shared by the direct engine,
+    the live-window engine, the preflight, and the pipeline - a hopeless
+    kind must never fall back to the generic DOWNLOAD_FAILED text, which
+    would hide *why* retrying is pointless."""
+    assert set(_ALL_HLS_KINDS) <= set(texts.HLS_KIND_TEXT)
+    for kind in _ALL_HLS_KINDS:
+        text = texts.hls_failure_text(kind)
+        assert text, f"no text for kind={kind}"
+        assert any("֐" <= ch <= "׿" for ch in text), (
+            f"text for kind={kind} is not Hebrew: {text!r}"
+        )
+        if not texts.hls_retry_offered(kind):
+            assert text != texts.DOWNLOAD_FAILED, (
+                f"hopeless kind={kind} fell back to the generic failure text"
+            )
+
+
+def test_hls_exception_user_text_never_leaks_the_internal_debug_message():
+    """The internal debug message engines/hls.py raises an HlsUnsupportedError
+    with (English, for logs) must never reach the user - only the
+    classified Hebrew text for its `kind` does."""
+    raw_messages = {
+        "sample_aes_unsupported": "SAMPLE-AES is not supported",
+        "drm_unsupported": "DRM-protected streams are not supported",
+        "malformed": "missing #EXTM3U header",
+    }
+    for kind, debug_message in raw_messages.items():
+        raw_exc = hls.HlsUnsupportedError(kind, debug_message)
+        assert str(raw_exc) == debug_message  # sanity: matches what hls.py itself raises
+        assert debug_message not in texts.hls_failure_text(kind)

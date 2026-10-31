@@ -17,6 +17,7 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+import requests
 from sqlalchemy.orm import sessionmaker
 from telethon import Button, TelegramClient, events
 from telethon.errors import MessageNotModifiedError, RPCError
@@ -36,7 +37,7 @@ from media_bot_v2.engines.base import (
     DownloadTooLargeError,
     UnsupportedUrlError,
 )
-from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine
+from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine, classify_http_error
 from media_bot_v2.engines.facebook import (
     FacebookDownloadError,
     FacebookEngine,
@@ -49,6 +50,7 @@ from media_bot_v2.engines.hls import (
     HlsWindowInfo,
     analyze_hls_window,
     download_hls_window,
+    probe_hls_signal,
 )
 from media_bot_v2.engines.instagram import (
     InstagramDownloadError,
@@ -56,6 +58,7 @@ from media_bot_v2.engines.instagram import (
     extract_instagram_id,
     matches_instagram_url,
 )
+from media_bot_v2.engines.ssrf_guard import SSRFBlockedError
 from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import (
     YouTubeDownloadError,
@@ -102,40 +105,20 @@ MENU_LOOKUP_TIMEOUT_SECONDS = 8.0
 MENU_STATUS_TIMEOUT_SECONDS = 12.0
 _MARKDOWN_SPECIALS = str.maketrans({"*": " ", "_": " ", "`": "'", "[": "(", "]": ")"})
 
-_HLS_RETRY_POLICY = {
-    "live": False,
-    "window_expired": False,
-    "window_too_short": False,
-    "drm": False,
-    "drm_unsupported": False,
-    "malformed": False,
-    "sample_aes_unsupported": False,
-    "https_key_required": False,
-    "size_cap": False,
-    "transport": True,
-    "audio_rendition_unavailable": True,
-}
-_HLS_KIND_TEXT = {
-    "live": texts.HLS_LIVE_UNSUPPORTED,
-    "window_expired": texts.HLS_WINDOW_EXPIRED,
-    "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
-    "drm": texts.HLS_DRM_UNSUPPORTED,
-    "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
-    "malformed": texts.HLS_MALFORMED,
-    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_UNSUPPORTED,
-    "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
-    "size_cap": texts.HLS_SIZE_CAP,
-    "audio_rendition_unavailable": texts.HLS_AUDIO_RENDITION_UNAVAILABLE,
-}
-_HLS_FAILURE_TEXT_KINDS = {message: kind for kind, message in _HLS_KIND_TEXT.items()}
+# Single source of truth for kind -> text -> retryable lives in
+# telegram/texts.py (HLS_KIND_TEXT / HLS_KIND_RETRYABLE), shared with
+# engines/direct.py and pipeline.py. `_HLS_FAILURE_TEXT_KINDS` is the reverse
+# lookup `get_failure_buttons` needs: given the rendered text on a failed
+# progress message, which kind (if any) produced it.
+_HLS_FAILURE_TEXT_KINDS = {message: kind for kind, message in texts.HLS_KIND_TEXT.items()}
 
 
 def _hls_retry_is_offered(kind: str) -> bool:
-    return _HLS_RETRY_POLICY.get(kind, True)
+    return texts.hls_retry_offered(kind)
 
 
 def _hls_failure_text(kind: str) -> str:
-    return _HLS_KIND_TEXT.get(kind, texts.DOWNLOAD_FAILED)
+    return texts.hls_failure_text(kind)
 
 
 def _host_matches(url: str, hosts: tuple[str, ...]) -> bool:
@@ -217,11 +200,19 @@ class _HlsWindowEngine(BaseEngine):
         max_download_size: int,
         segment_workers: int,
         max_gap_ratio: float,
+        max_height: int = 720,
+        max_playlist_depth: int = 3,
+        max_playlist_bytes: int = 4 * 1024 * 1024,
+        max_segments: int = 10_000,
     ) -> None:
         self._window_seconds = window_seconds
         self._max_download_size = max_download_size
         self._segment_workers = segment_workers
         self._max_gap_ratio = max_gap_ratio
+        self._max_height = max_height
+        self._max_playlist_depth = max_playlist_depth
+        self._max_playlist_bytes = max_playlist_bytes
+        self._max_segments = max_segments
 
     def matches(self, url: str) -> bool:
         return True
@@ -243,11 +234,28 @@ class _HlsWindowEngine(BaseEngine):
                 self._window_seconds,
                 segment_workers=self._segment_workers,
                 max_gap_ratio=self._max_gap_ratio,
+                max_height=self._max_height,
+                max_playlist_depth=self._max_playlist_depth,
+                max_playlist_bytes=self._max_playlist_bytes,
+                max_segments=self._max_segments,
             )
         except HlsUnsupportedError as exc:
             raise HlsUnsupportedError(exc.kind, _hls_failure_text(exc.kind)) from exc
         except DownloadTooLargeError as exc:
             raise DownloadTooLargeError(_hls_failure_text("size_cap")) from exc
+        except HlsDownloadError as exc:
+            logger.warning("HLS live-window transient download failure for %s: %s", url, exc)
+            wrapped = HlsDownloadError(texts.DOWNLOAD_FAILED)
+            wrapped.logged_by_engine = True
+            raise wrapped from exc
+        except SSRFBlockedError as exc:
+            logger.warning("Blocked SSRF attempt in HLS live window for %s: %s", url, exc)
+            raise UnsupportedUrlError(texts.UNSUPPORTED_URL) from exc
+        except requests.HTTPError as exc:
+            classified = classify_http_error(exc, url)
+            if classified is exc:
+                raise
+            raise classified from exc
 
 
 def _format_duration(seconds: float) -> str:
@@ -379,6 +387,10 @@ def register_handlers(
     hls_max_gap_ratio: float = 0.02,
     hls_window_sample_requests: int = 6,
     hls_confirm_ttl_seconds: int = 600,
+    hls_max_height: int = 720,
+    hls_max_playlist_depth: int = 3,
+    hls_max_playlist_bytes: int = 4 * 1024 * 1024,
+    hls_max_segments: int = 10_000,
     limiter: ConcurrencyLimiter | None = None,
     force_ipv4: bool = False,
     youtube_cookies_file: str | None = None,
@@ -426,6 +438,10 @@ def register_handlers(
         max_download_size=max_download_size,
         hls_segment_workers=hls_segment_workers,
         hls_max_gap_ratio=hls_max_gap_ratio,
+        hls_max_height=hls_max_height,
+        hls_max_playlist_depth=hls_max_playlist_depth,
+        hls_max_playlist_bytes=hls_max_playlist_bytes,
+        hls_max_segments=hls_max_segments,
     )
     if limiter is None:
         limiter = ConcurrencyLimiter(global_limit=100, per_user_limit=2)
@@ -625,6 +641,10 @@ def register_handlers(
                             max_download_size=max_download_size,
                             segment_workers=hls_segment_workers,
                             max_gap_ratio=hls_max_gap_ratio,
+                            max_height=hls_max_height,
+                            max_playlist_depth=hls_max_playlist_depth,
+                            max_playlist_bytes=hls_max_playlist_bytes,
+                            max_segments=hls_max_segments,
                         )
                     else:
                         engine = DirectEngine(
@@ -632,6 +652,10 @@ def register_handlers(
                             progress=progress,
                             hls_segment_workers=hls_segment_workers,
                             hls_max_gap_ratio=hls_max_gap_ratio,
+                            hls_max_height=hls_max_height,
+                            hls_max_playlist_depth=hls_max_playlist_depth,
+                            hls_max_playlist_bytes=hls_max_playlist_bytes,
+                            hls_max_segments=hls_max_segments,
                         )
                     # A live-window DVR clip is never reusable - a second
                     # request for the same URL/range must always re-download,
@@ -971,19 +995,21 @@ def register_handlers(
         message = await call_with_flood_retry(
             event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
         )
+        job_quality = f"hls-window:{choice}"
         progress = make_progress(
             message,
             user_id=pending.owner_id,
             chat_id=event.chat_id,
             url=pending.url,
             platform="direct",
+            quality=job_quality,
         )
         await _execute_download(
             job_user_id=pending.owner_id,
             job_chat_id=event.chat_id,
             job_url=pending.url,
             job_platform="direct",
-            job_quality=f"hls-window:{choice}",
+            job_quality=job_quality,
             message=message,
             progress=progress,
         )
@@ -1239,7 +1265,18 @@ def register_handlers(
                     )
                     return
 
+                # Extension alone misses a live playlist served with the HLS
+                # MIME type, or with no extension at all - `probe_hls_signal`
+                # catches those via a cheap HEAD/body-signature check before
+                # falling through to an unconfirmed direct download. A
+                # finite VOD playlist still reaches here (whatever its
+                # extension), but `analyze_hls_window` below rejects it with
+                # kind="malformed" ("not a live window"), which is handled by
+                # falling straight through to the ordinary direct-download
+                # path with no confirmation prompt.
                 is_hls_candidate = urlparse(url).path.lower().endswith(".m3u8")
+                if not is_hls_candidate:
+                    is_hls_candidate = await run_in_thread(probe_hls_signal, url)
                 if is_hls_candidate:
                     _sweep_expired_hls_confirmations()
                     try:
@@ -1247,19 +1284,18 @@ def register_handlers(
                             analyze_hls_window,
                             url,
                             sample_requests=hls_window_sample_requests,
+                            max_height=hls_max_height,
+                            max_playlist_depth=hls_max_playlist_depth,
+                            max_playlist_bytes=hls_max_playlist_bytes,
+                            max_segments=hls_max_segments,
                         )
                     except HlsUnsupportedError as exc:
                         if exc.kind == "window_too_short":
                             await call_with_flood_retry(event.respond, texts.HLS_WINDOW_TOO_SHORT)
                             return
                         if exc.kind != "malformed":
-                            preflight_errors = {
-                                "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
-                                "sample_aes_unsupported": texts.HLS_DRM_UNSUPPORTED,
-                                "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
-                            }
                             await call_with_flood_retry(
-                                event.respond, preflight_errors.get(exc.kind, str(exc))
+                                event.respond, texts.hls_failure_text(exc.kind)
                             )
                             return
                     else:

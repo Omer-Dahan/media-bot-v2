@@ -710,7 +710,18 @@ class DownloadPipeline:
             # generic line drops to DEBUG when the engine already reported it.
             level = logging.DEBUG if getattr(exc, "logged_by_engine", False) else logging.WARNING
             logger.log(level, "Download pipeline domain error for user=%s url=%s: %s", user_id, url, exc)
-            await _update_progress(progress, str(exc), is_terminal=True)
+            # A defensive fallback, not the primary classification: engines
+            # are expected to already translate an HlsUnsupportedError's
+            # kind into Hebrew before it reaches here (engines/direct.py,
+            # telegram/router.py's _HlsWindowEngine) - this just guarantees
+            # the single kind -> text mapping in telegram/texts.py wins even
+            # if some future raise site forgets to wrap it.
+            user_text = (
+                texts.hls_failure_text(exc.kind)
+                if isinstance(exc, HlsUnsupportedError)
+                else str(exc)
+            )
+            await _update_progress(progress, user_text, is_terminal=True)
             raise
         except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException):
             raise

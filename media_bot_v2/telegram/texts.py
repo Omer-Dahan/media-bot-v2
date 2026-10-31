@@ -210,6 +210,21 @@ HLS_AUDIO_RENDITION_UNAVAILABLE = (
     "❌ מה קרה: לא ניתן היה להשיג את רצועת השמע של השידור החי.\n"
     "➡️ מה לעשות: נסה שוב מאוחר יותר."
 )
+HLS_PLAYLIST_CYCLE = (
+    "❌ מה קרה: הפלייליסט מצביע על עצמו במעגל אינסופי.\n"
+    "➡️ מה לעשות: נסה קישור אחר - זה כנראה תקול בצד השרת."
+)
+HLS_PLAYLIST_DEPTH_EXCEEDED = (
+    "❌ מה קרה: הפלייליסט מקנן יותר מדי שכבות זו בתוך זו.\n"
+    "➡️ מה לעשות: נסה קישור ישיר יותר לפלייליסט הווידאו."
+)
+HLS_PLAYLIST_TOO_LARGE = (
+    "❌ מה קרה: קובץ הפלייליסט גדול מהמותר.\n➡️ מה לעשות: נסה קישור אחר."
+)
+HLS_SEGMENT_LIMIT_EXCEEDED = (
+    "❌ מה קרה: לפלייליסט יש יותר מקטעים ממה שהבוט תומך בו.\n"
+    "➡️ מה לעשות: נסה חלון קצר יותר או קישור אחר."
+)
 HLS_WINDOW_GAPS_NOTICE = "⚠️ נמסרו {delivered} מתוך {requested} ({gap_count} מקטעים חסרים)"
 HLS_CONFIRM_PROMPT = (
     "🔴 זוהה שידור חי\n"
@@ -226,6 +241,61 @@ HLS_CONFIRM_NOT_OWNER = "רק מי ששלח את הקישור יכול לבחו�
 HLS_CONFIRM_EXPIRED_TOAST = "פג תוקף בחירת הטווח. שלח את הקישור שוב."
 HLS_CONFIRM_EXPIRED = "⏰ פג תוקף הקישור לשידור החי.\n➡️ שלח את הקישור שוב לבחירת טווח חדש."
 HLS_CONFIRM_CANCELLED = "❌ ההורדה בוטלה."
+
+# Single source of truth for an HLS failure `kind`
+# (engines.hls.HlsUnsupportedError.kind) -> the Hebrew text the user sees and
+# whether a retry button is offered. Used by the direct engine, the
+# live-window engine, the live-playlist preflight, and the pipeline's
+# domain-error handler, so a kind is classified exactly once instead of each
+# site keeping (and risking drifting from) its own copy.
+HLS_KIND_TEXT: dict[str, str] = {
+    "live": HLS_LIVE_UNSUPPORTED,
+    "malformed": HLS_MALFORMED,
+    "drm": HLS_DRM_UNSUPPORTED,
+    "drm_unsupported": HLS_DRM_UNSUPPORTED,
+    "sample_aes_unsupported": HLS_SAMPLE_AES_UNSUPPORTED,
+    "encryption_unsupported": HLS_DRM_UNSUPPORTED,
+    "https_key_required": HLS_HTTPS_KEY_REQUIRED,
+    "window_expired": HLS_WINDOW_EXPIRED,
+    "window_too_short": HLS_WINDOW_TOO_SHORT,
+    "size_cap": HLS_SIZE_CAP,
+    "audio_rendition_unavailable": HLS_AUDIO_RENDITION_UNAVAILABLE,
+    "playlist_cycle": HLS_PLAYLIST_CYCLE,
+    "playlist_depth_exceeded": HLS_PLAYLIST_DEPTH_EXCEEDED,
+    "playlist_too_large": HLS_PLAYLIST_TOO_LARGE,
+    "segment_limit_exceeded": HLS_SEGMENT_LIMIT_EXCEEDED,
+}
+
+# Kinds absent here default to retryable (True) - every transient
+# transport-level failure (timeouts, 5xx, connection resets) that isn't a
+# structural/content problem with the input itself.
+HLS_KIND_RETRYABLE: dict[str, bool] = {
+    "live": False,
+    "malformed": False,
+    "drm": False,
+    "drm_unsupported": False,
+    "sample_aes_unsupported": False,
+    "encryption_unsupported": False,
+    "https_key_required": False,
+    "window_expired": False,
+    "window_too_short": False,
+    "size_cap": False,
+    "playlist_cycle": False,
+    "playlist_depth_exceeded": False,
+    "playlist_too_large": False,
+    "segment_limit_exceeded": False,
+}
+
+
+def hls_failure_text(kind: str) -> str:
+    """The Hebrew text for an HLS failure `kind` - DOWNLOAD_FAILED for any
+    kind not in HLS_KIND_TEXT, never the kind string or exception detail."""
+    return HLS_KIND_TEXT.get(kind, DOWNLOAD_FAILED)
+
+
+def hls_retry_offered(kind: str) -> bool:
+    return HLS_KIND_RETRYABLE.get(kind, True)
+
 
 CANCEL_BUTTON = "❌ ביטול"
 REQUEST_CANCELLED = "❌ הבקשה בוטלה."
@@ -379,6 +449,13 @@ HLS_DRM_UNSUPPORTED_VARIANTS = (
 )
 HLS_WINDOW_EXPIRED_VARIANTS = (HLS_WINDOW_EXPIRED,)
 HLS_WINDOW_TOO_SHORT_VARIANTS = (HLS_WINDOW_TOO_SHORT,)
+HLS_SAMPLE_AES_UNSUPPORTED_VARIANTS = (HLS_SAMPLE_AES_UNSUPPORTED,)
+HLS_HTTPS_KEY_REQUIRED_VARIANTS = (HLS_HTTPS_KEY_REQUIRED,)
+HLS_SIZE_CAP_VARIANTS = (HLS_SIZE_CAP,)
+HLS_PLAYLIST_CYCLE_VARIANTS = (HLS_PLAYLIST_CYCLE,)
+HLS_PLAYLIST_DEPTH_EXCEEDED_VARIANTS = (HLS_PLAYLIST_DEPTH_EXCEEDED,)
+HLS_PLAYLIST_TOO_LARGE_VARIANTS = (HLS_PLAYLIST_TOO_LARGE,)
+HLS_SEGMENT_LIMIT_EXCEEDED_VARIANTS = (HLS_SEGMENT_LIMIT_EXCEEDED,)
 
 # Order matters only in that `resolve` scans by descending key length, so a
 # longer canonical string is never shadowed by a shorter one that happens to
@@ -404,6 +481,13 @@ STAGE_VARIANTS: dict[str, tuple[str, ...]] = {
     HLS_DRM_UNSUPPORTED: HLS_DRM_UNSUPPORTED_VARIANTS,
     HLS_WINDOW_EXPIRED: HLS_WINDOW_EXPIRED_VARIANTS,
     HLS_WINDOW_TOO_SHORT: HLS_WINDOW_TOO_SHORT_VARIANTS,
+    HLS_SAMPLE_AES_UNSUPPORTED: HLS_SAMPLE_AES_UNSUPPORTED_VARIANTS,
+    HLS_HTTPS_KEY_REQUIRED: HLS_HTTPS_KEY_REQUIRED_VARIANTS,
+    HLS_SIZE_CAP: HLS_SIZE_CAP_VARIANTS,
+    HLS_PLAYLIST_CYCLE: HLS_PLAYLIST_CYCLE_VARIANTS,
+    HLS_PLAYLIST_DEPTH_EXCEEDED: HLS_PLAYLIST_DEPTH_EXCEEDED_VARIANTS,
+    HLS_PLAYLIST_TOO_LARGE: HLS_PLAYLIST_TOO_LARGE_VARIANTS,
+    HLS_SEGMENT_LIMIT_EXCEEDED: HLS_SEGMENT_LIMIT_EXCEEDED_VARIANTS,
 }
 
 _SORTED_CANONICALS = sorted(STAGE_VARIANTS, key=len, reverse=True)
@@ -423,6 +507,13 @@ ALL_HOPELESS_VARIANTS: tuple[str, ...] = (
     + HLS_DRM_UNSUPPORTED_VARIANTS
     + HLS_WINDOW_EXPIRED_VARIANTS
     + HLS_WINDOW_TOO_SHORT_VARIANTS
+    + HLS_SAMPLE_AES_UNSUPPORTED_VARIANTS
+    + HLS_HTTPS_KEY_REQUIRED_VARIANTS
+    + HLS_SIZE_CAP_VARIANTS
+    + HLS_PLAYLIST_CYCLE_VARIANTS
+    + HLS_PLAYLIST_DEPTH_EXCEEDED_VARIANTS
+    + HLS_PLAYLIST_TOO_LARGE_VARIANTS
+    + HLS_SEGMENT_LIMIT_EXCEEDED_VARIANTS
 )
 
 

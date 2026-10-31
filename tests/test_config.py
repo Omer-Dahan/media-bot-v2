@@ -1,8 +1,11 @@
 """Config loading from environment variables, matching the old bot's names."""
 
+import inspect
+
 import pytest
 from pydantic import ValidationError
 
+from media_bot_v2 import bootstrap
 from media_bot_v2.config import Settings
 
 
@@ -345,3 +348,16 @@ def test_max_download_size_below_split_threshold_rejected_at_startup(monkeypatch
     with pytest.raises(ValidationError) as excinfo:
         Settings(_env_file=None)
     assert "MAX_DOWNLOAD_SIZE" in str(excinfo.value)
+
+
+def test_every_hls_setting_is_wired_into_register_handlers():
+    """B2.5: every `hls_*` Settings field must actually reach
+    telegram.router.register_handlers() from bootstrap.main() - a setting
+    declared in config.py (and documented in .env.example/README.md) that
+    nothing ever reads is worse than no setting at all, since changing it
+    silently does nothing."""
+    hls_fields = [name for name in Settings.model_fields if name.startswith("hls_")]
+    assert hls_fields, "no hls_* fields found on Settings - did the field prefix change?"
+    source = inspect.getsource(bootstrap)
+    missing = [name for name in hls_fields if f"settings.{name}" not in source]
+    assert not missing, f"hls_* settings declared but never wired into bootstrap.py: {missing}"

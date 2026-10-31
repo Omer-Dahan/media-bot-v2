@@ -90,23 +90,6 @@ class DirectDownloadError(Exception):
     transient (429/5xx) direct-link failure - still worth a retry."""
 
 
-# Maps engines.hls.HlsUnsupportedError.kind to the Hebrew text the user sees.
-# AES-128 streams are supported; DRM, SAMPLE-AES, and insecure key delivery
-# retain distinct classifications.
-_HLS_KIND_TEXT: dict[str, str] = {
-    "live": texts.HLS_LIVE_UNSUPPORTED,
-    "malformed": texts.HLS_MALFORMED,
-    "drm": texts.HLS_DRM_UNSUPPORTED,
-    "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
-    "sample_aes_unsupported": texts.HLS_SAMPLE_AES_UNSUPPORTED,
-    "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
-    "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
-    "window_expired": texts.HLS_WINDOW_EXPIRED,
-    "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
-    "size_cap": texts.HLS_SIZE_CAP,
-}
-
-
 def _download_hls(
     url: str,
     dest_dir: Path,
@@ -114,11 +97,18 @@ def _download_hls(
     cancel_token: CancellationToken | None,
     segment_workers: int = 8,
     max_gap_ratio: float = 0.02,
+    max_height: int = 720,
+    max_playlist_depth: int = 3,
+    max_playlist_bytes: int = 4 * 1024 * 1024,
+    max_segments: int = 10_000,
 ) -> DownloadResult:
     """Runs the guarded HLS fetch/remux and translates its internal
-    kind/debug-message classification into the Hebrew text the user sees,
-    while keeping HlsUnsupportedError's UnsupportedUrlError ancestry so
-    pipeline.py/retry.py's existing hopeless-classification keeps working."""
+    kind/debug-message classification into the Hebrew text the user sees
+    (media_bot_v2.telegram.texts.hls_failure_text - the single kind -> text
+    mapping shared with the live-window engine, the preflight, and the
+    pipeline's domain-error handler), while keeping HlsUnsupportedError's
+    UnsupportedUrlError ancestry so pipeline.py/retry.py's existing
+    hopeless-classification keeps working."""
     try:
         return download_hls(
             url,
@@ -127,20 +117,22 @@ def _download_hls(
             cancel_token=cancel_token,
             segment_workers=segment_workers,
             max_gap_ratio=max_gap_ratio,
+            max_height=max_height,
+            max_playlist_depth=max_playlist_depth,
+            max_playlist_bytes=max_playlist_bytes,
+            max_segments=max_segments,
         )
     except HlsUnsupportedError as exc:
         logger.warning("HLS input unsupported (%s) for %s: %s", exc.kind, url, exc)
-        raise _mark_logged(
-            HlsUnsupportedError(exc.kind, _HLS_KIND_TEXT.get(exc.kind, texts.UNSUPPORTED_URL))
-        ) from exc
+        raise _mark_logged(HlsUnsupportedError(exc.kind, texts.hls_failure_text(exc.kind))) from exc
     except DownloadTooLargeError as exc:
-        raise DownloadTooLargeError(_HLS_KIND_TEXT["size_cap"]) from exc
+        raise DownloadTooLargeError(texts.hls_failure_text("size_cap")) from exc
     except HlsDownloadError as exc:
         logger.warning("HLS transient download failure for %s: %s", url, exc)
         raise _mark_logged(HlsDownloadError(texts.DOWNLOAD_FAILED)) from exc
 
 
-def _classify_http_error(exc: requests.HTTPError, url: str) -> Exception:
+def classify_http_error(exc: requests.HTTPError, url: str) -> Exception:
     response = exc.response
     status = response.status_code if response is not None else None
     if status in _REFUSED_STATUS_CODES:
@@ -211,11 +203,19 @@ class DirectEngine(BaseEngine):
         progress=None,
         hls_segment_workers: int = 8,
         hls_max_gap_ratio: float = 0.02,
+        hls_max_height: int = 720,
+        hls_max_playlist_depth: int = 3,
+        hls_max_playlist_bytes: int = 4 * 1024 * 1024,
+        hls_max_segments: int = 10_000,
     ) -> None:
         self._max_download_size = max_download_size
         self._progress = progress
         self._hls_segment_workers = hls_segment_workers
         self._hls_max_gap_ratio = hls_max_gap_ratio
+        self._hls_max_height = hls_max_height
+        self._hls_max_playlist_depth = hls_max_playlist_depth
+        self._hls_max_playlist_bytes = hls_max_playlist_bytes
+        self._hls_max_segments = hls_max_segments
 
     def matches(self, url: str) -> bool:
         if not _URL_RE.match(url):
@@ -250,12 +250,16 @@ class DirectEngine(BaseEngine):
                 loop,
                 self._hls_segment_workers,
                 self._hls_max_gap_ratio,
+                self._hls_max_height,
+                self._hls_max_playlist_depth,
+                self._hls_max_playlist_bytes,
+                self._hls_max_segments,
             )
         except SSRFBlockedError as exc:
             logger.warning("Blocked SSRF attempt for %s: %s", url, exc)
             raise UnsupportedUrlError(texts.UNSUPPORTED_URL) from exc
         except requests.HTTPError as exc:
-            classified = _classify_http_error(exc, url)
+            classified = classify_http_error(exc, url)
             if classified is exc:
                 raise
             raise classified from exc
@@ -327,6 +331,10 @@ def _preflight_and_stream_to_file(
     loop=None,
     hls_segment_workers: int = 8,
     hls_max_gap_ratio: float = 0.02,
+    hls_max_height: int = 720,
+    hls_max_playlist_depth: int = 3,
+    hls_max_playlist_bytes: int = 4 * 1024 * 1024,
+    hls_max_segments: int = 10_000,
 ) -> DownloadResult:
     head_content_type: str | None = None
     try:
@@ -345,7 +353,16 @@ def _preflight_and_stream_to_file(
     # the HLS module without ever opening a direct-download destination file.
     if detect_hls(url, content_type=head_content_type):
         return _download_hls(
-            url, dest_dir, max_size, cancel_token, hls_segment_workers, hls_max_gap_ratio
+            url,
+            dest_dir,
+            max_size,
+            cancel_token,
+            hls_segment_workers,
+            hls_max_gap_ratio,
+            hls_max_height,
+            hls_max_playlist_depth,
+            hls_max_playlist_bytes,
+            hls_max_segments,
         )
 
     return _stream_to_file(
@@ -357,6 +374,10 @@ def _preflight_and_stream_to_file(
         loop,
         hls_segment_workers,
         hls_max_gap_ratio,
+        hls_max_height,
+        hls_max_playlist_depth,
+        hls_max_playlist_bytes,
+        hls_max_segments,
     )
 
 
@@ -369,6 +390,10 @@ def _stream_to_file(
     loop=None,
     hls_segment_workers: int = 8,
     hls_max_gap_ratio: float = 0.02,
+    hls_max_height: int = 720,
+    hls_max_playlist_depth: int = 3,
+    hls_max_playlist_bytes: int = 4 * 1024 * 1024,
+    hls_max_segments: int = 10_000,
 ) -> DownloadResult:
     with safe_request("GET", url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
@@ -377,7 +402,16 @@ def _stream_to_file(
         if detect_hls(url, content_type=response.headers.get("Content-Type")):
             response.close()
             return _download_hls(
-                url, dest_dir, max_size, cancel_token, hls_segment_workers, hls_max_gap_ratio
+                url,
+                dest_dir,
+                max_size,
+                cancel_token,
+                hls_segment_workers,
+                hls_max_gap_ratio,
+                hls_max_height,
+                hls_max_playlist_depth,
+                hls_max_playlist_bytes,
+                hls_max_segments,
             )
         reject_if_not_media_content_type(response)
         _reject_if_declared_size_too_large(response, url, max_size)
@@ -437,6 +471,10 @@ def _stream_to_file(
                                 cancel_token,
                                 hls_segment_workers,
                                 hls_max_gap_ratio,
+                                hls_max_height,
+                                hls_max_playlist_depth,
+                                hls_max_playlist_bytes,
+                                hls_max_segments,
                             )
                         reject_if_not_media_body(head)
                         if max_size is not None and total > max_size:
@@ -482,6 +520,10 @@ def _stream_to_file(
                         cancel_token,
                         hls_segment_workers,
                         hls_max_gap_ratio,
+                        hls_max_height,
+                        hls_max_playlist_depth,
+                        hls_max_playlist_bytes,
+                        hls_max_segments,
                     )
                 if head:
                     reject_if_not_media_body(head)
