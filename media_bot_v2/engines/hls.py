@@ -468,13 +468,14 @@ def _resolve_media_playlist(
     max_playlist_bytes: int = _DEFAULT_MAX_PLAYLIST_BYTES,
     max_segments: int = _DEFAULT_MAX_SEGMENTS,
     counter: _ByteCounter | None = None,
-) -> tuple[MediaPlaylist, str, MasterPlaylist | None, str | None]:
+) -> tuple[MediaPlaylist, str, MasterPlaylist | None, str | None, str | None]:
     """Follows a playlist URL - which may itself be a master - down to its
     selected media playlist, guard-fetching and resolving each hop against
     the previous response's final (post-redirect) URL. Returns the media
     playlist, its final URL, the outermost master (if any, for audio-group
     lookup), and the selected variant's AUDIO group id (if any)."""
     outer_master: MasterPlaylist | None = None
+    outer_master_url: str | None = None
     audio_group: str | None = None
     visited: set[str] = set()
     current_url = url
@@ -490,9 +491,10 @@ def _resolve_media_playlist(
             response.close()
         if isinstance(doc, MediaPlaylist):
             _validate_playlist_size(doc, max_segments)
-            return doc, final_url, outer_master, audio_group
+            return doc, final_url, outer_master, audio_group, outer_master_url
         if outer_master is None:
             outer_master = doc
+            outer_master_url = final_url
             variant = select_variant(doc, max_height)
             audio_group = variant.audio_group
         else:
@@ -556,6 +558,7 @@ def analyze_hls_window(
         raise HlsUnsupportedError("malformed", "playlist is finite, not a live window")
     for segment in media.segments:
         _check_key_support(segment.key)
+    _validate_key_urls(media.segments, media_url)
     if not media.segments:
         raise HlsUnsupportedError("window_too_short")
 
@@ -682,11 +685,13 @@ def _fetch_keys(
             continue
         if cancel_token is not None and cancel_token.is_set():
             raise HlsDownloadError("cancelled")
-        key_name = f"key{len(local_names):04d}.bin"
+        key_name = f"key{len(local_names):04d}.key"
         key_path = track_dir / key_name
         part_path = key_path.with_name(key_path.name + ".part")
         response = _guarded_get(key_url, stream=True)
         try:
+            if urlparse(response.url).scheme.lower() != "https":
+                raise HlsUnsupportedError("https_key_required")
             key_bytes = bytearray()
             for chunk in response.iter_content(chunk_size=17):
                 if cancel_token is not None and cancel_token.is_set():
@@ -709,6 +714,15 @@ def _fetch_keys(
         created_files.append(key_path)
         local_names[key_url] = key_name
     return local_names
+
+
+def _validate_key_urls(segments: list[Segment], base_url: str) -> None:
+    for segment in segments:
+        key = segment.key
+        if key is None:
+            continue
+        if urlparse(urljoin(base_url, key.uri or "")).scheme.lower() != "https":
+            raise HlsUnsupportedError("https_key_required")
 
 
 def _segment_extension(uri: str) -> str:
@@ -797,7 +811,9 @@ def _materialize_media_playlist(
 
 
 def _run_process(cmd: list[str], timeout: float, cancel_token: CancellationToken | None) -> None:
-    process = subprocess.Popen(cmd, stdout=subprocess.PIPE, stderr=subprocess.PIPE)
+    process = subprocess.Popen(
+        cmd, stdin=subprocess.DEVNULL, stdout=subprocess.PIPE, stderr=subprocess.PIPE
+    )
     if cancel_token is not None:
         cancel_token.on_cancel(process.terminate)
     try:
@@ -828,16 +844,20 @@ def _run_ffmpeg_remux(
         encrypted = encrypted or "#EXT-X-KEY:METHOD=AES-128" in audio_playlist.read_text(
             encoding="utf-8"
         )
-    protocols = "file,pipe,crypto" if encrypted else "file,pipe"
+    protocols = "file,crypto" if encrypted else "file"
+    allowed_extensions = "ts,m4s,mp4,aac,m4a,key"
     cmd = [
         "ffmpeg",
         "-y",
+        "-nostdin",
         "-f",
         "hls",
         "-protocol_whitelist",
         protocols,
+        "-extension_picky",
+        "1",
         "-allowed_extensions",
-        "ALL",
+        allowed_extensions,
         "-i",
         str(video_playlist),
     ]
@@ -847,8 +867,10 @@ def _run_ffmpeg_remux(
             "hls",
             "-protocol_whitelist",
             protocols,
+            "-extension_picky",
+            "1",
             "-allowed_extensions",
-            "ALL",
+            allowed_extensions,
             "-i",
             str(audio_playlist),
         ]
@@ -1115,6 +1137,7 @@ def download_hls_window(
             raise HlsUnsupportedError("malformed", "playlist is not live")
         for segment in media.segments:
             _check_key_support(segment.key)
+        _validate_key_urls(media.segments, media_url)
         selected = _select_window(media.segments, window_seconds)
         if not selected:
             raise HlsUnsupportedError("window_too_short")
@@ -1259,7 +1282,7 @@ def download_hls(
     output_path = dest_dir / "hls-download.mp4"
     output_part = dest_dir / "hls-download.part.mp4"
     try:
-        media, media_url, outer_master, audio_group = _resolve_media_playlist(
+        media, media_url, outer_master, audio_group, outer_master_url = _resolve_media_playlist(
             url, max_height, max_playlist_depth, max_playlist_bytes, max_segments, counter
         )
         if not media.has_endlist:
@@ -1286,8 +1309,8 @@ def download_hls(
         if outer_master is not None and audio_group:
             rendition = select_audio_rendition(outer_master, audio_group)
             if rendition is not None and rendition.get("URI"):
-                audio_abs_url = urljoin(media_url, rendition["URI"])
-                audio_media, audio_final_url, _, _ = _resolve_media_playlist(
+                audio_abs_url = urljoin(outer_master_url or url, rendition["URI"])
+                audio_media, audio_final_url, _, _, _ = _resolve_media_playlist(
                     audio_abs_url,
                     max_height,
                     max_playlist_depth,

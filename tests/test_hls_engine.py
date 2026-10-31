@@ -380,6 +380,19 @@ def _encrypt_segment(path, clear: bytes, key: bytes, iv: bytes) -> bytes:
     return path.read_bytes()
 
 
+def _decoded_video_checksum(path) -> str:
+    """MD5 of the fully decoded video stream - distinguishes a bit-exact
+    decrypt from one where only codec/duration happen to look right (e.g. a
+    wrong AES IV only corrupts part of a segment under CBC)."""
+    result = subprocess.run(
+        [FFMPEG, "-v", "error", "-i", str(path), "-map", "0:v:0", "-f", "md5", "-"],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    return result.stdout.strip()
+
+
 def test_aes128_key_rotation_explicit_and_sequence_iv(
     ts_segments, tmp_path, monkeypatch, bypass_ssrf_guard
 ):
@@ -461,6 +474,13 @@ def test_aes128_key_rotation_explicit_and_sequence_iv(
     assert "codec_name=aac" in probe.stdout
     assert float(next(x.split("=")[1] for x in probe.stdout.splitlines() if x.startswith("duration="))) > 1.5
     assert {path.name for path in (tmp_path / "out").iterdir()} == {"hls-download.mp4"}
+
+    # Codec/duration alone pass even with a wrong derived IV (CBC only
+    # corrupts the first block of the affected segment); decode both
+    # streams and compare bit-exactly against the original clear source.
+    clear_concat = tmp_path / "clear_concat.ts"
+    clear_concat.write_bytes(ts_segments[0] + ts_segments[1])
+    assert _decoded_video_checksum(result.file_paths[0]) == _decoded_video_checksum(clear_concat)
 
 
 def test_http_key_is_refused_without_fetch(tmp_path, monkeypatch):
@@ -615,3 +635,178 @@ def test_cancel_during_key_fetch_leaves_task_directory_empty(tmp_path, monkeypat
     with pytest.raises(hls.HlsDownloadError, match="cancelled"):
         hls.download_hls(playlist_url, tmp_path, cancel_token=token)
     assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# Audio rendition URL resolution (must use the outer master's URL, not the
+# selected video variant's own playlist URL)
+# ---------------------------------------------------------------------------
+
+
+def test_audio_rendition_resolves_against_master_url_not_variant_url(
+    ts_segments, tmp_path, bypass_ssrf_guard
+):
+    """The AUDIO rendition's URI is relative to the outermost master
+    playlist, not to the selected video variant's own playlist URL - the two
+    live in different directories here, so resolving against the wrong base
+    404s instead of reaching the real audio playlist."""
+    seg0, seg1 = ts_segments
+    master = (
+        "#EXTM3U\n"
+        '#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="English",DEFAULT=YES,'
+        'URI="audio/en/index.m3u8"\n'
+        '#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=160x120,AUDIO="aud"\n'
+        "video/v/index.m3u8\n"
+    )
+    media_playlist = (
+        "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n"
+        "#EXTINF:1.000000,\nseg0.ts\n#EXTINF:1.000000,\nseg1.ts\n#EXT-X-ENDLIST\n"
+    )
+    request_log: list[str] = []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def do_GET(self):
+            request_log.append(self.path)
+            routes = {
+                "/master.m3u8": (master, "application/vnd.apple.mpegurl"),
+                "/video/v/index.m3u8": (media_playlist, "application/vnd.apple.mpegurl"),
+                "/audio/en/index.m3u8": (media_playlist, "application/vnd.apple.mpegurl"),
+            }
+            if self.path in routes:
+                text, content_type = routes[self.path]
+                self._text(text, content_type)
+                return
+            segments = {
+                "/video/v/seg0.ts": seg0,
+                "/video/v/seg1.ts": seg1,
+                "/audio/en/seg0.ts": seg0,
+                "/audio/en/seg1.ts": seg1,
+            }
+            body = segments.get(self.path)
+            if body is not None:
+                self._bytes(body, "video/mp2t")
+                return
+            self.send_response(404)
+            self.end_headers()
+
+        def _text(self, text, content_type):
+            self._bytes(text.encode("utf-8"), content_type)
+
+        def _bytes(self, data, content_type):
+            self.send_response(200)
+            self.send_header("Content-Type", content_type)
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+        def log_message(self, *args):
+            pass
+
+    server = http.server.HTTPServer(("127.0.0.1", 0), Handler)
+    thread = threading.Thread(target=server.serve_forever, daemon=True)
+    thread.start()
+    try:
+        result = hls.download_hls(f"http://127.0.0.1:{server.server_port}/master.m3u8", tmp_path)
+    finally:
+        server.shutdown()
+        thread.join()
+
+    assert "/audio/en/index.m3u8" in request_log
+    assert "/video/v/audio/en/index.m3u8" not in request_log
+
+    probe = subprocess.run(
+        [
+            FFPROBE,
+            "-v",
+            "error",
+            "-show_entries",
+            "stream=codec_type",
+            "-of",
+            "csv=p=0",
+            result.file_paths[0],
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
+    )
+    assert "audio" in probe.stdout
+    assert "video" in probe.stdout
+
+
+# ---------------------------------------------------------------------------
+# Key transport: a redirect that downgrades https -> http must be refused
+# ---------------------------------------------------------------------------
+
+
+def test_https_key_redirecting_to_http_is_refused_without_reading_bytes(tmp_path, monkeypatch):
+    playlist_url = "https://media.test/index.m3u8"
+    playlist = (
+        b'#EXTM3U\n#EXT-X-KEY:METHOD=AES-128,URI="https://keys.test/key"\n'
+        b"#EXTINF:1,\nseg.ts\n#EXT-X-ENDLIST\n"
+    )
+    read_happened = False
+
+    def exploding_iter_content(*args, **kwargs):
+        nonlocal read_happened
+        read_happened = True
+        yield b"x" * 16
+
+    def fake_request(method, url, **kwargs):
+        if url == playlist_url:
+            return _response(url, playlist)
+        if url == "https://keys.test/key":
+            redirected = _response("http://keys.test/key-redirected", b"")
+            redirected.iter_content = exploding_iter_content
+            return redirected
+        raise AssertionError(f"unexpected fetch: {url}")
+
+    monkeypatch.setattr(hls, "safe_request", fake_request)
+    with pytest.raises(hls.HlsUnsupportedError) as excinfo:
+        hls.download_hls(playlist_url, tmp_path)
+
+    assert excinfo.value.kind == "https_key_required"
+    assert not read_happened
+    assert list(tmp_path.iterdir()) == []
+
+
+# ---------------------------------------------------------------------------
+# ffmpeg boundary: no stdin, no network protocol, no wildcard extensions
+# ---------------------------------------------------------------------------
+
+
+def test_run_process_feeds_ffmpeg_with_no_stdin(monkeypatch):
+    captured = {}
+
+    class FakeProcess:
+        returncode = 0
+
+        def communicate(self, timeout=None):
+            return b"", b""
+
+    def fake_popen(cmd, **kwargs):
+        captured.update(kwargs)
+        return FakeProcess()
+
+    monkeypatch.setattr(hls.subprocess, "Popen", fake_popen)
+    hls._run_process(["ffmpeg"], 10.0, None)
+    assert captured["stdin"] == hls.subprocess.DEVNULL
+
+
+def test_ffmpeg_remux_argv_locks_down_protocols_and_extensions(tmp_path, monkeypatch):
+    video_playlist = tmp_path / "video.m3u8"
+    video_playlist.write_text("#EXTM3U\n#EXT-X-ENDLIST\n", encoding="utf-8")
+    captured_cmds = []
+
+    def fake_run_process(cmd, timeout, cancel_token):
+        captured_cmds.append(cmd)
+
+    monkeypatch.setattr(hls, "_run_process", fake_run_process)
+    hls._run_ffmpeg_remux(video_playlist, None, tmp_path / "out.mp4", 10.0, None)
+
+    cmd = captured_cmds[0]
+    assert "-nostdin" in cmd
+    assert "-extension_picky" in cmd
+    assert cmd[cmd.index("-extension_picky") + 1] == "1"
+    assert "ALL" not in cmd
+    protocols = set(cmd[cmd.index("-protocol_whitelist") + 1].split(","))
+    assert protocols.isdisjoint({"http", "https", "tcp", "pipe"})
