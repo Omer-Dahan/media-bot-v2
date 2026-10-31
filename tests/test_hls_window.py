@@ -3,6 +3,7 @@ import shutil
 import statistics
 import subprocess
 import threading
+import time
 from dataclasses import dataclass, field
 
 import pytest
@@ -65,6 +66,10 @@ class LiveState:
     get_order: list[int] = field(default_factory=list)
     head_order: list[int] = field(default_factory=list)
     cancel_token: CancellationToken | None = None
+    segment_delay: float = 0.0
+    active_requests: int = 0
+    max_active_requests: int = 0
+    request_lock: threading.Lock = field(default_factory=threading.Lock)
 
     def segment_bytes(self, sequence: int) -> bytes:
         return self.segments[(sequence - self.first) % len(self.segments)]
@@ -101,7 +106,17 @@ def live_server(short_segments):
                     self.send_response(404)
                     self.end_headers()
                     return
-                self._send(state.segment_bytes(sequence), "video/mp2t")
+                with state.request_lock:
+                    state.active_requests += 1
+                    state.max_active_requests = max(
+                        state.max_active_requests, state.active_requests
+                    )
+                try:
+                    time.sleep(state.segment_delay)
+                    self._send(state.segment_bytes(sequence), "video/mp2t")
+                finally:
+                    with state.request_lock:
+                        state.active_requests -= 1
 
             def do_HEAD(self):
                 sequence = int(self.path.removeprefix("/seg-").removesuffix(".ts"))
@@ -142,16 +157,24 @@ def _duration(path):
     return float(result.stdout.strip())
 
 
-def test_window_download_is_oldest_first_without_duplicates(
-    live_server, tmp_path, bypass_ssrf_guard
-):
+def test_window_download_has_no_duplicates(live_server, tmp_path, bypass_ssrf_guard):
     url, state = live_server()
     result = hls.download_hls_window(url, tmp_path, None, None, segment_workers=8)
 
-    assert state.get_order == sorted(state.get_order)
     assert len(state.get_order) == len(set(state.get_order)) == 105
     assert result.window.gap_count == 0
     assert 19 < _duration(result.file_paths[0]) < 23
+
+
+def test_window_segments_start_in_parallel(live_server, tmp_path, bypass_ssrf_guard):
+    url, state = live_server(count=24, segment_delay=0.2)
+
+    started = time.monotonic()
+    hls.download_hls_window(url, tmp_path, None, None, segment_workers=8)
+    elapsed = time.monotonic() - started
+
+    assert state.max_active_requests >= 8
+    assert elapsed < 24 * 0.2 / 4
 
 
 def test_gaps_succeed_under_ratio_and_fail_over_it(live_server, tmp_path, bypass_ssrf_guard):
@@ -172,7 +195,7 @@ def test_tail_refresh_fetches_new_sequences_once(live_server, tmp_path, bypass_s
     url, state = live_server(refresh_advance=3)
     hls.download_hls_window(url, tmp_path, None, None)
     assert state.playlist_requests == 2
-    assert state.get_order[-3:] == [1105, 1106, 1107]
+    assert sorted(state.get_order[-3:]) == [1105, 1106, 1107]
     assert len(state.get_order) == len(set(state.get_order))
 
 

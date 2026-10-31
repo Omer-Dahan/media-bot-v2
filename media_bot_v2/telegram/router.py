@@ -223,9 +223,7 @@ async def _safe_answer_callback(
             await sleeper(wait_seconds)
             remaining -= wait_seconds
         except Exception:
-            logger.debug(
-                "Failed to answer callback query (ignored so flow continues)", exc_info=True
-            )
+            logger.debug("Failed to answer callback query (ignored so flow continues)", exc_info=True)
             return
 
 
@@ -313,17 +311,11 @@ def register_handlers(
             return body
         return body + "\n\n" + texts.SETTINGS_CREDITS.format(credits=int(remaining))
 
-    def load_delivery(
-        user_id: int, *, first_name: str | None, username: str | None
-    ) -> DeliveryOptions:
+    def load_delivery(user_id: int, *, first_name: str | None, username: str | None) -> DeliveryOptions:
         """Create the user row if needed and snapshot their saved settings."""
         with session_scope(session_factory) as session:
             user = settings_menu.get_or_create_user(
-                session,
-                user_id,
-                first_name=first_name,
-                username=username,
-                free_download=free_download,
+                session, user_id, first_name=first_name, username=username, free_download=free_download
             )
             return DeliveryOptions.from_setting(
                 user.settings, user_display=_display_name(user.first_name, user.username)
@@ -484,11 +476,8 @@ def register_handlers(
                     cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
 
                 uploader = TelethonUploader(
-                    client,
-                    chat_id=job_chat_id,
-                    archive_channel=archive_channel,
-                    workers=upload_workers,
-                    connections=upload_connections,
+                    client, chat_id=job_chat_id, archive_channel=archive_channel,
+                    workers=upload_workers, connections=upload_connections,
                     adaptive=True,
                     on_flood=progress.handle_flood_wait,
                 )
@@ -519,11 +508,7 @@ def register_handlers(
                             traceback_mark=traceback_mark,
                         ),
                     )
-            except (
-                CreditsExhaustedException,
-                BandwidthExhaustedException,
-                UserBlockedException,
-            ) as exc:
+            except (CreditsExhaustedException, BandwidthExhaustedException, UserBlockedException) as exc:
                 msg_id = getattr(getattr(progress, "_message", message), "id", None)
                 if msg_id is not None:
                     retry_store.remove((job_chat_id, msg_id))
@@ -546,18 +531,13 @@ def register_handlers(
             except FLOOD_WAIT_ERRORS as exc:
                 wait_seconds = get_flood_wait_seconds(exc)
                 logger.warning(
-                    "Download aborted due to %s (%ss) for url=%s",
-                    type(exc).__name__,
-                    wait_seconds,
-                    job_url,
+                    "Download aborted due to %s (%ss) for url=%s", type(exc).__name__, wait_seconds, job_url
                 )
                 if not getattr(progress, "is_terminal_completed", False):
                     await progress.update(texts.FLOOD_WAIT_FAILED, is_terminal=True)
                 _report(exc, texts.FLOOD_WAIT_FAILED)
             except TimeoutError as exc:
-                timeout_text = texts.resolve(
-                    texts.REQUEST_TIMEOUT_EXCEEDED, variant_key_for(progress)
-                )
+                timeout_text = texts.resolve(texts.REQUEST_TIMEOUT_EXCEEDED, variant_key_for(progress))
                 if not getattr(progress, "is_terminal_completed", False):
                     try:
                         await progress.update(timeout_text, is_terminal=True)
@@ -586,11 +566,7 @@ def register_handlers(
         first_name, username = _sender_info(event)
         with session_scope(session_factory) as session:
             settings_menu.get_or_create_user(
-                session,
-                event.sender_id,
-                first_name=first_name,
-                username=username,
-                free_download=free_download,
+                session, event.sender_id, first_name=first_name, username=username, free_download=free_download
             )
         await call_with_flood_retry(event.respond, texts.START, link_preview=False)
 
@@ -612,9 +588,7 @@ def register_handlers(
         start = time.monotonic()
         message = await call_with_flood_retry(event.respond, texts.PING_MESSAGE)
         elapsed_ms = max(1, round((time.monotonic() - start) * 1000))
-        ping_text = texts.pick(texts.PING_RESULT_VARIANTS, variant_key_for(message)).format(
-            ms=elapsed_ms
-        )
+        ping_text = texts.pick(texts.PING_RESULT_VARIANTS, variant_key_for(message)).format(ms=elapsed_ms)
         await call_with_flood_retry(message.edit, ping_text)
 
     @client.on(events.NewMessage(pattern="/settings"))
@@ -622,11 +596,7 @@ def register_handlers(
         first_name, username = _sender_info(event)
         with session_scope(session_factory) as session:
             user = settings_menu.get_or_create_user(
-                session,
-                event.sender_id,
-                first_name=first_name,
-                username=username,
-                free_download=free_download,
+                session, event.sender_id, first_name=first_name, username=username, free_download=free_download
             )
             buttons = settings_menu.build_settings_buttons(user.settings)
             text = settings_text(event.sender_id, user.settings)
@@ -637,11 +607,7 @@ def register_handlers(
         toggle_key = decode(event.data)[0]
         with session_scope(session_factory) as session:
             user = settings_menu.get_or_create_user(
-                session,
-                event.sender_id,
-                first_name=None,
-                username=None,
-                free_download=free_download,
+                session, event.sender_id, first_name=None, username=None, free_download=free_download
             )
             answer = settings_menu.apply_toggle(user.settings, toggle_key)
             buttons = settings_menu.build_settings_buttons(user.settings)
@@ -711,9 +677,7 @@ def register_handlers(
                             event.get_message, max_wait_seconds=rem, max_total_wait_seconds=rem
                         )
                     except (RPCError, ConnectionError, TimeoutError, OSError):
-                        logger.debug(
-                            "Failed to fetch message on MessageNotModifiedError", exc_info=True
-                        )
+                        logger.debug("Failed to fetch message on MessageNotModifiedError", exc_info=True)
                         message = getattr(event, "message", None)
                 except (RPCError, ConnectionError, TimeoutError, OSError):
                     logger.debug("Failed to edit the quality menu message", exc_info=True)
@@ -729,10 +693,7 @@ def register_handlers(
                                 max_total_wait_seconds=rem,
                             )
                         except Exception:
-                            logger.debug(
-                                "Failed to send new status message after edit failure",
-                                exc_info=True,
-                            )
+                            logger.debug("Failed to send new status message after edit failure", exc_info=True)
                             message = getattr(event, "message", None) or event
                     else:
                         message = getattr(event, "message", None) or event
@@ -756,17 +717,13 @@ def register_handlers(
                 )
             except Exception as exc:
                 logger.exception("Early failure in quality pick for url=%s", url)
-                failed_text = texts.resolve(
-                    texts.DOWNLOAD_FAILED, variant_key_for(progress or event)
-                )
+                failed_text = texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(progress or event))
                 if progress is not None:
                     if not getattr(progress, "is_terminal_completed", False):
                         try:
                             await progress.update(failed_text, is_terminal=True)
                         except Exception:
-                            logger.debug(
-                                "Failed to update progress on general failure", exc_info=True
-                            )
+                            logger.debug("Failed to update progress on general failure", exc_info=True)
                 else:
                     await _safe_answer_callback(event, failed_text, alert=True)
                     try:
@@ -776,8 +733,7 @@ def register_handlers(
                             await call_with_flood_retry(event.respond, failed_text)
                         except (RPCError, ConnectionError, TimeoutError, OSError):
                             logger.debug(
-                                "Failed to report error after early failure in quality pick",
-                                exc_info=True,
+                                "Failed to report error after early failure in quality pick", exc_info=True
                             )
                 # Reported last, after every attempt to notify the user above
                 # has already run (succeeded or not) - report() only ever
@@ -825,9 +781,7 @@ def register_handlers(
         retry_id = parts[1] if len(parts) > 1 else None
         retry_ctx = retry_store.get(retry_id) if retry_id else None
         if retry_ctx is None:
-            msg_id = getattr(event, "message_id", None) or getattr(
-                getattr(event, "message", None), "id", None
-            )
+            msg_id = getattr(event, "message_id", None) or getattr(getattr(event, "message", None), "id", None)
             if msg_id is not None:
                 retry_ctx = retry_store.get((event.chat_id, msg_id))
 
@@ -879,9 +833,7 @@ def register_handlers(
                             event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
                         )
                     except (RPCError, ConnectionError, TimeoutError, OSError):
-                        logger.debug(
-                            "Failed to send replacement status message on retry", exc_info=True
-                        )
+                        logger.debug("Failed to send replacement status message on retry", exc_info=True)
                         message = getattr(event, "message", None) or event
 
                 old_id = retry_ctx.retry_id
@@ -907,8 +859,7 @@ def register_handlers(
                 # running" for up to the store's TTL. The retry context itself is
                 # kept (not removed) so the same button works on a second click.
                 logger.exception(
-                    "Early failure in retry handler before download started for retry_id=%s",
-                    retry_id,
+                    "Early failure in retry handler before download started for retry_id=%s", retry_id
                 )
                 retry_ctx.is_running = False
                 # Reported last - there is no further user-facing attempt in
@@ -971,10 +922,7 @@ def register_handlers(
         # the routing branch below picked) can still be reported with real
         # log lines instead of "no log available".
         with request_log_scope(
-            user_id=event.sender_id,
-            url=url,
-            platform=_infer_platform(url),
-            max_lines=request_log_max_lines,
+            user_id=event.sender_id, url=url, platform=_infer_platform(url), max_lines=request_log_max_lines
         ):
             try:
                 first_name, username = _sender_info(event)
@@ -1018,8 +966,7 @@ def register_handlers(
                 if _host_matches(url, INSTAGRAM_HOSTS):
                     if not matches_instagram_url(url):
                         await call_with_flood_retry(
-                            event.respond,
-                            texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event)),
+                            event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
                         )
                         return
 
@@ -1045,8 +992,7 @@ def register_handlers(
                 if _host_matches(url, FACEBOOK_HOSTS):
                     if not matches_facebook_url(url):
                         await call_with_flood_retry(
-                            event.respond,
-                            texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event)),
+                            event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
                         )
                         return
 
@@ -1096,25 +1042,18 @@ def register_handlers(
                 )
             except Exception as exc:
                 logger.exception("Handler failed for url=%s", url)
-                failed_text = texts.resolve(
-                    texts.DOWNLOAD_FAILED, variant_key_for(progress or event)
-                )
+                failed_text = texts.resolve(texts.DOWNLOAD_FAILED, variant_key_for(progress or event))
                 if progress is not None:
                     if not getattr(progress, "is_terminal_completed", False):
                         try:
                             await progress.update(failed_text, is_terminal=True)
                         except Exception:
-                            logger.debug(
-                                "Failed to update progress on general handler failure",
-                                exc_info=True,
-                            )
+                            logger.debug("Failed to update progress on general handler failure", exc_info=True)
                 else:
                     try:
                         await call_with_flood_retry(event.respond, failed_text)
                     except Exception:
-                        logger.debug(
-                            "Failed to send error response on handler failure", exc_info=True
-                        )
+                        logger.debug("Failed to send error response on handler failure", exc_info=True)
                 # Reported last, after every attempt to notify the user above
                 # has already run (succeeded or not) - report() only ever
                 # schedules a background task, so calling it earlier would

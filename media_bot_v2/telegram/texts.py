@@ -90,20 +90,28 @@ YOUTUBE_QUALITY_SELECT = """
 👇 בחר את האיכות הרצויה:
 """
 
-INSTAGRAM_PRIVATE_OR_LOGIN = "❌ התוכן באינסטגרם פרטי, מוגבל או דורש התחברות לחשבון.\n➡️ הבוט תומך בהורדת תוכן ציבורי בלבד - נסה קישור אחר."
+INSTAGRAM_PRIVATE_OR_LOGIN = (
+    "❌ התוכן באינסטגרם פרטי, מוגבל או דורש התחברות לחשבון.\n➡️ הבוט תומך בהורדת תוכן ציבורי בלבד - נסה קישור אחר."
+)
 INSTAGRAM_NOT_FOUND = (
     "❌ הפוסט או הסרטון באינסטגרם אינו זמין (נמחק או שהקישור שגוי).\n➡️ בדוק את הקישור ונסה שוב."
 )
-INSTAGRAM_UNSUPPORTED_MEDIA = "❌ סוג המדיה באינסטגרם אינו נתמך (למשל שידור חי או תוכן ללא מדיה נתמכת).\n➡️ נסה קישור לפוסט אחר."
+INSTAGRAM_UNSUPPORTED_MEDIA = (
+    "❌ סוג המדיה באינסטגרם אינו נתמך (למשל שידור חי או תוכן ללא מדיה נתמכת).\n➡️ נסה קישור לפוסט אחר."
+)
 INSTAGRAM_NETWORK_ERROR = "❌ שגיאת רשת בהורדה מאינסטגרם.\n➡️ נסה שוב בעוד מספר רגעים."
 INSTAGRAM_GENERIC_FAILURE = "❌ ההורדה מאינסטגרם נכשלה.\n➡️ נסה שוב או שלח קישור אחר."
 YOUTUBE_GENERIC_FAILURE = "❌ ההורדה מיוטיוב נכשלה.\n➡️ נסה שוב או שלח קישור אחר."
 
-FACEBOOK_PRIVATE_OR_LOGIN = "❌ התוכן בפייסבוק פרטי, מוגבל או דורש התחברות לחשבון.\n➡️ הבוט תומך בהורדת תוכן ציבורי בלבד - נסה קישור אחר."
+FACEBOOK_PRIVATE_OR_LOGIN = (
+    "❌ התוכן בפייסבוק פרטי, מוגבל או דורש התחברות לחשבון.\n➡️ הבוט תומך בהורדת תוכן ציבורי בלבד - נסה קישור אחר."
+)
 FACEBOOK_NOT_FOUND = (
     "❌ הסרטון או הפוסט בפייסבוק אינו זמין (נמחק או שהקישור שגוי).\n➡️ בדוק את הקישור ונסה שוב."
 )
-FACEBOOK_UNSUPPORTED_MEDIA = "❌ סוג המדיה בפייסבוק אינו נתמך (למשל שידור חי או תוכן ללא מדיה נתמכת).\n➡️ נסה קישור לסרטון אחר."
+FACEBOOK_UNSUPPORTED_MEDIA = (
+    "❌ סוג המדיה בפייסבוק אינו נתמך (למשל שידור חי או תוכן ללא מדיה נתמכת).\n➡️ נסה קישור לסרטון אחר."
+)
 FACEBOOK_NETWORK_ERROR = "❌ שגיאת רשת בהורדה מפייסבוק.\n➡️ נסה שוב בעוד מספר רגעים."
 FACEBOOK_GENERIC_FAILURE = "❌ ההורדה מפייסבוק נכשלה.\n➡️ נסה שוב או שלח קישור אחר."
 
@@ -122,9 +130,7 @@ CONTACT_URL = "https://t.me/YD_IL"
 CONTACT_BUTTON = "לצ'אט איתי 💬"
 CREDITS_BUTTON = "💬 לרכישת קרדיטים"
 CREDITS_EXHAUSTED = "❌ נגמרו הקרדיטים שלך.\n➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
-BANDWIDTH_EXHAUSTED = (
-    "❌ הגעת למגבלת 2GB היומית למשתמשים ללא מנוי.\n➡️ לרכישת חבילה ללא הגבלה צרו קשר בכפתור למטה 👇"
-)
+BANDWIDTH_EXHAUSTED = "❌ הגעת למגבלת 2GB היומית למשתמשים ללא מנוי.\n➡️ לרכישת חבילה ללא הגבלה צרו קשר בכפתור למטה 👇"
 
 QUALITY_NAMES = {
     "1080": "1080p HD",
@@ -138,9 +144,7 @@ QUALITY_TOAST_AUDIO = "⏳ מתחיל להוריד שמע..."
 DOWNLOADING_QUALITY = "🔄 מוריד באיכות {name}..."
 DOWNLOADING_AUDIO = "🔄 מוריד שמע..."
 
-YOUTUBE_LINK_EXPIRED = (
-    "⏰ פג תוקף הקישור לבחירת איכות.\n➡️ שלח את קישור היוטיוב שוב ובחר איכות מחדש."
-)
+YOUTUBE_LINK_EXPIRED = "⏰ פג תוקף הקישור לבחירת איכות.\n➡️ שלח את קישור היוטיוב שוב ובחר איכות מחדש."
 QUEUE_WAIT = "⏳ ממתין לעיבוד..."
 YOUTUBE_QUEUE_WAIT = QUEUE_WAIT
 YOUTUBE_JS_RUNTIME_MISSING = (
@@ -155,7 +159,9 @@ DIRECT_FILE_TOO_LARGE = (
     "❌ הקובץ גדול מדי ({size}). מגבלת ההורדה המוגדרת בבוט היא {max_size}.\n"
     "➡️ נסה קישור לקובץ קטן יותר."
 )
-UNSUPPORTED_URL = "❌ סוג הקישור אינו נתמך.\n➡️ שלח קישור מיוטיוב, טיקטוק, אינסטגרם, פייסבוק או קישור הורדה ישירה לקובץ."
+UNSUPPORTED_URL = (
+    "❌ סוג הקישור אינו נתמך.\n➡️ שלח קישור מיוטיוב, טיקטוק, אינסטגרם, פייסבוק או קישור הורדה ישירה לקובץ."
+)
 NOT_MEDIA_CONTENT = (
     "❌ הקישור מפנה לדף אינטרנט (HTML) או לתוכן טקסטואלי, לא לקובץ מדיה.\n"
     "➡️ ודא שהקישור מצביע ישירות על קובץ להורדה."
@@ -164,10 +170,10 @@ DIRECT_LINK_REFUSED = (
     "❌ האתר חוסם הורדה ישירה של קובץ זה (נדרשת הרשאה או שהגישה נחסמה).\n➡️ נסה קישור אחר."
 )
 DIRECT_LINK_GONE = "❌ הקובץ בקישור אינו קיים יותר באתר המקור.\n➡️ נסה קישור אחר."
-DIRECT_LINK_SERVER_BUSY = "❌ שרת האתר עמוס או חוסם גישה זמנית לקובץ.\n➡️ נסה שוב בעוד מספר דקות."
-REQUEST_TIMEOUT_EXCEEDED = (
-    "⏱️ הבקשה בוטלה עקב חריגה ממגבלת הזמן.\n➡️ נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
+DIRECT_LINK_SERVER_BUSY = (
+    "❌ שרת האתר עמוס או חוסם גישה זמנית לקובץ.\n➡️ נסה שוב בעוד מספר דקות."
 )
+REQUEST_TIMEOUT_EXCEEDED = "⏱️ הבקשה בוטלה עקב חריגה ממגבלת הזמן.\n➡️ נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
 
 HLS_LIVE_UNSUPPORTED = (
     "❌ זה שידור חי (Live) - אין עדיין תמיכה בשידורים חיים.\n➡️ נסה קישור להקלטה שהסתיימה (VOD)."
@@ -244,9 +250,7 @@ _UNSUPPORTED_URL_LINES = (
     "❌ הקישור הזה לא זז בשום כיוון.",
 )
 _UNSUPPORTED_URL_TAIL = "➡️ שלח קישור מיוטיוב, טיקטוק, אינסטגרם, פייסבוק או קישור הורדה ישירה לקובץ."
-UNSUPPORTED_URL_VARIANTS = tuple(
-    f"{line}\n{_UNSUPPORTED_URL_TAIL}" for line in _UNSUPPORTED_URL_LINES
-)
+UNSUPPORTED_URL_VARIANTS = tuple(f"{line}\n{_UNSUPPORTED_URL_TAIL}" for line in _UNSUPPORTED_URL_LINES)
 
 _NOT_MEDIA_CONTENT_LINES = (
     "❌ זה דף אינטרנט, לא קובץ. אני מוריד מדיה, לא קורא מאמרים.",
@@ -254,9 +258,7 @@ _NOT_MEDIA_CONTENT_LINES = (
     "❌ מצאתי טקסט, לא וידאו.",
 )
 _NOT_MEDIA_CONTENT_TAIL = "➡️ ודא שהקישור מצביע ישירות על קובץ להורדה."
-NOT_MEDIA_CONTENT_VARIANTS = tuple(
-    f"{line}\n{_NOT_MEDIA_CONTENT_TAIL}" for line in _NOT_MEDIA_CONTENT_LINES
-)
+NOT_MEDIA_CONTENT_VARIANTS = tuple(f"{line}\n{_NOT_MEDIA_CONTENT_TAIL}" for line in _NOT_MEDIA_CONTENT_LINES)
 
 _NOT_FOUND_LINES = (
     "❌ הפוסט הזה כבר לא שם. מישהו מחק אותו, או שהקישור שגוי.",
@@ -274,12 +276,8 @@ _PRIVATE_OR_LOGIN_LINES = (
     "❌ האתר לא מרשה לי להיכנס לקישור הזה.",
 )
 _PRIVATE_OR_LOGIN_TAIL = "➡️ הבוט תומך בהורדת תוכן ציבורי בלבד - נסה קישור אחר."
-INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS = tuple(
-    f"{line}\n{_PRIVATE_OR_LOGIN_TAIL}" for line in _PRIVATE_OR_LOGIN_LINES
-)
-FACEBOOK_PRIVATE_OR_LOGIN_VARIANTS = tuple(
-    f"{line}\n{_PRIVATE_OR_LOGIN_TAIL}" for line in _PRIVATE_OR_LOGIN_LINES
-)
+INSTAGRAM_PRIVATE_OR_LOGIN_VARIANTS = tuple(f"{line}\n{_PRIVATE_OR_LOGIN_TAIL}" for line in _PRIVATE_OR_LOGIN_LINES)
+FACEBOOK_PRIVATE_OR_LOGIN_VARIANTS = tuple(f"{line}\n{_PRIVATE_OR_LOGIN_TAIL}" for line in _PRIVATE_OR_LOGIN_LINES)
 
 DIRECT_LINK_REFUSED_VARIANTS = (
     "❌ האתר סגר את השער בפני.\n➡️ נסה קישור אחר.",
@@ -311,9 +309,7 @@ _DOWNLOAD_FAILED_LINES = (
     "❌ לא הצלחתי הפעם.",
 )
 _DOWNLOAD_FAILED_TAIL = "נסה שוב או שלח קישור אחר."
-DOWNLOAD_FAILED_VARIANTS = tuple(
-    f"{line} {_DOWNLOAD_FAILED_TAIL}" for line in _DOWNLOAD_FAILED_LINES
-)
+DOWNLOAD_FAILED_VARIANTS = tuple(f"{line} {_DOWNLOAD_FAILED_TAIL}" for line in _DOWNLOAD_FAILED_LINES)
 
 _REQUEST_TIMEOUT_LINES = (
     "⏱️ רדפתי אחריו יותר מדי זמן, ויתרתי.",
@@ -321,9 +317,7 @@ _REQUEST_TIMEOUT_LINES = (
     "⏱️ הקובץ הזה לוקח יותר זמן ממה שיש לי.",
 )
 _REQUEST_TIMEOUT_TAIL = "➡️ נסה שוב מאוחר יותר או הורד קובץ קטן יותר."
-REQUEST_TIMEOUT_EXCEEDED_VARIANTS = tuple(
-    f"{line}\n{_REQUEST_TIMEOUT_TAIL}" for line in _REQUEST_TIMEOUT_LINES
-)
+REQUEST_TIMEOUT_EXCEEDED_VARIANTS = tuple(f"{line}\n{_REQUEST_TIMEOUT_TAIL}" for line in _REQUEST_TIMEOUT_LINES)
 
 PING_RESULT_VARIANTS = (
     "🟢 הבוט פעיל · זמן תגובה: {ms}ms",
@@ -348,7 +342,6 @@ HLS_DRM_UNSUPPORTED_VARIANTS = (
     "❌ זה תוכן מוגן, ואין לי מפתח אליו.\n➡️ נסה קישור לתוכן ללא הגנת DRM/הצפנה.",
     "❌ ההצפנה כאן לא נתמכת (DRM או שיטה לא מוכרת).\n➡️ שלח קישור לתוכן פתוח.",
 )
-
 HLS_WINDOW_EXPIRED_VARIANTS = (HLS_WINDOW_EXPIRED,)
 HLS_WINDOW_TOO_SHORT_VARIANTS = (HLS_WINDOW_TOO_SHORT,)
 
@@ -416,11 +409,11 @@ def resolve(text: str, key: str | None) -> str:
         return pick(STAGE_VARIANTS[text], key)
 
     has_prefix = text.startswith("⬇️ ")
-    body = text[len("⬇️ ") :] if has_prefix else text
+    body = text[len("⬇️ "):] if has_prefix else text
 
     for canonical in _SORTED_CANONICALS:
         if body.startswith(canonical):
-            rendered = pick(STAGE_VARIANTS[canonical], key) + body[len(canonical) :]
+            rendered = pick(STAGE_VARIANTS[canonical], key) + body[len(canonical):]
             return f"⬇️ {rendered}" if has_prefix else rendered
 
     return text
@@ -449,9 +442,7 @@ def format_download_too_large(file_size: float, max_size: float) -> str:
     return DIRECT_FILE_TOO_LARGE.format(size=size_str, max_size=max_str)
 
 
-def format_playlist_trim_reason(
-    *, skipped_for_credits: int, too_large: int, failed: int
-) -> str | None:
+def format_playlist_trim_reason(*, skipped_for_credits: int, too_large: int, failed: int) -> str | None:
     """Itemised reason for a trimmed playlist: what was never attempted because
     of the credit cap, what exceeded the size limit, and what failed outright."""
     parts: list[str] = []
@@ -561,9 +552,7 @@ ERROR_REPORT_BODY = (
     "🔧 חריגה: <code>{exc_type}: {exc_text}</code>\n"
     "⏱️ משך: {elapsed} · 🕒 {timestamp}"
 )
-ERROR_REPORT_LOG_SECTION = (
-    "<blockquote expandable>📋 לוג מפורט:\n<pre>{log_tail}</pre></blockquote>"
-)
+ERROR_REPORT_LOG_SECTION = "<blockquote expandable>📋 לוג מפורט:\n<pre>{log_tail}</pre></blockquote>"
 ERROR_REPORT_NO_LOG = "אין לוג זמין"
 ERROR_REPORT_TRUNCATED_NOTICE = "... (נקטעו {n} שורות ראשונות, הלוג המלא בקובץ המצורף)"
 ERROR_REPORT_TRUNCATED_NOTICE_NO_ATTACHMENT = (

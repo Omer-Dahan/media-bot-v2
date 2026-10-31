@@ -739,9 +739,6 @@ def _fetch_window_segment(
     dest: Path,
     counter: _ByteCounter,
     cancel_token: CancellationToken | None,
-    start_condition: threading.Condition,
-    start_state: dict[str, int],
-    order: int,
 ) -> _DownloadedSegment:
     if cancel_token is not None and cancel_token.is_set():
         raise HlsDownloadError("cancelled")
@@ -750,17 +747,13 @@ def _fetch_window_segment(
         length, offset = segment.byterange
         headers = {"Range": f"bytes={offset}-{offset + length - 1}"}
     part = dest.with_name(dest.name + ".part")
-    with start_condition:
-        start_condition.wait_for(lambda: start_state["next"] == order)
-        response = safe_request(
-            "GET",
-            urljoin(base_url, segment.uri),
-            stream=True,
-            timeout=_REQUEST_TIMEOUT,
-            headers=headers,
-        )
-        start_state["next"] += 1
-        start_condition.notify_all()
+    response = safe_request(
+        "GET",
+        urljoin(base_url, segment.uri),
+        stream=True,
+        timeout=_REQUEST_TIMEOUT,
+        headers=headers,
+    )
     if response.status_code in (404, 410):
         response.close()
         part.unlink(missing_ok=True)
@@ -796,11 +789,9 @@ def _download_segment_batch(
     existing: dict[int, _DownloadedSegment],
 ) -> None:
     pending = [segment for segment in segments if segment.sequence not in existing]
-    condition = threading.Condition()
-    state = {"next": 0}
     with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hls-segment") as pool:
         futures = {}
-        for order, segment in enumerate(pending):
+        for segment in pending:
             path = work_dir / f"seg-{segment.sequence:020d}{_segment_extension(segment.uri)}"
             future = pool.submit(
                 _fetch_window_segment,
@@ -809,9 +800,6 @@ def _download_segment_batch(
                 path,
                 counter,
                 cancel_token,
-                condition,
-                state,
-                order,
             )
             futures[future] = segment.sequence
         for future in as_completed(futures):
