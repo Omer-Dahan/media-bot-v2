@@ -236,6 +236,9 @@ class Settings(BaseSettings):
     hls_window_sample_requests: int = Field(
         default=6, ge=3, le=10, validation_alias="HLS_WINDOW_SAMPLE_REQUESTS"
     )
+    hls_confirm_ttl_seconds: int = Field(
+        default=600, ge=60, le=3600, validation_alias="HLS_CONFIRM_TTL_SECONDS"
+    )
 
     @field_validator("max_download_size")
     @classmethod

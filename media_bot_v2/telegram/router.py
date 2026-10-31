@@ -13,6 +13,7 @@ import re
 import time
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
@@ -26,10 +27,15 @@ from media_bot_v2.credits.exceptions import (
     CreditsExhaustedException,
     UserBlockedException,
 )
-from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.credits.service import BYTES_PER_MB, CreditsService, credits_for_sizes
 from media_bot_v2.db.models import Setting
 from media_bot_v2.db.session import session_scope
-from media_bot_v2.engines.base import DownloadTooLargeError, UnsupportedUrlError
+from media_bot_v2.engines.base import (
+    BaseEngine,
+    CancellationToken,
+    DownloadTooLargeError,
+    UnsupportedUrlError,
+)
 from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine
 from media_bot_v2.engines.facebook import (
     FacebookDownloadError,
@@ -37,7 +43,13 @@ from media_bot_v2.engines.facebook import (
     extract_facebook_id,
     matches_facebook_url,
 )
-from media_bot_v2.engines.hls import HlsDownloadError, HlsUnsupportedError
+from media_bot_v2.engines.hls import (
+    HlsDownloadError,
+    HlsUnsupportedError,
+    HlsWindowInfo,
+    analyze_hls_window,
+    download_hls_window,
+)
 from media_bot_v2.engines.instagram import (
     InstagramDownloadError,
     InstagramEngine,
@@ -52,6 +64,7 @@ from media_bot_v2.engines.youtube import (
     fetch_title_duration,
     is_playlist_url,
 )
+from media_bot_v2.executor import run_in_thread
 from media_bot_v2.logging_setup import request_log_scope
 from media_bot_v2.pipeline import DownloadPipeline, TracebackMark
 from media_bot_v2.providers.health import ProviderHealthTracker
@@ -149,6 +162,85 @@ class _ActiveRequest:
     task: asyncio.Task
     owner_id: int
     progress: MessageProgressReporter
+
+
+@dataclass(frozen=True)
+class _PendingHlsConfirmation:
+    url: str
+    owner_id: int
+    analysis: HlsWindowInfo
+    created_at: float
+
+
+class _HlsWindowEngine(BaseEngine):
+    name = "direct"
+
+    def __init__(
+        self,
+        *,
+        window_seconds: float | None,
+        max_download_size: int,
+        segment_workers: int,
+        max_gap_ratio: float,
+    ) -> None:
+        self._window_seconds = window_seconds
+        self._max_download_size = max_download_size
+        self._segment_workers = segment_workers
+        self._max_gap_ratio = max_gap_ratio
+
+    def matches(self, url: str) -> bool:
+        return True
+
+    async def download(
+        self,
+        url: str,
+        *,
+        dest_dir: Path,
+        cancel_token: CancellationToken | None = None,
+    ):
+        try:
+            return await run_in_thread(
+                download_hls_window,
+                url,
+                dest_dir,
+                self._max_download_size,
+                cancel_token,
+                self._window_seconds,
+                segment_workers=self._segment_workers,
+                max_gap_ratio=self._max_gap_ratio,
+            )
+        except HlsUnsupportedError as exc:
+            kind_text = {
+                "window_expired": texts.HLS_WINDOW_EXPIRED,
+                "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
+            }
+            raise HlsUnsupportedError(exc.kind, kind_text.get(exc.kind, str(exc))) from exc
+
+
+def _format_duration(seconds: float) -> str:
+    total_seconds = max(0, round(seconds))
+    minutes, seconds = divmod(total_seconds, 60)
+    hours, minutes = divmod(minutes, 60)
+    if hours:
+        return f"{hours}:{minutes:02d}:{seconds:02d}"
+    return f"{minutes}:{seconds:02d}"
+
+
+def _hls_quality(info: HlsWindowInfo) -> str:
+    if info.selected_variant_resolution is not None:
+        return f"{info.selected_variant_resolution[1]}p"
+    return "איכות לא ידועה"
+
+
+def _hls_confirmation_markup(info: HlsWindowInfo) -> list[list[Button]]:
+    duration = _format_duration(info.window_duration)
+    rows = [[Button.inline(texts.HLS_CONFIRM_WHOLE.format(duration=duration), encode("hlsc", "all"))]]
+    if info.window_duration > 30 * 60:
+        rows.append([Button.inline(texts.HLS_CONFIRM_LAST_30, encode("hlsc", "1800"))])
+    if info.window_duration > 10 * 60:
+        rows.append([Button.inline(texts.HLS_CONFIRM_LAST_10, encode("hlsc", "600"))])
+    rows.append([Button.inline(texts.HLS_CONFIRM_CANCEL, encode("hlsc", "cancel"))])
+    return rows
 
 
 async def _run_cancellable(
@@ -249,8 +341,11 @@ def register_handlers(
     upload_workers: int = 1,
     upload_connections: int = 1,
     max_download_size: int,
+    mb_per_credit: int = 200,
     hls_segment_workers: int = 8,
     hls_max_gap_ratio: float = 0.02,
+    hls_window_sample_requests: int = 6,
+    hls_confirm_ttl_seconds: int = 600,
     limiter: ConcurrencyLimiter | None = None,
     force_ipv4: bool = False,
     youtube_cookies_file: str | None = None,
@@ -275,6 +370,7 @@ def register_handlers(
     # event reports for the message its button sits under, so the cancel
     # handler needs no id encoded into callback_data at all.
     active_cancellations: dict[tuple[int, int], _ActiveRequest] = {}
+    pending_hls_confirmations: dict[tuple[int, int], _PendingHlsConfirmation] = {}
     direct_engine = DirectEngine(
         max_download_size=max_download_size,
         hls_segment_workers=hls_segment_workers,
@@ -467,13 +563,25 @@ def register_handlers(
                         extract_facebook_id(job_url) or job_url, "facebook", delivery.send_as
                     )
                 else:  # direct
-                    engine = DirectEngine(
-                        max_download_size=max_download_size,
-                        progress=progress,
-                        hls_segment_workers=hls_segment_workers,
-                        hls_max_gap_ratio=hls_max_gap_ratio,
+                    if job_quality and job_quality.startswith("hls-window:"):
+                        encoded_range = job_quality.removeprefix("hls-window:")
+                        window_seconds = None if encoded_range == "all" else float(encoded_range)
+                        engine = _HlsWindowEngine(
+                            window_seconds=window_seconds,
+                            max_download_size=max_download_size,
+                            segment_workers=hls_segment_workers,
+                            max_gap_ratio=hls_max_gap_ratio,
+                        )
+                    else:
+                        engine = DirectEngine(
+                            max_download_size=max_download_size,
+                            progress=progress,
+                            hls_segment_workers=hls_segment_workers,
+                            hls_max_gap_ratio=hls_max_gap_ratio,
+                        )
+                    cache_key = compute_cache_key(
+                        job_url, job_quality or "direct", delivery.send_as
                     )
-                    cache_key = compute_cache_key(job_url, "direct", delivery.send_as)
 
                 uploader = TelethonUploader(
                     client, chat_id=job_chat_id, archive_channel=archive_channel,
@@ -771,6 +879,55 @@ def register_handlers(
             except Exception:
                 logger.debug("Failed to update progress on cancel button press", exc_info=True)
 
+    @client.on(events.CallbackQuery(pattern=rb"^hlsc:"))
+    async def hls_confirmation_handler(event: events.CallbackQuery.Event) -> None:
+        key = (event.chat_id, event.message_id)
+        pending = pending_hls_confirmations.get(key)
+        if pending is None:
+            await _safe_answer_callback(event, texts.HLS_CONFIRM_EXPIRED_TOAST, alert=True)
+            return
+        if pending.owner_id != event.sender_id:
+            await _safe_answer_callback(event, texts.HLS_CONFIRM_NOT_OWNER, alert=True)
+            return
+        if time.monotonic() - pending.created_at > hls_confirm_ttl_seconds:
+            pending_hls_confirmations.pop(key, None)
+            await _safe_answer_callback(event, texts.HLS_CONFIRM_EXPIRED_TOAST, alert=True)
+            await call_with_flood_retry(event.edit, texts.HLS_CONFIRM_EXPIRED, buttons=None)
+            return
+
+        parts = decode(event.data)
+        choice = parts[1] if len(parts) == 2 else ""
+        if choice == "cancel":
+            pending_hls_confirmations.pop(key, None)
+            await _safe_answer_callback(event)
+            await call_with_flood_retry(event.edit, texts.HLS_CONFIRM_CANCELLED, buttons=None)
+            return
+        if choice not in {"all", "600", "1800"}:
+            await _safe_answer_callback(event, texts.HLS_CONFIRM_EXPIRED_TOAST, alert=True)
+            return
+
+        pending_hls_confirmations.pop(key, None)
+        await _safe_answer_callback(event)
+        message = await call_with_flood_retry(
+            event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+        )
+        progress = make_progress(
+            message,
+            user_id=pending.owner_id,
+            chat_id=event.chat_id,
+            url=pending.url,
+            platform="direct",
+        )
+        await _execute_download(
+            job_user_id=pending.owner_id,
+            job_chat_id=event.chat_id,
+            job_url=pending.url,
+            job_platform="direct",
+            job_quality=f"hls-window:{choice}",
+            message=message,
+            progress=progress,
+        )
+
     @client.on(events.CallbackQuery(pattern=rb"^retry(:|$)"))
     async def retry_handler(event: events.CallbackQuery.Event) -> None:
         handler_started = time.monotonic()
@@ -1021,6 +1178,67 @@ def register_handlers(
                         event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
                     )
                     return
+
+                is_hls_candidate = urlparse(url).path.lower().endswith(".m3u8")
+                if is_hls_candidate:
+                    try:
+                        analysis = await run_in_thread(
+                            analyze_hls_window,
+                            url,
+                            sample_requests=hls_window_sample_requests,
+                        )
+                    except HlsUnsupportedError as exc:
+                        if exc.kind == "window_too_short":
+                            await call_with_flood_retry(event.respond, texts.HLS_WINDOW_TOO_SHORT)
+                            return
+                        if exc.kind != "malformed":
+                            preflight_errors = {
+                                "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
+                                "sample_aes_unsupported": texts.HLS_DRM_UNSUPPORTED,
+                                "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
+                            }
+                            await call_with_flood_retry(
+                                event.respond, preflight_errors.get(exc.kind, str(exc))
+                            )
+                            return
+                    else:
+                        estimated_bytes = analysis.estimated_bytes
+                        if estimated_bytes is None:
+                            size_text = "הגודל לא ידוע"
+                            credits_text = "הקרדיטים לא ידועים"
+                        else:
+                            size_text = f"~{round(estimated_bytes / BYTES_PER_MB)}MB"
+                            credits = credits_for_sizes([estimated_bytes], mb_per_credit)
+                            credits_text = f"~{credits} קרדיטים"
+                        size_warning = (
+                            texts.HLS_CONFIRM_SIZE_WARNING
+                            if estimated_bytes is not None and estimated_bytes > max_download_size
+                            else ""
+                        )
+                        confirmation_text = texts.HLS_CONFIRM_PROMPT.format(
+                            duration=_format_duration(analysis.window_duration),
+                            segments=analysis.segment_count,
+                            quality=_hls_quality(analysis),
+                            size=size_text,
+                            credits=credits_text,
+                            size_warning=size_warning,
+                        )
+                        confirmation = await call_with_flood_retry(
+                            event.respond,
+                            confirmation_text,
+                            buttons=_hls_confirmation_markup(analysis),
+                        )
+                        confirmation_id = getattr(confirmation, "id", None)
+                        if confirmation_id is not None:
+                            pending_hls_confirmations[(event.chat_id, confirmation_id)] = (
+                                _PendingHlsConfirmation(
+                                    url=url,
+                                    owner_id=event.sender_id,
+                                    analysis=analysis,
+                                    created_at=time.monotonic(),
+                                )
+                            )
+                        return
 
                 message = await call_with_flood_retry(
                     event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()

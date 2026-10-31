@@ -191,6 +191,21 @@ HLS_WINDOW_EXPIRED = (
 HLS_WINDOW_TOO_SHORT = (
     "❌ מה קרה: חלון השידור הזמין קצר מדי להורדה.\n➡️ מה לעשות: המתן מעט ונסה שוב."
 )
+HLS_CONFIRM_PROMPT = (
+    "🔴 זוהה שידור חי\n"
+    "זמין להורדה: {duration} ({segments} מקטעים) · {quality} · {size} · {credits}"
+    "{size_warning}\n\n"
+    "בחר כמה להוריד:"
+)
+HLS_CONFIRM_SIZE_WARNING = "\n⚠️ כל החלון חורג ממגבלת ההורדה; אפשר לבחור טווח קצר יותר."
+HLS_CONFIRM_WHOLE = "כל החלון ({duration})"
+HLS_CONFIRM_LAST_30 = "30 דקות אחרונות"
+HLS_CONFIRM_LAST_10 = "10 דקות אחרונות"
+HLS_CONFIRM_CANCEL = "ביטול"
+HLS_CONFIRM_NOT_OWNER = "רק מי ששלח את הקישור יכול לבחור טווח."
+HLS_CONFIRM_EXPIRED_TOAST = "פג תוקף בחירת הטווח. שלח את הקישור שוב."
+HLS_CONFIRM_EXPIRED = "⏰ פג תוקף הקישור לשידור החי.\n➡️ שלח את הקישור שוב לבחירת טווח חדש."
+HLS_CONFIRM_CANCELLED = "❌ ההורדה בוטלה."
 
 CANCEL_BUTTON = "❌ ביטול"
 REQUEST_CANCELLED = "❌ הבקשה בוטלה."

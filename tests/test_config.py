@@ -14,8 +14,18 @@ def test_hls_window_defaults_and_bounds(monkeypatch):
     assert settings.hls_segment_workers == 8
     assert settings.hls_max_gap_ratio == 0.02
     assert settings.hls_window_sample_requests == 6
+    assert settings.hls_confirm_ttl_seconds == 600
 
     monkeypatch.setenv("HLS_SEGMENT_WORKERS", "33")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+    monkeypatch.setenv("HLS_SEGMENT_WORKERS", "8")
+    monkeypatch.setenv("HLS_CONFIRM_TTL_SECONDS", "59")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+    monkeypatch.setenv("HLS_CONFIRM_TTL_SECONDS", "3601")
     with pytest.raises(ValidationError):
         Settings(_env_file=None)
 

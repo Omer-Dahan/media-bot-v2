@@ -292,7 +292,7 @@ The bot provides a clean, single-message Hebrew interface in Telegram:
 > The progress bar is a 10-cell moon-phase indicator (🌑 empty → 🌒🌓🌔 partial → 🌕 full) rather than block characters, shown on its own line below the size pair so it renders in plain left-to-right reading order with no bidi control characters involved; it fills toward the right as percent increases, and the last cell only turns 🌕 at exactly 100%. An LRM (U+200E) follows each Hebrew label on the lines above so the digits and units that follow stay left-to-right; the bar/percent line carries no such mark since it has no Hebrew label to anchor.
 
 1. **User Ingestion**: The user sends any supported media link in a **private chat only** - the bot does not respond in groups or channels.
-2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Direct links, TikTok, Instagram, and Facebook start downloading immediately.
+2. **Quality Selection**: For YouTube URLs, the bot fetches title and duration within 8 seconds and displays an interactive inline quality keyboard (`1080p`, `720p`, `480p`, `360p`, or `🎵 שמע בלבד`). Live HLS (`.m3u8`) links show the currently available DVR window and a range picker before any segment download; forward recording is not supported. Other direct links, TikTok, Instagram, and Facebook start downloading immediately.
 3. **Live Progress Feedback**: The status message updates in place with a real-time progress bar, speed counter, and ETA. The inline `[ ❌ ביטול ]` button allows the user to abort the transfer cooperatively at any time.
 4. **Delivery & Archiving**: The completed media is delivered with formatted captions, streamable flags, and optional separate subtitle files. The message is quietly archived to the configured `ARCHIVE_CHANNEL`.
 5. **Instant Cache Hits**: Subsequent requests for the same URL and quality are served instantly from the archive channel without re-downloading or consuming credits.
@@ -484,6 +484,7 @@ media-bot-v2/
 | `HLS_SEGMENT_WORKERS` | HLS | Parallel segment fetches for a live window, from 1 to 32 | `8` |
 | `HLS_MAX_GAP_RATIO` | HLS | Maximum missing segment ratio accepted in a live window, from 0 to 1 | `0.02` |
 | `HLS_WINDOW_SAMPLE_REQUESTS` | HLS | Bounded HEAD samples used for the live-window size estimate, from 3 to 10 | `6` |
+| `HLS_CONFIRM_TTL_SECONDS` | HLS | Lifetime of a live-window range picker, from 60 to 3600 seconds | `600` |
 | `DOWNLOAD_DIR` | Storage | Scratch folder for in-flight downloads (cleaned up after each job) | `downloads` |
 | `LOG_FILE` | Logging | File path for structured JSON logs | `logs/bot.log` |
 | `LOG_MAX_BYTES` | Logging | Maximum log file size before rotation in bytes | `10485760` (10 MB) |
