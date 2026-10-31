@@ -56,6 +56,8 @@ _DEFAULT_FFMPEG_TIMEOUT = 180.0
 _DEFAULT_MAX_HEIGHT = 720
 _DEFAULT_SEGMENT_WORKERS = 8
 _DEFAULT_MAX_GAP_RATIO = 0.02
+_MAX_GAP_COUNT = 3
+_MAX_GAP_DURATION_RATIO = 0.01
 _DEFAULT_WINDOW_SAMPLE_REQUESTS = 6
 _BOM_UTF8 = b"\xef\xbb\xbf"
 
@@ -510,8 +512,13 @@ def _resolve_window_playlist(
     max_playlist_bytes: int = _DEFAULT_MAX_PLAYLIST_BYTES,
     max_segments: int = _DEFAULT_MAX_SEGMENTS,
     counter: _ByteCounter | None = None,
-) -> tuple[MediaPlaylist, str, Variant | None]:
+) -> tuple[MediaPlaylist, str, Variant | None, MasterPlaylist | None, str | None]:
+    """Same descent as `_resolve_media_playlist`, but also returns the
+    outermost master (and its URL) so a live window can resolve its
+    selected variant's AUDIO group, the same way the finite path does."""
     selected: Variant | None = None
+    outer_master: MasterPlaylist | None = None
+    outer_master_url: str | None = None
     visited: set[str] = set()
     current_url = url
     for _ in range(max_playlist_depth + 1):
@@ -526,7 +533,10 @@ def _resolve_window_playlist(
             response.close()
         if isinstance(doc, MediaPlaylist):
             _validate_playlist_size(doc, max_segments)
-            return doc, final_url, selected
+            return doc, final_url, selected, outer_master, outer_master_url
+        if outer_master is None:
+            outer_master = doc
+            outer_master_url = final_url
         selected = select_variant(doc, max_height)
         current_url = urljoin(final_url, selected.uri)
     raise HlsUnsupportedError("playlist_depth_exceeded")
@@ -551,7 +561,7 @@ def analyze_hls_window(
     max_segments: int = _DEFAULT_MAX_SEGMENTS,
 ) -> HlsWindowInfo:
     """Fetch one live snapshot and estimate its size without writing media."""
-    media, media_url, variant = _resolve_window_playlist(
+    media, media_url, variant, _outer_master, _outer_master_url = _resolve_window_playlist(
         url, max_height, max_playlist_depth, max_playlist_bytes, max_segments
     )
     if media.has_endlist:
@@ -977,7 +987,8 @@ def _download_segment_batch(
     existing: dict[int, _DownloadedSegment],
 ) -> None:
     pending = [segment for segment in segments if segment.sequence not in existing]
-    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hls-segment") as pool:
+    pool = ThreadPoolExecutor(max_workers=workers, thread_name_prefix="hls-segment")
+    try:
         futures = {}
         for segment in pending:
             path = work_dir / f"seg-{segment.sequence:020d}{_segment_extension(segment.uri)}"
@@ -993,6 +1004,36 @@ def _download_segment_batch(
         for future in as_completed(futures):
             downloaded = future.result()
             existing[downloaded.segment.sequence] = downloaded
+    except Exception:
+        # A non-404 segment failure (network error, size cap, cancellation)
+        # must not let every other already-queued-but-not-started segment
+        # keep fetching before the error surfaces - cancel_futures=True drops
+        # them; futures already running are let finish (they can't be
+        # interrupted from here), matching ThreadPoolExecutor's own contract.
+        pool.shutdown(wait=True, cancel_futures=True)
+        raise
+    else:
+        pool.shutdown(wait=True)
+
+
+def _enforce_gap_limits(
+    gap_count: int,
+    total_count: int,
+    missing_duration: float,
+    selected_duration: float,
+    max_gap_ratio: float,
+) -> None:
+    """A live window's gaps can slip under the ratio limit yet still lose a
+    disproportionate amount of content (one long missing segment) or a
+    disproportionate segment count - either one, independent of the ratio,
+    must also fail the window rather than deliver it silently short."""
+    gap_ratio = gap_count / total_count if total_count else 1.0
+    if gap_ratio > max_gap_ratio:
+        raise HlsUnsupportedError("window_expired")
+    if gap_count > _MAX_GAP_COUNT:
+        raise HlsUnsupportedError("window_expired")
+    if selected_duration > 0 and missing_duration > selected_duration * _MAX_GAP_DURATION_RATIO:
+        raise HlsUnsupportedError("window_expired")
 
 
 def _continuous_runs(downloaded: list[_DownloadedSegment]) -> list[list[_DownloadedSegment]]:
@@ -1116,7 +1157,7 @@ def download_hls_window(
     max_playlist_depth: int = _DEFAULT_MAX_PLAYLIST_DEPTH,
     max_playlist_bytes: int = _DEFAULT_MAX_PLAYLIST_BYTES,
     max_segments: int = _DEFAULT_MAX_SEGMENTS,
-    _snapshot: tuple[MediaPlaylist, str] | None = None,
+    _snapshot: tuple[MediaPlaylist, str, str | None, MasterPlaylist | None, str | None] | None = None,
 ) -> HlsWindowDownloadResult:
     """Download one published live window and convert it to a finite MP4."""
     del progress  # Reserved for M2b progress reporting.
@@ -1128,11 +1169,12 @@ def download_hls_window(
     downloaded: dict[int, _DownloadedSegment] = {}
     try:
         if _snapshot is None:
-            media, media_url, _ = _resolve_window_playlist(
+            media, media_url, variant, outer_master, outer_master_url = _resolve_window_playlist(
                 url, max_height, max_playlist_depth, max_playlist_bytes, max_segments, counter
             )
+            audio_group = variant.audio_group if variant is not None else None
         else:
-            media, media_url = _snapshot
+            media, media_url, audio_group, outer_master, outer_master_url = _snapshot
         if media.has_endlist:
             raise HlsUnsupportedError("malformed", "playlist is not live")
         for segment in media.segments:
@@ -1158,7 +1200,23 @@ def download_hls_window(
             selected, media_url, work_dir, counter, cancel_token, segment_workers, downloaded
         )
 
-        refreshed, refreshed_url, _ = _resolve_window_playlist(
+        audio_playlist_path = _download_window_audio(
+            audio_group,
+            outer_master,
+            outer_master_url,
+            media_url,
+            window_seconds,
+            work_dir,
+            counter,
+            cancel_token,
+            segment_workers,
+            max_height,
+            max_playlist_depth,
+            max_playlist_bytes,
+            max_segments,
+        )
+
+        refreshed, refreshed_url, _, _, _ = _resolve_window_playlist(
             media_url,
             max_height,
             max_playlist_depth,
@@ -1170,13 +1228,12 @@ def download_hls_window(
             segment for segment in refreshed.segments if segment.sequence > selected[-1].sequence
         ]
         if later:
-            refreshed_selected = _select_window(refreshed.segments, window_seconds)
-            if window_seconds is None:
-                refreshed_selected = refreshed_selected[-len(selected) :]
-            allowed = {segment.sequence for segment in refreshed_selected}
-            new_tail = [segment for segment in later if segment.sequence in allowed]
+            # Append only the newly-published tail to the original snapshot -
+            # never replace `selected` with a re-selected window, which would
+            # silently drop already-downloaded segments from the front once
+            # the live window has slid forward (spec/PLAN-M3U8.md DVR notes).
             _download_segment_batch(
-                new_tail,
+                later,
                 refreshed_url,
                 work_dir,
                 counter,
@@ -1184,7 +1241,7 @@ def download_hls_window(
                 segment_workers,
                 downloaded,
             )
-            selected = refreshed_selected
+            selected = selected + later
             media_url = refreshed_url
 
         selected_media = MediaPlaylist(
@@ -1206,9 +1263,9 @@ def download_hls_window(
         ]
         gaps = [item for item in final_items if item.path is None]
         missing_duration = sum(item.segment.duration for item in gaps)
-        gap_ratio = len(gaps) / len(final_items) if final_items else 1.0
-        if gap_ratio > max_gap_ratio:
-            raise HlsUnsupportedError("window_expired")
+        _enforce_gap_limits(
+            len(gaps), len(final_items), missing_duration, selected_duration, max_gap_ratio
+        )
         runs = _continuous_runs(final_items)
         if not runs:
             raise HlsUnsupportedError("window_too_short")
@@ -1218,7 +1275,7 @@ def download_hls_window(
             playlist_path = work_dir / f"run-{index:03d}.m3u8"
             run_output = work_dir / f"run-{index:03d}.mp4"
             _write_run_playlist(run, playlist_path, key_local_names, media_url, map_local_name)
-            _run_ffmpeg_remux(playlist_path, None, run_output, ffmpeg_timeout, cancel_token)
+            _run_ffmpeg_remux(playlist_path, audio_playlist_path, run_output, ffmpeg_timeout, cancel_token)
             run_outputs.append(run_output)
         if len(run_outputs) == 1:
             shutil.move(run_outputs[0], output_part)
@@ -1234,6 +1291,10 @@ def download_hls_window(
             or abs(actual_duration - delivered_duration) / delivered_duration > 0.05
         ):
             raise HlsDownloadError("concatenated HLS duration drift exceeds 5 percent")
+        if cancel_token is not None and cancel_token.is_set():
+            # A cancel that lands after the probe must not let the file
+            # become the final delivered output.
+            raise HlsDownloadError("cancelled")
         metadata = HlsWindowMetadata(
             selected_duration=selected_duration,
             delivered_duration=delivered_duration,
@@ -1250,6 +1311,88 @@ def download_hls_window(
     return HlsWindowDownloadResult(
         file_paths=[str(output_path)], title=output_path.name, window=metadata
     )
+
+
+def _download_window_audio(
+    audio_group: str | None,
+    outer_master: MasterPlaylist | None,
+    outer_master_url: str | None,
+    media_url: str,
+    window_seconds: float | None,
+    work_dir: Path,
+    counter: _ByteCounter,
+    cancel_token: CancellationToken | None,
+    segment_workers: int,
+    max_height: int,
+    max_playlist_depth: int,
+    max_playlist_bytes: int,
+    max_segments: int,
+) -> Path | None:
+    """Resolves and downloads the selected variant's AUDIO-group rendition
+    for a live window, muxed in as a second ffmpeg input (same approach as
+    the finite download_hls path). A live master that declares an audio
+    group whose rendition cannot be resolved or fetched must never fall
+    through to a silent video-only delivery - raises `audio_rendition_unavailable`
+    instead."""
+    if outer_master is None or not audio_group:
+        return None
+    rendition = select_audio_rendition(outer_master, audio_group)
+    if rendition is None or not rendition.get("URI"):
+        raise HlsUnsupportedError(
+            "audio_rendition_unavailable", "HLS live audio rendition could not be resolved"
+        )
+    audio_abs_url = urljoin(outer_master_url or media_url, rendition["URI"])
+    try:
+        audio_media, audio_media_url, _, _, _ = _resolve_window_playlist(
+            audio_abs_url, max_height, max_playlist_depth, max_playlist_bytes, max_segments, counter
+        )
+    except (DownloadTooLargeError, HlsDownloadError):
+        raise
+    except Exception as exc:
+        raise HlsUnsupportedError(
+            "audio_rendition_unavailable", "HLS live audio rendition could not be fetched"
+        ) from exc
+    for audio_segment in audio_media.segments:
+        _check_key_support(audio_segment.key)
+    _validate_key_urls(audio_media.segments, audio_media_url)
+    audio_selected = _select_window(audio_media.segments, window_seconds)
+    if not audio_selected:
+        raise HlsUnsupportedError(
+            "audio_rendition_unavailable", "HLS live audio rendition has no segments"
+        )
+    audio_dir = work_dir / "_audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    audio_downloaded: dict[int, _DownloadedSegment] = {}
+    _download_segment_batch(
+        audio_selected, audio_media_url, audio_dir, counter, cancel_token, segment_workers, audio_downloaded
+    )
+    audio_key_local_names = _fetch_keys(
+        MediaPlaylist(
+            segments=audio_selected,
+            has_endlist=False,
+            map_uri=None,
+            map_byterange=None,
+            media_sequence=audio_selected[0].sequence,
+        ),
+        audio_media_url,
+        audio_dir,
+        counter,
+        cancel_token,
+        [],
+    )
+    audio_items = [
+        audio_downloaded[segment.sequence]
+        for segment in audio_selected
+        if audio_downloaded.get(segment.sequence) is not None
+        and audio_downloaded[segment.sequence].path is not None
+    ]
+    if not audio_items:
+        raise HlsUnsupportedError(
+            "audio_rendition_unavailable", "HLS live audio rendition had no downloadable segments"
+        )
+    audio_playlist_path = audio_dir / "audio.m3u8"
+    _write_run_playlist(audio_items, audio_playlist_path, audio_key_local_names, audio_media_url)
+    return audio_playlist_path
 
 
 def download_hls(
@@ -1298,7 +1441,7 @@ def download_hls(
                 max_playlist_depth=max_playlist_depth,
                 max_playlist_bytes=max_playlist_bytes,
                 max_segments=max_segments,
-                _snapshot=(media, media_url),
+                _snapshot=(media, media_url, audio_group, outer_master, outer_master_url),
             )
         _check_media_playlist_support(media)
         video_playlist = _materialize_media_playlist(

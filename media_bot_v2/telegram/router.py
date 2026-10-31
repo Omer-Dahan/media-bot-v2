@@ -113,6 +113,7 @@ _HLS_RETRY_POLICY = {
     "https_key_required": False,
     "size_cap": False,
     "transport": True,
+    "audio_rendition_unavailable": True,
 }
 _HLS_KIND_TEXT = {
     "live": texts.HLS_LIVE_UNSUPPORTED,
@@ -124,6 +125,7 @@ _HLS_KIND_TEXT = {
     "sample_aes_unsupported": texts.HLS_SAMPLE_AES_UNSUPPORTED,
     "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
     "size_cap": texts.HLS_SIZE_CAP,
+    "audio_rendition_unavailable": texts.HLS_AUDIO_RENDITION_UNAVAILABLE,
 }
 _HLS_FAILURE_TEXT_KINDS = {message: kind for kind, message in _HLS_KIND_TEXT.items()}
 
@@ -402,6 +404,24 @@ def register_handlers(
     # handler needs no id encoded into callback_data at all.
     active_cancellations: dict[tuple[int, int], _ActiveRequest] = {}
     pending_hls_confirmations: dict[tuple[int, int], _PendingHlsConfirmation] = {}
+
+    def _sweep_expired_hls_confirmations(*, except_key: tuple[int, int] | None = None) -> None:
+        """Nobody presses a confirmation button on most expired entries (the
+        handler below only ever evicts the one key it was invoked for) -
+        without this, a long-running process accumulates one stale entry per
+        ignored live-window prompt forever. Called on every new preflight
+        and on every button press, so the dict never outgrows actual
+        traffic. `except_key` keeps the handler's own entry around long
+        enough for it to run its own TTL check and give that specific
+        message its own "expired" edit, instead of a generic no-op."""
+        now = time.monotonic()
+        expired = [
+            key
+            for key, pending in pending_hls_confirmations.items()
+            if key != except_key and now - pending.created_at > hls_confirm_ttl_seconds
+        ]
+        for key in expired:
+            pending_hls_confirmations.pop(key, None)
     direct_engine = DirectEngine(
         max_download_size=max_download_size,
         hls_segment_workers=hls_segment_workers,
@@ -613,8 +633,13 @@ def register_handlers(
                             hls_segment_workers=hls_segment_workers,
                             hls_max_gap_ratio=hls_max_gap_ratio,
                         )
-                    cache_key = compute_cache_key(
-                        job_url, job_quality or "direct", delivery.send_as
+                    # A live-window DVR clip is never reusable - a second
+                    # request for the same URL/range must always re-download,
+                    # never be served (or stored as) a stale recording.
+                    cache_key = (
+                        None
+                        if isinstance(engine, _HlsWindowEngine)
+                        else compute_cache_key(job_url, job_quality or "direct", delivery.send_as)
                     )
 
                 uploader = TelethonUploader(
@@ -916,6 +941,7 @@ def register_handlers(
     @client.on(events.CallbackQuery(pattern=rb"^hlsc:"))
     async def hls_confirmation_handler(event: events.CallbackQuery.Event) -> None:
         key = (event.chat_id, event.message_id)
+        _sweep_expired_hls_confirmations(except_key=key)
         pending = pending_hls_confirmations.get(key)
         if pending is None:
             await _safe_answer_callback(event, texts.HLS_CONFIRM_EXPIRED_TOAST, alert=True)
@@ -1215,6 +1241,7 @@ def register_handlers(
 
                 is_hls_candidate = urlparse(url).path.lower().endswith(".m3u8")
                 if is_hls_candidate:
+                    _sweep_expired_hls_confirmations()
                     try:
                         analysis = await run_in_thread(
                             analyze_hls_window,

@@ -653,12 +653,16 @@ class DownloadPipeline:
                     else:
                         quality_label = _quality_label(info.height, as_document=delivery.as_document)
                     duration_seconds = info.duration or None
+                window = getattr(result, "window", None)
                 summary = texts.format_download_summary(
                     quality_label=quality_label,
                     duration_seconds=duration_seconds,
                     size_bytes=sum(delivered_sizes) or None,
                     elapsed_seconds=time.monotonic() - request_started,
                     is_audio=is_audio,
+                    window_gap_count=window.gap_count if window is not None else None,
+                    window_delivered_duration=window.delivered_duration if window is not None else None,
+                    window_requested_duration=window.selected_duration if window is not None else None,
                 )
                 await _update_progress(progress, summary, is_terminal=True)
         except TimeoutError as exc:

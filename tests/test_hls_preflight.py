@@ -235,6 +235,53 @@ async def test_finite_vod_keeps_direct_pipeline_path(monkeypatch):
     assert event.responses[0][0] == texts.DOWNLOAD_STARTED
 
 
+async def test_live_window_download_bypasses_cache(monkeypatch):
+    monkeypatch.setattr(router, "analyze_hls_window", lambda *args, **kwargs: _window())
+
+    def fake_download(url, dest_dir, max_size, cancel_token, window_seconds=None, **kwargs):
+        return DownloadResult(file_paths=[])
+
+    monkeypatch.setattr(router, "download_hls_window", fake_download)
+    pipeline = _Pipeline(invoke_engine=True)
+    client = _make_router(pipeline)
+    url_event = _UrlEvent("https://live.example/index.m3u8")
+    await _handler(client, events.NewMessage)(url_event)
+
+    callback = _CallbackEvent(encode("hlsc", "all"), url_event.messages[0])
+    await _handler(client, events.CallbackQuery, b"hlsc:all")(callback)
+
+    assert len(pipeline.calls) == 1
+    assert pipeline.calls[0]["cache_key"] is None
+
+
+async def test_sweeps_expired_confirmation_on_new_preflight(monkeypatch):
+    now = [0.0]
+    monkeypatch.setattr(router.time, "monotonic", lambda: now[0])
+    monkeypatch.setattr(router, "analyze_hls_window", lambda *args, **kwargs: _window())
+    pipeline = _Pipeline()
+    client = _make_router(pipeline, hls_confirm_ttl_seconds=600)
+
+    first_event = _UrlEvent("https://live.example/a.m3u8")
+    await _handler(client, events.NewMessage)(first_event)
+    first_message = first_event.messages[0]
+
+    now[0] = 601.0
+    second_event = _UrlEvent("https://live.example/b.m3u8")
+    # A new preflight sweeps every expired pending confirmation, including
+    # this one, which nobody ever pressed a button on.
+    await _handler(client, events.NewMessage)(second_event)
+
+    callback = _CallbackEvent(encode("hlsc", "all"), first_message)
+    await _handler(client, events.CallbackQuery, b"hlsc:all")(callback)
+
+    assert callback.answers == [(texts.HLS_CONFIRM_EXPIRED_TOAST, True)]
+    # Already swept before this click, so the handler's own "not found"
+    # branch ran (no edit) rather than its own expired-TTL branch (which
+    # does edit the message) - proof the entry didn't just sit there.
+    assert first_message.edits == []
+    assert pipeline.calls == []
+
+
 async def test_live_window_download_uses_cancel_registry_and_unregisters(monkeypatch):
     monkeypatch.setattr(router, "analyze_hls_window", lambda *args, **kwargs: _window())
     pipeline = _HangingPipeline()

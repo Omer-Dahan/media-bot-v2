@@ -206,6 +206,11 @@ HLS_SIZE_CAP = (
     "❌ מה קרה: חלון ה-HLS חורג ממגבלת ההורדה המוגדרת בבוט.\n"
     "➡️ מה לעשות: בחר טווח קצר יותר."
 )
+HLS_AUDIO_RENDITION_UNAVAILABLE = (
+    "❌ מה קרה: לא ניתן היה להשיג את רצועת השמע של השידור החי.\n"
+    "➡️ מה לעשות: נסה שוב מאוחר יותר."
+)
+HLS_WINDOW_GAPS_NOTICE = "⚠️ נמסרו {delivered} מתוך {requested} ({gap_count} מקטעים חסרים)"
 HLS_CONFIRM_PROMPT = (
     "🔴 זוהה שידור חי\n"
     "זמין להורדה: {duration} ({segments} מקטעים) · {quality} · {size} · {credits}"
@@ -530,11 +535,17 @@ def format_download_summary(
     elapsed_seconds: float | None = None,
     is_audio: bool = False,
     from_cache: bool = False,
+    window_gap_count: int | None = None,
+    window_delivered_duration: float | None = None,
+    window_requested_duration: float | None = None,
 ) -> str:
     """`DOWNLOAD_DONE` plus whichever of quality/format, duration, size, and
     total request time are actually known - never a guessed or placeholder
     value, and never a credits balance (that stays in /settings only, per
-    the owner's standing decision - see SETTINGS_CREDITS)."""
+    the owner's standing decision - see SETTINGS_CREDITS).
+
+    `window_*` surfaces a live-window download's gaps (media_bot_v2/engines
+    /hls.py HlsWindowMetadata) - omitted entirely when there were none."""
     lines = [DOWNLOAD_DONE]
     if from_cache:
         lines.append(CACHE_DELIVERY_SUMMARY)
@@ -556,6 +567,15 @@ def format_download_summary(
             lines.append(f"⏱️ נמסר ב-{_elapsed_text(elapsed_seconds)}")
         else:
             lines.append(f"⏱️ הושלם ב-{_elapsed_text(elapsed_seconds)}")
+
+    if window_gap_count:
+        lines.append(
+            HLS_WINDOW_GAPS_NOTICE.format(
+                delivered=_duration_text(int(window_delivered_duration or 0)),
+                requested=_duration_text(int(window_requested_duration or 0)),
+                gap_count=window_gap_count,
+            )
+        )
 
     return "\n".join(lines)
 

@@ -4,6 +4,7 @@ import statistics
 import subprocess
 import threading
 import time
+from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass, field
 
 import pytest
@@ -11,6 +12,7 @@ import requests
 
 from media_bot_v2.engines import hls
 from media_bot_v2.engines.base import CancellationToken, DownloadTooLargeError
+from media_bot_v2.telegram import texts
 
 FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
@@ -388,3 +390,155 @@ def test_window_download_every_segment_and_key_request_goes_through_safe_request
     expected_segments = {f"http://127.0.0.1:{server.server_port}/seg-{i}.ts" for i in range(4)}
     assert expected_segments <= set(recorded)
     assert "https://keys.test/window-key" in recorded
+
+
+def test_tail_refresh_appends_without_dropping_snapshot(live_server, tmp_path, bypass_ssrf_guard):
+    url, state = live_server(refresh_advance=5)
+    result = hls.download_hls_window(url, tmp_path, None, None)
+
+    # Snapshot window (105 segments) plus the appended tail (5 more
+    # published during the download) - never a re-selected, shifted window
+    # that would have dropped the snapshot's oldest segments.
+    assert result.window.selected_duration == pytest.approx(110 * 0.2)
+    assert result.window.delivered_duration == pytest.approx(110 * 0.2)
+    assert result.window.gap_count == 0
+    assert set(range(1000, 1110)) <= set(state.get_order)
+    assert len(set(state.get_order)) == 110
+
+
+def test_gaps_under_all_limits_succeed_and_message_mentions_them(live_server, tmp_path, bypass_ssrf_guard):
+    url, _ = live_server(count=250, missing={1000, 1050})
+    result = hls.download_hls_window(url, tmp_path, None, None, max_gap_ratio=0.02)
+
+    assert result.window.gap_count == 2
+    assert result.window.missing_duration == pytest.approx(0.4)
+
+    message = texts.format_download_summary(
+        window_gap_count=result.window.gap_count,
+        window_delivered_duration=result.window.delivered_duration,
+        window_requested_duration=result.window.selected_duration,
+    )
+    assert "2" in message
+    assert "מקטעים חסרים" in message
+
+
+def test_gap_count_limit_triggers_window_expired_independent_of_ratio(
+    live_server, tmp_path, bypass_ssrf_guard
+):
+    # 4 gaps out of 250 segments is only a 1.6% ratio - well under the 2%
+    # ratio cap - but the absolute count cap (3) must still catch it.
+    url, _ = live_server(count=250, missing={1000, 1050, 1100, 1150})
+    with pytest.raises(hls.HlsUnsupportedError, match="window_expired") as exc:
+        hls.download_hls_window(url, tmp_path, None, None, max_gap_ratio=0.02)
+    assert exc.value.kind == "window_expired"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_single_large_missing_segment_triggers_duration_limit(tmp_path, monkeypatch):
+    """1199 normal 1s segments plus one anomalous missing 3600s segment:
+    gap_count=1 (under the abs cap of 3) and gap_ratio=1/1200 (well under
+    the 2% ratio cap), yet the missing segment alone is most of the
+    delivered content - only the duration-based cap catches this."""
+    playlist_url = "https://media.test/live.m3u8"
+    lines = ["#EXTM3U", "#EXT-X-MEDIA-SEQUENCE:0"]
+    for i in range(1199):
+        lines += ["#EXTINF:1.000000,", f"seg-{i}.ts"]
+    lines += ["#EXTINF:3600.000000,", "seg-1199.ts"]
+    playlist_body = ("\n".join(lines) + "\n").encode()
+
+    def fake_request(method, url, **kwargs):
+        if url == playlist_url:
+            return _response(url, playlist_body)
+        if url.endswith("seg-1199.ts"):
+            return _response(url, b"", status=404)
+        return _response(url, b"x")
+
+    monkeypatch.setattr(hls, "safe_request", fake_request)
+
+    with pytest.raises(hls.HlsUnsupportedError, match="window_expired") as exc:
+        hls.download_hls_window(playlist_url, tmp_path, None, None)
+    assert exc.value.kind == "window_expired"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_audio_rendition_404_raises_classified_error(tmp_path, monkeypatch):
+    master_url = "https://media.test/master.m3u8"
+    video_url = "https://media.test/video.m3u8"
+    audio_url = "https://media.test/audio.m3u8"
+    master_body = (
+        b"#EXTM3U\n"
+        b'#EXT-X-MEDIA:TYPE=AUDIO,GROUP-ID="aud",NAME="main",DEFAULT=YES,URI="audio.m3u8"\n'
+        b'#EXT-X-STREAM-INF:BANDWIDTH=1000000,RESOLUTION=640x360,AUDIO="aud"\n'
+        b"video.m3u8\n"
+    )
+    video_body = (
+        b"#EXTM3U\n#EXT-X-MEDIA-SEQUENCE:1000\n"
+        b"#EXTINF:1.0,\nseg-1000.ts\n#EXTINF:1.0,\nseg-1001.ts\n"
+    )
+
+    def fake_request(method, url, **kwargs):
+        if url == master_url:
+            return _response(url, master_body)
+        if url == video_url:
+            return _response(url, video_body)
+        if url == audio_url:
+            return _response(url, b"", status=404)
+        if url.endswith(".ts"):
+            return _response(url, b"fake-ts-bytes")
+        raise AssertionError(f"unexpected fetch: {url}")
+
+    monkeypatch.setattr(hls, "safe_request", fake_request)
+
+    with pytest.raises(hls.HlsUnsupportedError) as excinfo:
+        hls.download_hls_window(master_url, tmp_path, None, None)
+
+    assert excinfo.value.kind == "audio_rendition_unavailable"
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_segment_batch_failure_cancels_remaining_futures(tmp_path, monkeypatch):
+    shutdown_calls: list[bool] = []
+    original_shutdown = ThreadPoolExecutor.shutdown
+
+    def spy_shutdown(self, wait=True, cancel_futures=False):
+        shutdown_calls.append(cancel_futures)
+        return original_shutdown(self, wait=wait, cancel_futures=cancel_futures)
+
+    monkeypatch.setattr(ThreadPoolExecutor, "shutdown", spy_shutdown)
+
+    def fake_fetch(segment, base_url, dest, counter, cancel_token):
+        if segment.sequence == 0:
+            raise hls.HlsDownloadError("boom")
+        return hls._DownloadedSegment(segment, dest)
+
+    monkeypatch.setattr(hls, "_fetch_window_segment", fake_fetch)
+    segments = [
+        hls.Segment(uri=f"seg{i}.ts", duration=1.0, byterange=None, key=None, discontinuity=False, sequence=i)
+        for i in range(5)
+    ]
+    existing: dict[int, hls._DownloadedSegment] = {}
+    with pytest.raises(hls.HlsDownloadError):
+        hls._download_segment_batch(
+            segments, "https://media.test/", tmp_path, hls._ByteCounter(None), None, 1, existing
+        )
+
+    assert True in shutdown_calls
+
+
+def test_cancel_after_probe_leaves_no_final_file(live_server, tmp_path, bypass_ssrf_guard, monkeypatch):
+    url, _ = live_server(count=20)
+    token = CancellationToken()
+    original_probe = hls._probe_duration
+
+    def probe_then_cancel(path):
+        duration = original_probe(path)
+        token.cancel()
+        return duration
+
+    monkeypatch.setattr(hls, "_probe_duration", probe_then_cancel)
+
+    with pytest.raises(hls.HlsDownloadError, match="cancelled"):
+        hls.download_hls_window(url, tmp_path, None, token)
+
+    assert not (tmp_path / "hls-download.mp4").exists()
+    assert list(tmp_path.iterdir()) == []
