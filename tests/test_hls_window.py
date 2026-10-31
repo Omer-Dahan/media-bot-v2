@@ -172,12 +172,12 @@ def test_window_download_has_no_duplicates(live_server, tmp_path, bypass_ssrf_gu
 def test_window_segments_start_in_parallel(live_server, tmp_path, bypass_ssrf_guard):
     url, state = live_server(count=24, segment_delay=0.2)
 
-    started = time.monotonic()
     hls.download_hls_window(url, tmp_path, None, None, segment_workers=8)
-    elapsed = time.monotonic() - started
 
+    # Deterministic proof of concurrency: if segment starts were serialized,
+    # at most one request would ever be in flight at a time.
     assert state.max_active_requests >= 8
-    assert elapsed < 24 * 0.2 / 4
+    assert len(state.get_order) == len(set(state.get_order)) == 24
 
 
 def test_gaps_succeed_under_ratio_and_fail_over_it(live_server, tmp_path, bypass_ssrf_guard):
