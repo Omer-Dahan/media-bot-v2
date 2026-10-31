@@ -32,6 +32,9 @@ MEDIA_PLAYLIST = (
     "/seg0.ts\n"
     "#EXT-X-ENDLIST\n"
 )
+LIVE_PLAYLIST = MEDIA_PLAYLIST.replace("#EXT-X-ENDLIST\n", "").replace(
+    "#EXT-X-TARGETDURATION:1\n", "#EXT-X-TARGETDURATION:1\n#EXT-X-MEDIA-SEQUENCE:42\n"
+)
 
 NOT_A_PLAYLIST = "<html><body>this is a web page, not HLS</body></html>"
 
@@ -60,6 +63,8 @@ def _make_handler(seg0: bytes):
         def do_GET(self):
             if self.path == "/video.m3u8":
                 self._text(MEDIA_PLAYLIST, "application/octet-stream")
+            elif self.path == "/live.m3u8":
+                self._text(LIVE_PLAYLIST, "application/vnd.apple.mpegurl")
             elif self.path == "/mime-only-stream":
                 # No extension at all: only the HLS Content-Type identifies it.
                 self._text(MEDIA_PLAYLIST, "application/vnd.apple.mpegurl")
@@ -124,6 +129,14 @@ async def test_m3u8_extension_routes_to_hls_engine(local_server, tmp_path):
         check=True, capture_output=True, text=True,
     )
     assert "video" in probe.stdout
+
+
+@pytest.mark.usefixtures("bypass_ssrf_guard")
+async def test_live_m3u8_routes_to_window_download(local_server, tmp_path):
+    result = await DirectEngine().download(f"{local_server}/live.m3u8", dest_dir=tmp_path)
+    assert result.file_paths[0].endswith(".mp4")
+    assert result.window.selected_duration == pytest.approx(1.0)
+    assert result.window.gap_count == 0
 
 
 @pytest.mark.usefixtures("bypass_ssrf_guard")

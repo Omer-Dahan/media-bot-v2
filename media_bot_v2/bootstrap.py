@@ -169,6 +169,8 @@ def main() -> None:
         upload_workers=settings.upload_workers,
         upload_connections=settings.upload_connections,
         max_download_size=settings.max_download_size,
+        hls_segment_workers=settings.hls_segment_workers,
+        hls_max_gap_ratio=settings.hls_max_gap_ratio,
         limiter=limiter,
         force_ipv4=settings.force_ipv4,
         youtube_cookies_file=settings.youtube_cookies_file,

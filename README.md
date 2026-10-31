@@ -69,7 +69,7 @@ Ground-up rewrite: parallel multi-connection uploads, adaptive provider fallback
 <td width="33%" valign="top">
 
 ### 🎬 Universal Media Ingestion
-Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, **Facebook**, **direct HTTP(S)** links, and finite **HLS (`.m3u8`)** VOD playlists. Supports YouTube playlists and TikTok/Instagram photo slideshows.
+Extracts video and audio from **YouTube**, **TikTok**, **Instagram**, **Facebook**, **direct HTTP(S)** links, and finite or currently published live-window **HLS (`.m3u8`)** playlists. Supports YouTube playlists and TikTok/Instagram photo slideshows.
 
 </td>
 <td width="33%" valign="top">
@@ -481,6 +481,9 @@ media-bot-v2/
 | `ERROR_REPORT_MAX_PER_MINUTE` | Error reports | Per-minute ceiling on sends to the error report channel (report message and truncated-log `.txt` each spend one slot; minimum `1`) | `10` |
 | `REQUEST_LOG_MAX_LINES` | Error reports | Lines kept in the per-request in-memory log buffer attached to a failure report | `300` |
 | `MAX_DOWNLOAD_SIZE` | Storage | Download-side size cap in bytes enforced by `DownloadGuard`, independent of Telegram's 2000MiB per-file split limit (minimum: the splitter's 2000MiB-per-part cap; a lower value is rejected at startup) | `4294967296` (4 GiB) |
+| `HLS_SEGMENT_WORKERS` | HLS | Parallel segment fetches for a live window, from 1 to 32 | `8` |
+| `HLS_MAX_GAP_RATIO` | HLS | Maximum missing segment ratio accepted in a live window, from 0 to 1 | `0.02` |
+| `HLS_WINDOW_SAMPLE_REQUESTS` | HLS | Bounded HEAD samples used for the live-window size estimate, from 3 to 10 | `6` |
 | `DOWNLOAD_DIR` | Storage | Scratch folder for in-flight downloads (cleaned up after each job) | `downloads` |
 | `LOG_FILE` | Logging | File path for structured JSON logs | `logs/bot.log` |
 | `LOG_MAX_BYTES` | Logging | Maximum log file size before rotation in bytes | `10485760` (10 MB) |
@@ -544,7 +547,7 @@ In accordance with architectural reviews documented in [`docs/LESSONS.md`](docs/
 3. **Status Message Residue during Global Flood**: Under rare circumstances where every Telegram call is throttled at once, a progress status message may remain alongside the failure explanation.
 4. **Binary-Disguised Plain Text Detection**: Text files served as `application/octet-stream` without standard HTML/XML/JSON markup openers will bypass initial body sniffers and reach the download stage before handling.
 5. **External Provider API Drift**: Public extraction endpoints (TikWM, musicaldown, ytmp3) operate without formal SLAs and may alter response schemas, triggering fallback to local `yt-dlp`.
-6. **HLS Support Is Finite-VOD Only**: A `.m3u8` link, an HLS MIME type, or a buffered `#EXTM3U` body is detected and routed through a dedicated guarded fetch + local `ffmpeg` remux before any destination file is opened - but only a finite media playlist (one carrying `EXT-X-ENDLIST`) with clear (unencrypted) segments is downloaded. A live playlist (no `EXT-X-ENDLIST`) or any encrypted/DRM-protected stream (SAMPLE-AES, AES-128, FairPlay/Widevine/PlayReady) is rejected with a classified Hebrew message and no retry button; it is never downloaded.
+6. **HLS Uses a Bounded Snapshot**: A `.m3u8` link, an HLS MIME type, or a buffered `#EXTM3U` body is detected and routed through guarded fetches and local `ffmpeg` remuxing. Finite playlists keep the VOD path. A live playlist downloads only the window published in one snapshot, followed by one tail refresh; it does not record or poll continuously. Encrypted or DRM-protected streams remain unsupported.
 
 ---
 

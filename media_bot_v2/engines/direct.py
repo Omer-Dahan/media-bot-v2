@@ -100,19 +100,37 @@ _HLS_KIND_TEXT: dict[str, str] = {
     "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
     "sample_aes_unsupported": texts.HLS_DRM_UNSUPPORTED,
     "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "window_expired": texts.HLS_WINDOW_EXPIRED,
+    "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
 }
 
 
-def _download_hls(url: str, dest_dir: Path, max_size: int | None, cancel_token: CancellationToken | None) -> DownloadResult:
+def _download_hls(
+    url: str,
+    dest_dir: Path,
+    max_size: int | None,
+    cancel_token: CancellationToken | None,
+    segment_workers: int = 8,
+    max_gap_ratio: float = 0.02,
+) -> DownloadResult:
     """Runs the guarded HLS fetch/remux and translates its internal
     kind/debug-message classification into the Hebrew text the user sees,
     while keeping HlsUnsupportedError's UnsupportedUrlError ancestry so
     pipeline.py/retry.py's existing hopeless-classification keeps working."""
     try:
-        return download_hls(url, dest_dir, max_size=max_size, cancel_token=cancel_token)
+        return download_hls(
+            url,
+            dest_dir,
+            max_size=max_size,
+            cancel_token=cancel_token,
+            segment_workers=segment_workers,
+            max_gap_ratio=max_gap_ratio,
+        )
     except HlsUnsupportedError as exc:
         logger.warning("HLS input unsupported (%s) for %s: %s", exc.kind, url, exc)
-        raise _mark_logged(HlsUnsupportedError(exc.kind, _HLS_KIND_TEXT.get(exc.kind, texts.UNSUPPORTED_URL))) from exc
+        raise _mark_logged(
+            HlsUnsupportedError(exc.kind, _HLS_KIND_TEXT.get(exc.kind, texts.UNSUPPORTED_URL))
+        ) from exc
     except HlsDownloadError as exc:
         logger.warning("HLS transient download failure for %s: %s", url, exc)
         raise _mark_logged(HlsDownloadError(texts.DOWNLOAD_FAILED)) from exc
@@ -182,9 +200,18 @@ class DirectEngine(BaseEngine):
     name: str = "direct"
     supported_platforms: tuple[str, ...] = ("direct",)
 
-    def __init__(self, *, max_download_size: int | None = None, progress=None) -> None:
+    def __init__(
+        self,
+        *,
+        max_download_size: int | None = None,
+        progress=None,
+        hls_segment_workers: int = 8,
+        hls_max_gap_ratio: float = 0.02,
+    ) -> None:
         self._max_download_size = max_download_size
         self._progress = progress
+        self._hls_segment_workers = hls_segment_workers
+        self._hls_max_gap_ratio = hls_max_gap_ratio
 
     def matches(self, url: str) -> bool:
         if not _URL_RE.match(url):
@@ -217,6 +244,8 @@ class DirectEngine(BaseEngine):
                 cancel_token,
                 self._progress,
                 loop,
+                self._hls_segment_workers,
+                self._hls_max_gap_ratio,
             )
         except SSRFBlockedError as exc:
             logger.warning("Blocked SSRF attempt for %s: %s", url, exc)
@@ -292,6 +321,8 @@ def _preflight_and_stream_to_file(
     cancel_token: CancellationToken | None = None,
     progress=None,
     loop=None,
+    hls_segment_workers: int = 8,
+    hls_max_gap_ratio: float = 0.02,
 ) -> DownloadResult:
     head_content_type: str | None = None
     try:
@@ -309,9 +340,20 @@ def _preflight_and_stream_to_file(
     # Path extension or HEAD Content-Type already says HLS: go straight to
     # the HLS module without ever opening a direct-download destination file.
     if detect_hls(url, content_type=head_content_type):
-        return _download_hls(url, dest_dir, max_size, cancel_token)
+        return _download_hls(
+            url, dest_dir, max_size, cancel_token, hls_segment_workers, hls_max_gap_ratio
+        )
 
-    return _stream_to_file(url, dest_dir, max_size, cancel_token, progress, loop)
+    return _stream_to_file(
+        url,
+        dest_dir,
+        max_size,
+        cancel_token,
+        progress,
+        loop,
+        hls_segment_workers,
+        hls_max_gap_ratio,
+    )
 
 
 def _stream_to_file(
@@ -321,6 +363,8 @@ def _stream_to_file(
     cancel_token: CancellationToken | None = None,
     progress=None,
     loop=None,
+    hls_segment_workers: int = 8,
+    hls_max_gap_ratio: float = 0.02,
 ) -> DownloadResult:
     with safe_request("GET", url, stream=True, timeout=_REQUEST_TIMEOUT) as response:
         response.raise_for_status()
@@ -328,7 +372,9 @@ def _stream_to_file(
         # failed outright - re-check before any destination file is opened.
         if detect_hls(url, content_type=response.headers.get("Content-Type")):
             response.close()
-            return _download_hls(url, dest_dir, max_size, cancel_token)
+            return _download_hls(
+                url, dest_dir, max_size, cancel_token, hls_segment_workers, hls_max_gap_ratio
+            )
         reject_if_not_media_content_type(response)
         _reject_if_declared_size_too_large(response, url, max_size)
         # Only decided now, not before the request: a redirect can land on a
@@ -380,7 +426,14 @@ def _stream_to_file(
                         sniffed = True
                         if looks_like_hls_body(head):
                             response.close()
-                            return _download_hls(url, dest_dir, max_size, cancel_token)
+                            return _download_hls(
+                                url,
+                                dest_dir,
+                                max_size,
+                                cancel_token,
+                                hls_segment_workers,
+                                hls_max_gap_ratio,
+                            )
                         reject_if_not_media_body(head)
                         if max_size is not None and total > max_size:
                             raise DownloadTooLargeError(
@@ -418,7 +471,14 @@ def _stream_to_file(
                 # write it now, at end of stream.
                 if looks_like_hls_body(head):
                     response.close()
-                    return _download_hls(url, dest_dir, max_size, cancel_token)
+                    return _download_hls(
+                        url,
+                        dest_dir,
+                        max_size,
+                        cancel_token,
+                        hls_segment_workers,
+                        hls_max_gap_ratio,
+                    )
                 if head:
                     reject_if_not_media_body(head)
                 if max_size is not None and total > max_size:

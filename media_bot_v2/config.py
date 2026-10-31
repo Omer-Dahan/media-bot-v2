@@ -67,7 +67,9 @@ class Settings(BaseSettings):
     error_reports_enabled: bool = Field(default=True, validation_alias="ERROR_REPORTS_ENABLED")
     # `int | str | None`, normalized the same way as archive_channel below -
     # falls back to archive_channel at bootstrap time when left unset.
-    error_report_channel: int | str | None = Field(default=None, validation_alias="ERROR_REPORT_CHANNEL")
+    error_report_channel: int | str | None = Field(
+        default=None, validation_alias="ERROR_REPORT_CHANNEL"
+    )
     # Comma-separated `kind` values to silence (e.g. "not_media,too_large").
     error_report_skip: str = Field(default="", validation_alias="ERROR_REPORT_SKIP")
     error_report_dedup_seconds: float = Field(
@@ -96,7 +98,9 @@ class Settings(BaseSettings):
         digits = text.removeprefix("-")
         if digits.isdigit():
             return int(text)
-        env_name = "ARCHIVE_CHANNEL" if info.field_name == "archive_channel" else "ERROR_REPORT_CHANNEL"
+        env_name = (
+            "ARCHIVE_CHANNEL" if info.field_name == "archive_channel" else "ERROR_REPORT_CHANNEL"
+        )
         raise ValueError(
             f"{env_name}={text!r} אינו בפורמט נתמך. "
             "השתמשו במזהה מספרי של ערוץ/סופרגרופ (למשל -1003534083142) "
@@ -136,8 +140,12 @@ class Settings(BaseSettings):
 
     # --- Providers & Extraction Layer (M3/M6) ---
     tiktok_cookies_file: str | None = Field(default=None, validation_alias="TIKTOK_COOKIES_FILE")
-    instagram_cookies_file: str | None = Field(default=None, validation_alias="INSTAGRAM_COOKIES_FILE")
-    facebook_cookies_file: str | None = Field(default=None, validation_alias="FACEBOOK_COOKIES_FILE")
+    instagram_cookies_file: str | None = Field(
+        default=None, validation_alias="INSTAGRAM_COOKIES_FILE"
+    )
+    facebook_cookies_file: str | None = Field(
+        default=None, validation_alias="FACEBOOK_COOKIES_FILE"
+    )
     tiktok_providers: str = Field(
         default="tikwm,tikdownloader,musicaldown,cobalt",
         validation_alias="TIKTOK_PROVIDERS",
@@ -158,8 +166,12 @@ class Settings(BaseSettings):
     # empty key.
     ytmp3_api_key: str | None = Field(default=None, validation_alias="YTMP3_API_KEY")
     provider_timeout: float = Field(default=15.0, validation_alias="PROVIDER_TIMEOUT")
-    provider_failure_threshold: int = Field(default=3, validation_alias="PROVIDER_FAILURE_THRESHOLD")
-    provider_cooldown_seconds: int = Field(default=300, validation_alias="PROVIDER_COOLDOWN_SECONDS")
+    provider_failure_threshold: int = Field(
+        default=3, validation_alias="PROVIDER_FAILURE_THRESHOLD"
+    )
+    provider_cooldown_seconds: int = Field(
+        default=300, validation_alias="PROVIDER_COOLDOWN_SECONDS"
+    )
 
     # --- Concurrency limits ---
     # NOTE: workers/user_workers gate how many requests may be *in flight*
@@ -181,7 +193,9 @@ class Settings(BaseSettings):
     # which may open up to UPLOAD_CONNECTIONS real TCP connections to
     # Telegram - see media_bot_v2/telegram/parallel_upload.py's module
     # docstring for why this is bounded separately from WORKERS.
-    upload_concurrency_limit: int = Field(default=20, gt=0, validation_alias="UPLOAD_CONCURRENCY_LIMIT")
+    upload_concurrency_limit: int = Field(
+        default=20, gt=0, validation_alias="UPLOAD_CONCURRENCY_LIMIT"
+    )
 
     # --- Request timeout budget ---
     request_timeout: float = Field(default=600.0, validation_alias="REQUEST_TIMEOUT")
@@ -217,6 +231,11 @@ class Settings(BaseSettings):
     # height <= this value, falling back to the lowest variant if none
     # qualify. Matches the router's existing YouTube default (spec/PLAN-M3U8.md).
     hls_max_height: int = Field(default=720, gt=0, validation_alias="HLS_MAX_HEIGHT")
+    hls_segment_workers: int = Field(default=8, ge=1, le=32, validation_alias="HLS_SEGMENT_WORKERS")
+    hls_max_gap_ratio: float = Field(default=0.02, ge=0, le=1, validation_alias="HLS_MAX_GAP_RATIO")
+    hls_window_sample_requests: int = Field(
+        default=6, ge=3, le=10, validation_alias="HLS_WINDOW_SAMPLE_REQUESTS"
+    )
 
     @field_validator("max_download_size")
     @classmethod
@@ -275,7 +294,6 @@ class Settings(BaseSettings):
     @property
     def parsed_error_report_skip(self) -> set[str]:
         return {p.strip().lower() for p in self.error_report_skip.split(",") if p.strip()}
-
 
 
 def load_settings() -> Settings:

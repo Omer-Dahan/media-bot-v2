@@ -21,7 +21,9 @@ FFMPEG = shutil.which("ffmpeg")
 FFPROBE = shutil.which("ffprobe")
 pytestmark = pytest.mark.skipif(not FFMPEG or not FFPROBE, reason="ffmpeg/ffprobe not installed")
 
-MASTER_PLAYLIST = "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=160x120\nvariant/index.m3u8\n"
+MASTER_PLAYLIST = (
+    "#EXTM3U\n#EXT-X-STREAM-INF:BANDWIDTH=500000,RESOLUTION=160x120\nvariant/index.m3u8\n"
+)
 
 MEDIA_PLAYLIST = (
     "#EXTM3U\n"
@@ -34,9 +36,7 @@ MEDIA_PLAYLIST = (
     "#EXT-X-ENDLIST\n"
 )
 
-LIVE_PLAYLIST = (
-    "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.000000,\nseg0.ts\n"
-)
+LIVE_PLAYLIST = "#EXTM3U\n#EXT-X-VERSION:3\n#EXT-X-TARGETDURATION:1\n#EXTINF:1.000000,\nseg0.ts\n"
 
 MALFORMED_PLAYLIST = "not a playlist at all\n"
 
@@ -48,22 +48,53 @@ def ts_segments(tmp_path_factory):
     source = work / "source.ts"
     subprocess.run(
         [
-            FFMPEG, "-y",
-            "-f", "lavfi", "-i", "testsrc=size=160x120:rate=10:duration=2",
-            "-f", "lavfi", "-i", "sine=frequency=440:duration=2",
-            "-c:v", "libx264", "-g", "10", "-keyint_min", "10", "-sc_threshold", "0",
-            "-pix_fmt", "yuv420p", "-c:a", "aac",
-            "-f", "mpegts", str(source),
-            "-loglevel", "error",
+            FFMPEG,
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            "testsrc=size=160x120:rate=10:duration=2",
+            "-f",
+            "lavfi",
+            "-i",
+            "sine=frequency=440:duration=2",
+            "-c:v",
+            "libx264",
+            "-g",
+            "10",
+            "-keyint_min",
+            "10",
+            "-sc_threshold",
+            "0",
+            "-pix_fmt",
+            "yuv420p",
+            "-c:a",
+            "aac",
+            "-f",
+            "mpegts",
+            str(source),
+            "-loglevel",
+            "error",
         ],
         check=True,
     )
     subprocess.run(
         [
-            FFMPEG, "-y", "-i", str(source),
-            "-c", "copy", "-f", "segment", "-segment_time", "1", "-reset_timestamps", "1",
+            FFMPEG,
+            "-y",
+            "-i",
+            str(source),
+            "-c",
+            "copy",
+            "-f",
+            "segment",
+            "-segment_time",
+            "1",
+            "-reset_timestamps",
+            "1",
             str(work / "seg%d.ts"),
-            "-loglevel", "error",
+            "-loglevel",
+            "error",
         ],
         check=True,
     )
@@ -89,8 +120,12 @@ def _make_handler(seg0: bytes, seg1: bytes, request_log: list[str]):
             elif self.path == "/opaque-signature":
                 # No extension, generic content type: only the #EXTM3U body
                 # signature identifies this as HLS.
-                self._text(MEDIA_PLAYLIST.replace("seg0.ts", "/variant/seg0.ts").replace(
-                    "seg1.ts", "/variant/seg1.ts"), "application/octet-stream")
+                self._text(
+                    MEDIA_PLAYLIST.replace("seg0.ts", "/variant/seg0.ts").replace(
+                        "seg1.ts", "/variant/seg1.ts"
+                    ),
+                    "application/octet-stream",
+                )
             else:
                 self.send_response(404)
                 self.end_headers()
@@ -138,15 +173,25 @@ def test_is_hls_path_case_insensitive_ignores_query():
 
 
 def test_detect_extensionless_hls_by_content_type():
-    assert hls.detect_hls("https://example.com/watch", content_type="application/vnd.apple.mpegurl; charset=utf-8")
+    assert hls.detect_hls(
+        "https://example.com/watch", content_type="application/vnd.apple.mpegurl; charset=utf-8"
+    )
     assert hls.detect_hls("https://example.com/watch", content_type="audio/x-mpegurl")
     assert not hls.detect_hls("https://example.com/watch", content_type="application/octet-stream")
 
 
 def test_detect_extensionless_hls_by_body_signature():
-    assert hls.detect_hls("https://example.com/opaque", content_type="application/octet-stream", body_head=b"#EXTM3U\n#EXT-X-VERSION:3\n")
-    assert hls.detect_hls("https://example.com/opaque", content_type=None, body_head=b"\xef\xbb\xbf  \n#EXTM3U\n")
-    assert not hls.detect_hls("https://example.com/opaque", content_type="application/octet-stream", body_head=b"not hls")
+    assert hls.detect_hls(
+        "https://example.com/opaque",
+        content_type="application/octet-stream",
+        body_head=b"#EXTM3U\n#EXT-X-VERSION:3\n",
+    )
+    assert hls.detect_hls(
+        "https://example.com/opaque", content_type=None, body_head=b"\xef\xbb\xbf  \n#EXTM3U\n"
+    )
+    assert not hls.detect_hls(
+        "https://example.com/opaque", content_type="application/octet-stream", body_head=b"not hls"
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -179,7 +224,9 @@ def test_parse_live_playlist_has_no_endlist():
 
 
 def test_parse_attributes_honours_quoted_commas():
-    attrs = hls._parse_attributes('BANDWIDTH=500000,CODECS="avc1.4d001f,mp4a.40.2",RESOLUTION=160x120')
+    attrs = hls._parse_attributes(
+        'BANDWIDTH=500000,CODECS="avc1.4d001f,mp4a.40.2",RESOLUTION=160x120'
+    )
     assert attrs["CODECS"] == "avc1.4d001f,mp4a.40.2"
     assert attrs["RESOLUTION"] == "160x120"
 
@@ -189,7 +236,9 @@ def test_parse_attributes_honours_quoted_commas():
 # ---------------------------------------------------------------------------
 
 
-def test_download_hls_master_and_media_playlist_produces_playable_mp4(local_server, tmp_path, bypass_ssrf_guard):
+def test_download_hls_master_and_media_playlist_produces_playable_mp4(
+    local_server, tmp_path, bypass_ssrf_guard
+):
     base_url, request_log = local_server
     result = hls.download_hls(f"{base_url}/master.m3u8", tmp_path)
 
@@ -198,13 +247,27 @@ def test_download_hls_master_and_media_playlist_produces_playable_mp4(local_serv
     assert output.endswith(".mp4")
 
     probe = subprocess.run(
-        [FFPROBE, "-v", "error", "-show_entries", "format=duration:stream=codec_name,codec_type",
-         "-of", "default=noprint_wrappers=1", output],
-        check=True, capture_output=True, text=True,
+        [
+            FFPROBE,
+            "-v",
+            "error",
+            "-show_entries",
+            "format=duration:stream=codec_name,codec_type",
+            "-of",
+            "default=noprint_wrappers=1",
+            output,
+        ],
+        check=True,
+        capture_output=True,
+        text=True,
     )
     assert "codec_name=h264" in probe.stdout
     assert "codec_name=aac" in probe.stdout
-    duration = float(next(line.split("=")[1] for line in probe.stdout.splitlines() if line.startswith("duration=")))
+    duration = float(
+        next(
+            line.split("=")[1] for line in probe.stdout.splitlines() if line.startswith("duration=")
+        )
+    )
     assert 1.5 < duration < 2.5
 
     # Relative segment URIs were resolved against the media playlist's own
@@ -219,7 +282,9 @@ def test_download_hls_master_and_media_playlist_produces_playable_mp4(local_serv
     assert remaining == {output.rsplit("/", 1)[-1]}
 
 
-def test_extensionless_hls_url_is_downloaded_via_signature(local_server, tmp_path, bypass_ssrf_guard):
+def test_extensionless_hls_url_is_downloaded_via_signature(
+    local_server, tmp_path, bypass_ssrf_guard
+):
     base_url, _ = local_server
     result = hls.download_hls(f"{base_url}/opaque-signature", tmp_path)
     assert len(result.file_paths) == 1
@@ -231,11 +296,13 @@ def test_extensionless_hls_url_is_downloaded_via_signature(local_server, tmp_pat
 # ---------------------------------------------------------------------------
 
 
-def test_live_playlist_raises_unsupported_live(local_server, tmp_path, bypass_ssrf_guard):
+def test_live_playlist_with_only_expired_segment_raises_window_expired(
+    local_server, tmp_path, bypass_ssrf_guard
+):
     base_url, _ = local_server
     with pytest.raises(hls.HlsUnsupportedError) as excinfo:
         hls.download_hls(f"{base_url}/live.m3u8", tmp_path)
-    assert excinfo.value.kind == "live"
+    assert excinfo.value.kind == "window_expired"
     assert list(tmp_path.iterdir()) == []
 
 

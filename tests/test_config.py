@@ -6,6 +6,20 @@ from pydantic import ValidationError
 from media_bot_v2.config import Settings
 
 
+def test_hls_window_defaults_and_bounds(monkeypatch):
+    monkeypatch.setenv("APP_ID", "1")
+    monkeypatch.setenv("APP_HASH", "h")
+    monkeypatch.setenv("BOT_TOKEN", "t")
+    settings = Settings(_env_file=None)
+    assert settings.hls_segment_workers == 8
+    assert settings.hls_max_gap_ratio == 0.02
+    assert settings.hls_window_sample_requests == 6
+
+    monkeypatch.setenv("HLS_SEGMENT_WORKERS", "33")
+    with pytest.raises(ValidationError):
+        Settings(_env_file=None)
+
+
 def test_loads_required_telegram_fields(monkeypatch):
     monkeypatch.setenv("APP_ID", "555")
     monkeypatch.setenv("APP_HASH", "abc123")
