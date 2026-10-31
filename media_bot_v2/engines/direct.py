@@ -100,6 +100,7 @@ _HLS_KIND_TEXT: dict[str, str] = {
     "drm_unsupported": texts.HLS_DRM_UNSUPPORTED,
     "sample_aes_unsupported": texts.HLS_DRM_UNSUPPORTED,
     "encryption_unsupported": texts.HLS_DRM_UNSUPPORTED,
+    "https_key_required": texts.HLS_HTTPS_KEY_REQUIRED,
     "window_expired": texts.HLS_WINDOW_EXPIRED,
     "window_too_short": texts.HLS_WINDOW_TOO_SHORT,
 }

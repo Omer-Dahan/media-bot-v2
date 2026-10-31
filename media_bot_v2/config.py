@@ -239,6 +239,13 @@ class Settings(BaseSettings):
     hls_confirm_ttl_seconds: int = Field(
         default=600, ge=60, le=3600, validation_alias="HLS_CONFIRM_TTL_SECONDS"
     )
+    hls_max_playlist_depth: int = Field(
+        default=3, ge=1, validation_alias="HLS_MAX_PLAYLIST_DEPTH"
+    )
+    hls_max_playlist_bytes: int = Field(
+        default=4 * 1024 * 1024, ge=1024, validation_alias="HLS_MAX_PLAYLIST_BYTES"
+    )
+    hls_max_segments: int = Field(default=10_000, ge=1, validation_alias="HLS_MAX_SEGMENTS")
 
     @field_validator("max_download_size")
     @classmethod

@@ -485,6 +485,9 @@ media-bot-v2/
 | `HLS_MAX_GAP_RATIO` | HLS | Maximum missing segment ratio accepted in a live window, from 0 to 1 | `0.02` |
 | `HLS_WINDOW_SAMPLE_REQUESTS` | HLS | Bounded HEAD samples used for the live-window size estimate, from 3 to 10 | `6` |
 | `HLS_CONFIRM_TTL_SECONDS` | HLS | Lifetime of a live-window range picker, from 60 to 3600 seconds | `600` |
+| `HLS_MAX_PLAYLIST_DEPTH` | HLS | Maximum nested playlist hops before refusing the input | `3` |
+| `HLS_MAX_PLAYLIST_BYTES` | HLS | Maximum bytes accepted for one playlist response | `4194304` (4 MiB) |
+| `HLS_MAX_SEGMENTS` | HLS | Maximum media segments accepted in one playlist window | `10000` |
 | `DOWNLOAD_DIR` | Storage | Scratch folder for in-flight downloads (cleaned up after each job) | `downloads` |
 | `LOG_FILE` | Logging | File path for structured JSON logs | `logs/bot.log` |
 | `LOG_MAX_BYTES` | Logging | Maximum log file size before rotation in bytes | `10485760` (10 MB) |
