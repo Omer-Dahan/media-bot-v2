@@ -193,6 +193,12 @@ def main() -> None:
         facebook_cookies_file=settings.facebook_cookies_file,
         error_reporter=error_reporter,
         request_log_max_lines=settings.request_log_max_lines,
+        page_scan_enabled=settings.page_scan_enabled,
+        page_scan_timeout=settings.page_scan_timeout,
+        page_scan_max_bytes=settings.page_scan_max_bytes,
+        page_scan_max_candidates=settings.page_scan_max_candidates,
+        page_scan_ttl_seconds=settings.page_scan_ttl_seconds,
+        page_scan_max_per_hour=settings.page_scan_max_per_hour,
     )
 
     logger.info("Starting media-bot-v2")

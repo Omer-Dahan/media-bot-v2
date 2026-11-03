@@ -242,6 +242,16 @@ HLS_CONFIRM_EXPIRED_TOAST = "פג תוקף בחירת הטווח. שלח את ה
 HLS_CONFIRM_EXPIRED = "⏰ פג תוקף הקישור לשידור החי.\n➡️ שלח את הקישור שוב לבחירת טווח חדש."
 HLS_CONFIRM_CANCELLED = "❌ ההורדה בוטלה."
 
+PAGE_SCAN_SCANNING = "🔍 סורק את הדף ומחפש קבצי מדיה..."
+PAGE_SCAN_HEADER = "🔍 **נמצאו {count} קבצי מדיה בדף**\nבחר מה להוריד:"
+PAGE_SCAN_EXPIRED = "⏰ פג תוקף הבחירה.\n➡️ שלח את הקישור שוב."
+PAGE_SCAN_NOT_OWNER = "❌ הבחירה הזו לא שלך."
+PAGE_SCAN_RATE_LIMITED = "⏳ יותר מדי סריקות בזמן קצר.\n➡️ נסה שוב בעוד כמה דקות."
+PAGE_SCAN_KIND_VIDEO = "וידאו"
+PAGE_SCAN_KIND_AUDIO = "אודיו"
+PAGE_SCAN_KIND_HLS = "סטרים"
+PAGE_SCAN_BUTTON = "{index}. {kind}{quality} · {filename}"
+
 # Single source of truth for an HLS failure `kind`
 # (engines.hls.HlsUnsupportedError.kind) -> the Hebrew text the user sees and
 # whether a retry button is offered. Used by the direct engine, the

@@ -247,6 +247,14 @@ class Settings(BaseSettings):
     )
     hls_max_segments: int = Field(default=10_000, ge=1, validation_alias="HLS_MAX_SEGMENTS")
 
+    # --- Page scan (static HTML media picker, v1) ---
+    page_scan_enabled: bool = Field(default=True, validation_alias="PAGE_SCAN_ENABLED")
+    page_scan_timeout: float = Field(default=15.0, validation_alias="PAGE_SCAN_TIMEOUT")
+    page_scan_max_bytes: int = Field(default=3_145_728, validation_alias="PAGE_SCAN_MAX_BYTES")
+    page_scan_max_candidates: int = Field(default=20, validation_alias="PAGE_SCAN_MAX_CANDIDATES")
+    page_scan_ttl_seconds: int = Field(default=600, validation_alias="PAGE_SCAN_TTL_SECONDS")
+    page_scan_max_per_hour: int = Field(default=20, validation_alias="PAGE_SCAN_MAX_PER_HOUR")
+
     @field_validator("max_download_size")
     @classmethod
     def _max_download_size_at_least_split_threshold(cls, value: int, info: ValidationInfo) -> int:

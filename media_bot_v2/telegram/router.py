@@ -35,6 +35,7 @@ from media_bot_v2.engines.base import (
     BaseEngine,
     CancellationToken,
     DownloadTooLargeError,
+    NotMediaContentError,
     UnsupportedUrlError,
 )
 from media_bot_v2.engines.direct import DirectDownloadError, DirectEngine, classify_http_error
@@ -58,6 +59,7 @@ from media_bot_v2.engines.instagram import (
     extract_instagram_id,
     matches_instagram_url,
 )
+from media_bot_v2.engines.page_scan import MediaCandidate, scan_page
 from media_bot_v2.engines.ssrf_guard import SSRFBlockedError
 from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import (
@@ -82,6 +84,7 @@ from media_bot_v2.telegram.flood_wait import (
     call_with_flood_retry,
     get_flood_wait_seconds,
 )
+from media_bot_v2.telegram.page_menu import build_markup, parse_selection
 from media_bot_v2.telegram.progress import MessageProgressReporter, variant_key_for
 from media_bot_v2.telegram.quality_menu import QualitySelectionStore, build_quality_markup
 from media_bot_v2.telegram.retry import (
@@ -187,6 +190,14 @@ class _PendingHlsConfirmation:
     url: str
     owner_id: int
     analysis: HlsWindowInfo
+    created_at: float
+
+
+@dataclass(frozen=True)
+class _PendingPageScan:
+    url: str
+    owner_id: int
+    candidates: tuple[MediaCandidate, ...]
     created_at: float
 
 
@@ -407,6 +418,12 @@ def register_handlers(
     retry_store: RetryStore | None = None,
     error_reporter: ErrorReporter | None = None,
     request_log_max_lines: int = 300,
+    page_scan_enabled: bool = True,
+    page_scan_timeout: float = 15.0,
+    page_scan_max_bytes: int = 3_145_728,
+    page_scan_max_candidates: int = 20,
+    page_scan_ttl_seconds: int = 600,
+    page_scan_max_per_hour: int = 20,
 ) -> None:
     quality_store = QualitySelectionStore()
     if retry_store is None:
@@ -416,6 +433,8 @@ def register_handlers(
     # handler needs no id encoded into callback_data at all.
     active_cancellations: dict[tuple[int, int], _ActiveRequest] = {}
     pending_hls_confirmations: dict[tuple[int, int], _PendingHlsConfirmation] = {}
+    pending_page_scans: dict[tuple[int, int], _PendingPageScan] = {}
+    page_scan_hits: dict[int, list[float]] = {}
 
     def _sweep_expired_hls_confirmations(*, except_key: tuple[int, int] | None = None) -> None:
         """Nobody presses a confirmation button on most expired entries (the
@@ -434,6 +453,27 @@ def register_handlers(
         ]
         for key in expired:
             pending_hls_confirmations.pop(key, None)
+
+    def _sweep_expired_page_scans(*, except_key: tuple[int, int] | None = None) -> None:
+        now = time.monotonic()
+        expired = [
+            key
+            for key, pending in pending_page_scans.items()
+            if key != except_key and now - pending.created_at > page_scan_ttl_seconds
+        ]
+        for key in expired:
+            pending_page_scans.pop(key, None)
+
+    def _page_scan_allowed(user_id: int) -> bool:
+        now = time.monotonic()
+        hits = [t for t in page_scan_hits.get(user_id, []) if now - t <= 3600]
+        if len(hits) >= page_scan_max_per_hour:
+            page_scan_hits[user_id] = hits[-page_scan_max_per_hour:]
+            return False
+        hits.append(now)
+        page_scan_hits[user_id] = hits[-page_scan_max_per_hour:]
+        return True
+
     direct_engine = DirectEngine(
         max_download_size=max_download_size,
         hls_segment_workers=hls_segment_workers,
@@ -705,6 +745,50 @@ def register_handlers(
                     retry_store.remove((job_chat_id, msg_id))
                 if progress is not None:
                     await _report_quota_error(progress, exc)
+            except NotMediaContentError as exc:
+                if not page_scan_enabled:
+                    if not getattr(progress, "is_terminal_completed", False):
+                        await progress.update(str(exc), is_terminal=True)
+                    _report(exc, str(exc))
+                elif not _page_scan_allowed(job_user_id):
+                    if not getattr(progress, "is_terminal_completed", False):
+                        await progress.update(texts.PAGE_SCAN_RATE_LIMITED, is_terminal=True)
+                else:
+                    await progress.update(texts.PAGE_SCAN_SCANNING, is_terminal=False)
+                    try:
+                        candidates = await run_in_thread(
+                            scan_page,
+                            job_url,
+                            timeout=page_scan_timeout,
+                            max_bytes=page_scan_max_bytes,
+                            max_candidates=page_scan_max_candidates,
+                        )
+                    except SSRFBlockedError:
+                        await progress.update(texts.UNSUPPORTED_URL, is_terminal=True)
+                        candidates = None
+
+                    if candidates is None:
+                        pass
+                    elif not candidates:
+                        await progress.update(str(exc), is_terminal=True)
+                        _report(exc, str(exc))
+                    else:
+                        _sweep_expired_page_scans()
+                        msg_id = getattr(getattr(progress, "_message", message), "id", None)
+                        if msg_id is None:
+                            msg_id = getattr(message, "id", None)
+                        if msg_id is None:
+                            await progress.update(str(exc), is_terminal=True)
+                            _report(exc, str(exc))
+                        else:
+                            pending_page_scans[(job_chat_id, msg_id)] = _PendingPageScan(
+                                job_url, job_user_id, tuple(candidates), time.monotonic()
+                            )
+                            await progress.update(
+                                texts.PAGE_SCAN_HEADER.format(count=len(candidates)),
+                                buttons=build_markup(candidates),
+                                is_terminal=False,
+                            )
             except (
                 YouTubeDownloadError,
                 TikTokDownloadError,
@@ -1013,6 +1097,57 @@ def register_handlers(
             message=message,
             progress=progress,
         )
+
+    @client.on(events.CallbackQuery(pattern=rb"^ps:"))
+    async def page_scan_pick_handler(event: events.CallbackQuery.Event) -> None:
+        index = parse_selection(event.data)
+        if index is None:
+            await _safe_answer_callback(event)
+            return
+
+        key = (event.chat_id, event.message_id)
+        _sweep_expired_page_scans(except_key=key)
+        pending = pending_page_scans.get(key)
+        if pending is None:
+            await _safe_answer_callback(event, texts.PAGE_SCAN_EXPIRED, alert=True)
+            return
+        if pending.owner_id != event.sender_id:
+            await _safe_answer_callback(event, texts.PAGE_SCAN_NOT_OWNER, alert=True)
+            return
+        if time.monotonic() - pending.created_at > page_scan_ttl_seconds:
+            pending_page_scans.pop(key, None)
+            await _safe_answer_callback(event, texts.PAGE_SCAN_EXPIRED, alert=True)
+            return
+        if not (1 <= index <= len(pending.candidates)):
+            pending_page_scans.pop(key, None)
+            await _safe_answer_callback(event, texts.PAGE_SCAN_EXPIRED, alert=True)
+            return
+
+        candidate = pending.candidates[index - 1]
+        pending_page_scans.pop(key, None)
+        await _safe_answer_callback(event)
+
+        with request_log_scope(
+            user_id=event.sender_id, url=candidate.url, platform="direct", max_lines=request_log_max_lines
+        ):
+            message = await call_with_flood_retry(
+                event.edit, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+            )
+            progress = make_progress(
+                message,
+                user_id=event.sender_id,
+                chat_id=event.chat_id,
+                url=candidate.url,
+                platform="direct",
+            )
+            await _execute_download(
+                job_user_id=event.sender_id,
+                job_chat_id=event.chat_id,
+                job_url=candidate.url,
+                job_platform="direct",
+                message=message,
+                progress=progress,
+            )
 
     @client.on(events.CallbackQuery(pattern=rb"^retry(:|$)"))
     async def retry_handler(event: events.CallbackQuery.Event) -> None:
