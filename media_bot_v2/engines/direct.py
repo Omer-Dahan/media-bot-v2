@@ -63,7 +63,6 @@ _KNOWN_PLATFORM_DOMAINS = (
     "fb.watch",
     "fb.me",
     "reddit.com",
-    "redd.it",
 )
 _CHUNK_SIZE = 1024 * 1024
 _REQUEST_TIMEOUT = 30

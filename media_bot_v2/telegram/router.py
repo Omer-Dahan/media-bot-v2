@@ -1420,13 +1420,7 @@ def register_handlers(
                         progress=progress,
                     )
                     return
-                if _host_matches(url, REDDIT_HOSTS):
-                    if not matches_reddit_url(url):
-                        await call_with_flood_retry(
-                            event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
-                        )
-                        return
-
+                if _host_matches(url, REDDIT_HOSTS) and matches_reddit_url(url):
                     message = await call_with_flood_retry(
                         event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
                     )

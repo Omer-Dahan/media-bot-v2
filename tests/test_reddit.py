@@ -12,6 +12,7 @@ import pytest
 
 from media_bot_v2.engines import reddit as reddit_engine
 from media_bot_v2.engines.base import DownloadResult
+from media_bot_v2.engines.direct import DirectEngine
 from media_bot_v2.engines.reddit import (
     REDDIT_HOSTS,
     RedditDownloadError,
@@ -71,6 +72,34 @@ def test_extract_reddit_id(url: str, expected_id: str | None):
 
 def test_reddit_hosts_tuple():
     assert REDDIT_HOSTS == ("reddit.com", "redd.it")
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://v.redd.it/abc123/DASH_720.mp4",
+        "https://i.redd.it/abc123.jpg",
+    ],
+)
+def test_matches_reddit_url_rejects_direct_media(url: str):
+    assert matches_reddit_url(url) is False
+
+
+@pytest.mark.parametrize(
+    "url",
+    [
+        "https://v.redd.it/abc123/DASH_720.mp4",
+        "https://i.redd.it/abc123.jpg",
+    ],
+)
+def test_direct_engine_matches_reddit_media_urls(url: str):
+    engine = DirectEngine(max_download_size=4 * 1024 * 1024 * 1024)
+    assert engine.matches(url) is True
+
+
+def test_matches_reddit_url_post_url_still_true():
+    assert matches_reddit_url("https://www.reddit.com/r/videos/comments/abc123/slug/") is True
+    assert matches_reddit_url("https://redd.it/abc123") is True
 
 
 # --- helpers ---

@@ -2,6 +2,10 @@
 crossposts) only - image galleries, image posts, and links to other
 platforms are out of scope and raise `texts.REDDIT_NO_VIDEO`.
 
+This engine only handles post URLs (`reddit.com/.../comments/<id>` or bare
+`redd.it/<id>`), per `matches_reddit_url`. Direct media URLs like
+`v.redd.it/<id>/DASH_720.mp4` or `i.redd.it/<id>.jpg` stay on `DirectEngine`.
+
 Anonymous access to Reddit's own JSON/API endpoints is blocked from this
 host (verified 2026-11-04: `old.reddit.com/.../.json` and
 `api.reddit.com/...` both return HTTP 403 from any User-Agent). The OAuth
