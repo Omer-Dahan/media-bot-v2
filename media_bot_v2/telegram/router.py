@@ -60,6 +60,12 @@ from media_bot_v2.engines.instagram import (
     matches_instagram_url,
 )
 from media_bot_v2.engines.page_scan import MediaCandidate, scan_page
+from media_bot_v2.engines.reddit import (
+    RedditDownloadError,
+    RedditEngine,
+    extract_reddit_id,
+    matches_reddit_url,
+)
 from media_bot_v2.engines.ssrf_guard import SSRFBlockedError
 from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import (
@@ -101,6 +107,7 @@ YOUTUBE_HOSTS = ("youtube.com", "youtu.be")
 TIKTOK_HOSTS = ("tiktok.com", "douyin.com")
 INSTAGRAM_HOSTS = ("instagram.com", "instagr.am")
 FACEBOOK_HOSTS = ("facebook.com", "fb.com", "fb.watch", "fb.me")
+REDDIT_HOSTS = ("reddit.com", "redd.it")
 
 # The quality menu waits at most this long for the real title/duration; past
 # it the menu goes out with its placeholders (see fetch_title_duration).
@@ -147,6 +154,8 @@ def _infer_platform(url: str) -> str:
         return "instagram"
     if _host_matches(url, FACEBOOK_HOSTS):
         return "facebook"
+    if _host_matches(url, REDDIT_HOSTS):
+        return "reddit"
     return "direct"
 
 
@@ -415,6 +424,10 @@ def register_handlers(
     tiktok_cookies_file: str | None = None,
     instagram_cookies_file: str | None = None,
     facebook_cookies_file: str | None = None,
+    reddit_client_id: str | None = None,
+    reddit_client_secret: str | None = None,
+    reddit_user_agent: str | None = None,
+    reddit_max_height: int = 720,
     retry_store: RetryStore | None = None,
     error_reporter: ErrorReporter | None = None,
     request_log_max_lines: int = 300,
@@ -672,6 +685,19 @@ def register_handlers(
                     cache_key = compute_cache_key(
                         extract_facebook_id(job_url) or job_url, "facebook", delivery.send_as
                     )
+                elif job_platform == "reddit":
+                    engine = RedditEngine(
+                        max_download_size=max_download_size,
+                        progress=progress,
+                        client_id=reddit_client_id,
+                        client_secret=reddit_client_secret,
+                        user_agent=reddit_user_agent,
+                        max_height=reddit_max_height,
+                        force_ipv4=force_ipv4,
+                    )
+                    cache_key = compute_cache_key(
+                        extract_reddit_id(job_url) or job_url, "reddit", delivery.send_as
+                    )
                 else:  # direct
                     if job_quality and job_quality.startswith("hls-window:"):
                         encoded_range = job_quality.removeprefix("hls-window:")
@@ -794,6 +820,7 @@ def register_handlers(
                 TikTokDownloadError,
                 InstagramDownloadError,
                 FacebookDownloadError,
+                RedditDownloadError,
                 DownloadTooLargeError,
                 UnsupportedUrlError,
                 DirectDownloadError,
@@ -1389,6 +1416,32 @@ def register_handlers(
                         job_chat_id=event.chat_id,
                         job_url=url,
                         job_platform="facebook",
+                        message=message,
+                        progress=progress,
+                    )
+                    return
+                if _host_matches(url, REDDIT_HOSTS):
+                    if not matches_reddit_url(url):
+                        await call_with_flood_retry(
+                            event.respond, texts.resolve(texts.UNSUPPORTED_URL, variant_key_for(event))
+                        )
+                        return
+
+                    message = await call_with_flood_retry(
+                        event.respond, texts.DOWNLOAD_STARTED, buttons=_cancel_markup()
+                    )
+                    progress = make_progress(
+                        message,
+                        user_id=event.sender_id,
+                        chat_id=event.chat_id,
+                        url=url,
+                        platform="reddit",
+                    )
+                    await _execute_download(
+                        job_user_id=event.sender_id,
+                        job_chat_id=event.chat_id,
+                        job_url=url,
+                        job_platform="reddit",
                         message=message,
                         progress=progress,
                     )

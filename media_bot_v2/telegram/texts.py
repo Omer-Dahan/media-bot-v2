@@ -115,6 +115,17 @@ FACEBOOK_UNSUPPORTED_MEDIA = (
 FACEBOOK_NETWORK_ERROR = "❌ שגיאת רשת בהורדה מפייסבוק.\n➡️ נסה שוב בעוד מספר רגעים."
 FACEBOOK_GENERIC_FAILURE = "❌ ההורדה מפייסבוק נכשלה.\n➡️ נסה שוב או שלח קישור אחר."
 
+REDDIT_NOT_CONFIGURED = (
+    "🔴 הורדה מרדיט עדיין לא מופעלת בשרת.\n➡️ צריך להוסיף REDDIT_CLIENT_ID ו-REDDIT_CLIENT_SECRET."
+)
+REDDIT_NO_VIDEO = "📄 הפוסט הזה לא מכיל וידאו. (גלריות ותמונות מרדיט עדיין לא נתמכות)"
+REDDIT_NOT_FOUND = "❌ הפוסט לא נמצא. ייתכן שהוא נמחק או שהקישור שגוי."
+REDDIT_PRIVATE_OR_LOGIN = "🔒 הפוסט הזה פרטי או דורש התחברות, ואין לי גישה אליו."
+REDDIT_RATE_LIMITED = "⏳ רדיט מגבילה בקשות כרגע.\n➡️ נסה שוב בעוד דקה."
+REDDIT_AUTH_FAILED = "❌ הגדרת הגישה לרדיט בשרת שגויה (client id/secret)."
+REDDIT_NETWORK_ERROR = "❌ שגיאת רשת בהורדה מרדיט.\n➡️ נסה שוב בעוד מספר רגעים."
+REDDIT_GENERIC_FAILURE = "❌ ההורדה מרדיט נכשלה.\n➡️ נסה שוב או שלח קישור אחר."
+
 DOWNLOAD_STARTED = "בקשת ההורדה התקבלה..."
 DOWNLOADING = "מוריד..."
 PROCESSING = "מעבד..."

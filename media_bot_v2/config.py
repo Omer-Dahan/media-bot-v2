@@ -146,6 +146,10 @@ class Settings(BaseSettings):
     facebook_cookies_file: str | None = Field(
         default=None, validation_alias="FACEBOOK_COOKIES_FILE"
     )
+    reddit_client_id: str | None = Field(default=None, validation_alias="REDDIT_CLIENT_ID")
+    reddit_client_secret: str | None = Field(default=None, validation_alias="REDDIT_CLIENT_SECRET")
+    reddit_user_agent: str | None = Field(default=None, validation_alias="REDDIT_USER_AGENT")
+    reddit_max_height: int = Field(default=720, gt=0, validation_alias="REDDIT_MAX_HEIGHT")
     tiktok_providers: str = Field(
         default="tikwm,tikdownloader,musicaldown,cobalt",
         validation_alias="TIKTOK_PROVIDERS",
