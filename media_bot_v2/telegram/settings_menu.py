@@ -8,8 +8,11 @@ unit-testable against a real SQLAlchemy session without mocking Telethon.
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
+
 from telethon import Button
 
+from media_bot_v2.credits.service import week_start
 from media_bot_v2.db.models import Setting, User
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.callback_data import encode
@@ -39,6 +42,7 @@ def get_or_create_user(
             bandwidth_used=0,
             total_bandwidth=0,
             is_blocked=0,
+            config={"credits_week": week_start(datetime.now(UTC)).isoformat()},
         )
         session.add(user)
         session.flush()

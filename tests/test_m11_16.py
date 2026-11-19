@@ -32,6 +32,7 @@ import os
 import stat
 import threading
 import zipfile
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import patch
 
@@ -41,7 +42,7 @@ from sqlalchemy.orm import sessionmaker
 
 from media_bot_v2 import preflight
 from media_bot_v2.config import Settings
-from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.credits.service import CreditsService, week_start
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.engines.content_check import extension_for_content_type
@@ -258,14 +259,17 @@ def session_factory():
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     with factory() as session:
-        session.add(User(user_id=1, free=3, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0))
+        session.add(User(
+            user_id=1, free=3, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0,
+            config={"credits_week": week_start(datetime.now(UTC)).isoformat()},
+        ))
         session.commit()
     return factory
 
 
 @pytest.fixture
 def credits_service(session_factory):
-    return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=2_000_000_000)
+    return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=2_000_000_000)
 
 
 async def test_zip_file_is_always_delivered_as_a_document(session_factory, credits_service, tmp_path):

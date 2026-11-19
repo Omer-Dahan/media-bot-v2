@@ -8,6 +8,8 @@ this rewrite are documented in spec/SPEC.md.
 
 from __future__ import annotations
 
+from math import ceil
+
 from pydantic import AliasChoices, Field, ValidationInfo, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -44,8 +46,11 @@ class Settings(BaseSettings):
 
     # --- Credits / VIP ---
     enable_vip: bool = Field(default=False, validation_alias="ENABLE_VIP")
+    # Deprecated. Parsed for compatibility with existing environment files,
+    # but ignored for the free credit grant and bandwidth cap.
     free_download: int = Field(default=3, validation_alias="FREE_DOWNLOAD")
     free_bandwidth: int = Field(default=2_147_483_648, validation_alias="FREE_BANDWIDTH")
+    free_weekly_bytes: int = Field(default=10 * 1024**3, validation_alias="FREE_WEEKLY_BYTES")
     # One credit per this many MB delivered in a request (rounded up, min 1).
     # 200 matches the old bot.
     mb_per_credit: int = Field(default=200, gt=0, validation_alias="MB_PER_CREDIT")
@@ -296,6 +301,10 @@ class Settings(BaseSettings):
                 "running in production. Set SESSION_NAME to something else (default 'v2')."
             )
         return value
+
+    @property
+    def weekly_credits(self) -> int:
+        return ceil(self.free_weekly_bytes / (self.mb_per_credit * 1024 * 1024))
 
     @property
     def owner_ids(self) -> list[int]:

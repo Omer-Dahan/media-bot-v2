@@ -2,6 +2,8 @@
 handlers (src/main.py:903-1000). No Telethon events involved - apply_toggle
 and get_or_create_user are plain functions over a SQLAlchemy session."""
 
+from datetime import UTC, datetime
+
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
@@ -19,24 +21,34 @@ def session():
         yield s
 
 
-def test_get_or_create_user_creates_user_with_free_download_credits(session):
+def test_get_or_create_user_creates_user_with_weekly_credits(session, monkeypatch):
+    class FixedDatetime(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 10, 24, 21, tzinfo=UTC).astimezone(tz)
+
+    monkeypatch.setattr(settings_menu, "datetime", FixedDatetime)
     user = settings_menu.get_or_create_user(
-        session, 1, first_name="Agy", username="agy", free_download=3
+        session, 1, first_name="Agy", username="agy", free_download=52
     )
     session.commit()
-    assert user.free == 3
+    assert user.free == 52
+    assert user.config == {"credits_week": "2026-10-25"}
     assert user.paid == 0
     assert user.settings is not None
     assert user.settings.quality == "high"
 
 
 def test_get_or_create_user_is_idempotent_and_updates_name(session):
-    settings_menu.get_or_create_user(session, 1, first_name="Old", username="old", free_download=3)
+    user = settings_menu.get_or_create_user(session, 1, first_name="Old", username="old", free_download=52)
+    user.free = 3
+    user.config = {"credits_week": "2026-10-18", "keep": True}
     session.commit()
-    user = settings_menu.get_or_create_user(session, 1, first_name="New", username="new", free_download=3)
+    user = settings_menu.get_or_create_user(session, 1, first_name="New", username="new", free_download=52)
     session.commit()
     assert user.first_name == "New"
-    assert user.free == 3  # untouched on second call
+    assert user.free == 3
+    assert user.config == {"credits_week": "2026-10-18", "keep": True}
 
 
 def test_toggle_quality_cycles_high_medium_low_high():

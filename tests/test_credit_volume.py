@@ -1,6 +1,7 @@
 """Volume-based credit model (M4.3): 1 credit per MB_PER_CREDIT MB delivered in
 a request, summed over all delivered parts, rounded up, minimum 1."""
 
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -10,7 +11,7 @@ from telethon import TelegramClient, events
 from telethon.sessions import MemorySession
 
 from media_bot_v2.config import Settings
-from media_bot_v2.credits.service import CreditsService, credits_for_sizes
+from media_bot_v2.credits.service import CreditsService, credits_for_sizes, week_start
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.pipeline import DownloadPipeline
@@ -66,19 +67,41 @@ def test_settings_mb_per_credit_defaults_to_200_and_reads_env(monkeypatch):
         Settings(_env_file=None)
 
 
+def test_settings_weekly_credits_uses_weekly_bytes_and_credit_size(monkeypatch):
+    monkeypatch.delenv("FREE_WEEKLY_BYTES", raising=False)
+    monkeypatch.delenv("MB_PER_CREDIT", raising=False)
+    monkeypatch.setenv("FREE_DOWNLOAD", "3")
+    monkeypatch.setenv("FREE_BANDWIDTH", "2147483648")
+    credentials = {"APP_ID": 1, "APP_HASH": "h", "BOT_TOKEN": "t"}
+    settings = Settings(_env_file=None, **credentials)
+    assert settings.free_weekly_bytes == 10 * 1024**3
+    assert settings.weekly_credits == 52
+    assert settings.free_download == 3
+    assert settings.free_bandwidth == 2147483648
+
+    monkeypatch.setenv("FREE_WEEKLY_BYTES", str(251 * MB))
+    monkeypatch.setenv("MB_PER_CREDIT", "125")
+    settings = Settings(_env_file=None, **credentials)
+    assert settings.free_weekly_bytes == 251 * MB
+    assert settings.weekly_credits == 3
+
+
 @pytest.fixture
 def session_factory():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     with factory() as session:
-        session.add(User(user_id=1, free=10, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0))
+        session.add(User(
+            user_id=1, free=10, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0,
+            config={"credits_week": week_start(datetime.now(UTC)).isoformat()},
+        ))
         session.commit()
     return factory
 
 
 def _credits(session_factory, **kwargs) -> CreditsService:
-    return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=10**12, **kwargs)
+    return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=10**12, **kwargs)
 
 
 def _free(session_factory) -> int:
@@ -267,7 +290,7 @@ class _Event:
 def _settings_router(session_factory, *, enable_vip=True, owner_ids=()):
     client = TelegramClient(MemorySession(), 1, "hash")
     credits = CreditsService(
-        session_factory, enable_vip=enable_vip, owner_ids=list(owner_ids), free_bandwidth=10**12
+        session_factory, enable_vip=enable_vip, owner_ids=list(owner_ids), free_weekly_bytes=10**12
     )
     register_handlers(
         client,

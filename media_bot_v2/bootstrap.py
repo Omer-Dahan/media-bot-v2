@@ -127,7 +127,7 @@ def main() -> None:
         session_factory,
         enable_vip=settings.enable_vip,
         owner_ids=settings.owner_ids,
-        free_bandwidth=settings.free_bandwidth,
+        free_weekly_bytes=settings.free_weekly_bytes,
         mb_per_credit=settings.mb_per_credit,
     )
     pipeline = DownloadPipeline(
@@ -163,7 +163,7 @@ def main() -> None:
         client,
         session_factory=session_factory,
         credits_service=credits_service,
-        free_download=settings.free_download,
+        free_download=settings.weekly_credits,
         pipeline=pipeline,
         archive_channel=settings.archive_channel,
         upload_workers=settings.upload_workers,

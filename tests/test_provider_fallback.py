@@ -3,6 +3,7 @@
 Guaranteed zero network calls - direct media streaming uses a mocked requests.get.
 """
 
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -10,7 +11,7 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.credits.service import CreditsService, week_start
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.tiktok import TikTokDownloadError, TikTokEngine
 from media_bot_v2.engines.youtube import YouTubeDownloadError, YouTubeEngine
@@ -75,10 +76,13 @@ def _setup_db_and_services():
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
     with session_factory() as session:
-        session.add(User(user_id=1, free=5, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0))
+        session.add(User(
+            user_id=1, free=5, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0,
+            config={"credits_week": week_start(datetime.now(UTC)).isoformat()},
+        ))
         session.commit()
 
-    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=10_000_000)
+    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=10_000_000)
     health_tracker = ProviderHealthTracker(session_factory, failure_threshold=2, cooldown_seconds=300)
     return session_factory, credits_service, health_tracker
 

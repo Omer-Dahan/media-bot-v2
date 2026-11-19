@@ -117,7 +117,7 @@ def _setup(
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
-    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=1)
+    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=1)
 
     register_handlers(
         client,

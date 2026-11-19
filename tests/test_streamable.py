@@ -12,6 +12,7 @@ from __future__ import annotations
 import json
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -19,7 +20,7 @@ from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 from telethon.tl.types import DocumentAttributeVideo
 
-from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.credits.service import CreditsService, week_start
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.engines.youtube import build_format_selector
@@ -260,9 +261,12 @@ def credits_service():
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     with factory() as session:
-        session.add(User(user_id=1, free=50, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0))
+        session.add(User(
+            user_id=1, free=50, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0,
+            config={"credits_week": week_start(datetime.now(UTC)).isoformat()},
+        ))
         session.commit()
-    return CreditsService(factory, enable_vip=True, owner_ids=[], free_bandwidth=10**12)
+    return CreditsService(factory, enable_vip=True, owner_ids=[], free_weekly_bytes=10**12)
 
 
 async def _deliver(credits_service, tmp_path, source: Path, delivery: DeliveryOptions | None = None):

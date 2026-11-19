@@ -121,7 +121,7 @@ def _make_router(pipeline, **kwargs):
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     sessions = sessionmaker(bind=engine)
-    credits = CreditsService(sessions, enable_vip=False, owner_ids=[], free_bandwidth=1)
+    credits = CreditsService(sessions, enable_vip=False, owner_ids=[], free_weekly_bytes=1)
     register_handlers(
         client,
         session_factory=sessions,

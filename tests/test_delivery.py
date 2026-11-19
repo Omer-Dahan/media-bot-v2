@@ -14,6 +14,7 @@ import base64
 import hashlib
 import shutil
 import subprocess
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -23,7 +24,7 @@ from telethon.errors import MediaInvalidError, RPCError
 from telethon.tl.types import DocumentAttributeAudio, DocumentAttributeVideo
 
 from media_bot_v2.cache.video_cache import CachedItem, VideoCacheStore, compute_cache_key
-from media_bot_v2.credits.service import CreditsService
+from media_bot_v2.credits.service import CreditsService, week_start
 from media_bot_v2.db.models import Base, User
 from media_bot_v2.engines.base import BaseEngine, DownloadResult
 from media_bot_v2.pipeline import DownloadPipeline
@@ -80,14 +81,17 @@ def session_factory():
     Base.metadata.create_all(engine)
     factory = sessionmaker(bind=engine)
     with factory() as session:
-        session.add(User(user_id=USER_CHAT, free=50, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0))
+        session.add(User(
+            user_id=USER_CHAT, free=50, paid=0, bandwidth_used=0, total_bandwidth=0, is_blocked=0,
+            config={"credits_week": week_start(datetime.now(UTC)).isoformat()},
+        ))
         session.commit()
     return factory
 
 
 @pytest.fixture
 def credits_service(session_factory):
-    return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=10**12)
+    return CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=10**12)
 
 
 @pytest.fixture

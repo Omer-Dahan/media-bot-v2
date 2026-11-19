@@ -31,7 +31,7 @@ def test_register_handlers_attaches_handlers_without_connecting():
     engine = create_engine("sqlite:///:memory:")
     Base.metadata.create_all(engine)
     session_factory = sessionmaker(bind=engine)
-    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=1)
+    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=1)
     pipeline = DownloadPipeline(credits_service=credits_service, download_dir=Path("/tmp/media-bot-v2-test"))
 
     register_handlers(
@@ -100,7 +100,7 @@ async def test_url_handler_creates_user_before_running_pipeline():
     # free_download=0 so the freshly created user has zero credits: if
     # get_or_create_user ran, check_quota raises immediately (before ever
     # touching the network) instead of silently allowing the download.
-    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_bandwidth=1)
+    credits_service = CreditsService(session_factory, enable_vip=True, owner_ids=[], free_weekly_bytes=1)
     pipeline = DownloadPipeline(credits_service=credits_service, download_dir=Path("/tmp/media-bot-v2-test"))
 
     register_handlers(
@@ -200,7 +200,7 @@ def _make_router(
             session_factory,
             enable_vip=enable_vip,
             owner_ids=owner_ids or [],
-            free_bandwidth=1,
+            free_weekly_bytes=1,
         )
     if pipeline is None:
         pipeline = DownloadPipeline(credits_service=credits_service, download_dir=Path("/tmp/media-bot-v2-test"))
