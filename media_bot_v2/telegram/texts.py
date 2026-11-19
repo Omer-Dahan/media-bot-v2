@@ -15,6 +15,7 @@ from __future__ import annotations
 
 import random
 import zlib
+from datetime import datetime
 
 START = """
 🎉 **ברוכים הבאים לבוט הורדות המדיה!**
@@ -141,7 +142,27 @@ CONTACT_URL = "https://t.me/YD_IL"
 CONTACT_BUTTON = "לצ'אט איתי 💬"
 CREDITS_BUTTON = "💬 לרכישת קרדיטים"
 CREDITS_EXHAUSTED = "❌ נגמרו הקרדיטים שלך.\n➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
-BANDWIDTH_EXHAUSTED = "❌ הגעת למגבלת 2GB היומית למשתמשים ללא מנוי.\n➡️ לרכישת חבילה ללא הגבלה צרו קשר בכפתור למטה 👇"
+CREDITS_EXHAUSTED_WEEKLY = (
+    "❌ נגמרו הקרדיטים שלך.\n"
+    "📊 ניצלת {used} מתוך {quota} השבוע.\n"
+    "🔄 המכסה תתחדש ביום ראשון, {date}, בשעה 00:00.\n"
+    "➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
+)
+BANDWIDTH_EXHAUSTED = "❌ הגעת למגבלת 10GB השבועית למשתמשים ללא מנוי.\n➡️ לרכישת חבילה ללא הגבלה צרו קשר בכפתור למטה 👇"
+
+
+def format_gb(n_bytes: int) -> str:
+    amount = f"{n_bytes / 1024**3:.1f}".removesuffix(".0")
+    return f"{amount}GB"
+
+
+def format_credits_exhausted(*, used_bytes: int, quota_bytes: int, next_reset_at: datetime) -> str:
+    return CREDITS_EXHAUSTED_WEEKLY.format(
+        used=format_gb(used_bytes),
+        quota=format_gb(quota_bytes),
+        date=next_reset_at.strftime("%d.%m.%Y"),
+    )
+
 
 QUALITY_NAMES = {
     "1080": "1080p HD",

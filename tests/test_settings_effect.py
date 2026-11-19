@@ -8,7 +8,9 @@ handlers pass to the pipeline / say to the user."""
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime
 from unittest.mock import AsyncMock
+from zoneinfo import ZoneInfo
 
 import pytest
 from sqlalchemy import create_engine
@@ -16,7 +18,7 @@ from sqlalchemy.orm import sessionmaker
 from telethon import events
 
 from media_bot_v2.cache.video_cache import compute_cache_key
-from media_bot_v2.credits.exceptions import BandwidthExhaustedException
+from media_bot_v2.credits.exceptions import BandwidthExhaustedException, CreditsExhaustedException
 from media_bot_v2.db.models import Base
 from media_bot_v2.engines.youtube import YouTubeEngine, _result_from_info
 from media_bot_v2.telegram import settings_menu, texts
@@ -199,15 +201,25 @@ async def test_picking_audio_uses_the_audio_wording(session_factory):
 
 
 async def test_out_of_credits_message_carries_the_contact_button(session_factory):
-    client = _make_router(pipeline=AsyncMock(), session_factory=session_factory, free_download=0)
-    menu = _QualityEvent("https://www.youtube.com/playlist?list=PLx", 1)
-    await _find_url_handler(client)(menu)
-    cb = _FakeCallbackEvent(menu.buttons[0][0].type.data, sender_id=1)
+    pipeline = AsyncMock()
+    pipeline.run.side_effect = CreditsExhaustedException(
+        "Quota exhausted",
+        used_bytes=3_650_722_201,
+        quota_bytes=10 * 1024**3,
+        next_reset_at=datetime(2026, 11, 22, tzinfo=ZoneInfo("Asia/Jerusalem")),
+    )
+    client = _make_router(pipeline=pipeline, session_factory=session_factory)
+    event = _FakeEvent("http://files.example.org/data.bin", 1)
 
-    await _find_ytq_handler(client)(cb)
+    await _find_url_handler(client)(event)
 
-    message = cb.menu_message
-    assert message.edits[-1] == texts.CREDITS_EXHAUSTED
+    message = event.messages[0]
+    assert message.edits[-1] == (
+        "❌ נגמרו הקרדיטים שלך.\n"
+        "📊 ניצלת 3.4GB מתוך 10GB השבוע.\n"
+        "🔄 המכסה תתחדש ביום ראשון, 22.11.2026, בשעה 00:00.\n"
+        "➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
+    )
     (row,) = message.edit_kwargs[-1]["buttons"]
     assert (row[0].text, row[0].type.url) == ("💬 לרכישת קרדיטים", "https://t.me/YD_IL")
 

@@ -129,6 +129,8 @@ A failed download sends a Hebrew report to `ERROR_REPORT_CHANNEL` (or `ARCHIVE_C
 <td valign="top">
 
 ### 💳 Fair Volume Billing
+Users without paid credits get a weekly allowance of 10 GB (`FREE_WEEKLY_BYTES`), which resets every Sunday at 00:00 Asia/Jerusalem. Users with paid credits are exempt from the weekly cap.
+
 Credits deduct strictly by delivered volume (`max(1, ceil(MB / MB_PER_CREDIT))`) **after** successful upload. On a partial delivery (e.g. a multi-part split where only some parts land) only the parts actually delivered are charged; if nothing was delivered, there is no charge.
 
 </td>
@@ -478,8 +480,9 @@ media-bot-v2/
 | `FLOOD_SLEEP_THRESHOLD` | Telegram | Internal Telethon flood sleep threshold in seconds (`0` bubbles errors to custom lane logic) | `0` |
 | `DB_DSN` | Database | SQLAlchemy database connection string (MySQL in prod, SQLite for local dev) | `sqlite:///database.sqlite3` |
 | `ENABLE_VIP` | Billing | Enable VIP/credit enforcement system | `false` |
-| `FREE_DOWNLOAD` | Billing | Daily free download quota count | `3` |
-| `FREE_BANDWIDTH` | Billing | Daily free bandwidth quota in bytes | `2147483648` (2 GB) |
+| `FREE_WEEKLY_BYTES` | Billing | Weekly allowance in bytes for users without paid credits | `10737418240` (10 GB) |
+| `FREE_DOWNLOAD` | Billing | Deprecated, ignored | `3` |
+| `FREE_BANDWIDTH` | Billing | Deprecated, ignored | `2147483648` |
 | `MB_PER_CREDIT` | Billing | Delivered megabytes charged per 1 credit (`max(1, ceil(MB / MB_PER_CREDIT))`) | `200` |
 | `ARCHIVE_CHANNEL` | Storage | Archive channel ID (`-100...` numeric) or `@username` (numeric strings auto-normalized) | `None` |
 | `ERROR_REPORTS_ENABLED` | Error reports | Kill switch for failure reports to the archive channel | `true` |

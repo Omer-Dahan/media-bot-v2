@@ -18,6 +18,7 @@ from typing import Any
 from urllib.parse import urlparse
 
 import requests
+from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.orm import sessionmaker
 from telethon import Button, TelegramClient, events
 from telethon.errors import MessageNotModifiedError, RPCError
@@ -380,11 +381,30 @@ async def _safe_answer_callback(
             return
 
 
-async def _report_quota_error(progress: MessageProgressReporter, exc: Exception) -> None:
-    """Out of credits / out of daily bandwidth get the contact button; a
-    blocked user just gets the message."""
+async def _report_quota_error(
+    progress: MessageProgressReporter,
+    exc: Exception,
+    *,
+    user_id: int,
+    credits_service: CreditsService,
+) -> None:
     if isinstance(exc, CreditsExhaustedException):
-        await progress.update(texts.CREDITS_EXHAUSTED, buttons=_contact_buttons(), is_terminal=True)
+        used_bytes, quota_bytes, next_reset_at = exc.used_bytes, exc.quota_bytes, exc.next_reset_at
+        if used_bytes is None or quota_bytes is None or next_reset_at is None:
+            try:
+                status = credits_service.weekly_status(user_id)
+            except SQLAlchemyError:
+                logger.warning("Could not load weekly quota for exhaustion message", exc_info=True)
+            else:
+                if status is not None:
+                    used_bytes, quota_bytes, next_reset_at = status.used_bytes, status.quota_bytes, status.next_reset_at
+
+        message = texts.CREDITS_EXHAUSTED
+        if used_bytes is not None and quota_bytes is not None and next_reset_at is not None:
+            message = texts.format_credits_exhausted(
+                used_bytes=used_bytes, quota_bytes=quota_bytes, next_reset_at=next_reset_at
+            )
+        await progress.update(message, buttons=_contact_buttons(), is_terminal=True)
     elif isinstance(exc, BandwidthExhaustedException):
         await progress.update(str(exc), buttons=_contact_buttons(), is_terminal=True)
     else:
@@ -770,7 +790,9 @@ def register_handlers(
                 if msg_id is not None:
                     retry_store.remove((job_chat_id, msg_id))
                 if progress is not None:
-                    await _report_quota_error(progress, exc)
+                    await _report_quota_error(
+                        progress, exc, user_id=job_user_id, credits_service=credits_service
+                    )
             except NotMediaContentError as exc:
                 if not page_scan_enabled:
                     if not getattr(progress, "is_terminal_completed", False):

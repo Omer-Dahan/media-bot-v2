@@ -4,6 +4,7 @@ without connecting to Telegram. Uses telethon's in-memory session, same
 
 import asyncio
 import logging
+from datetime import UTC, datetime
 from pathlib import Path
 from unittest.mock import AsyncMock
 
@@ -414,7 +415,16 @@ async def test_quality_pick_playlist_owner_with_zero_credits_downloads_unlimited
 
 async def test_quality_pick_playlist_regular_user_zero_credits_shows_error():
     pipeline = AsyncMock()
-    client = _make_router(pipeline=pipeline, enable_vip=True, owner_ids=[999], free_download=0)
+    engine = create_engine("sqlite:///:memory:")
+    Base.metadata.create_all(engine)
+    session_factory = sessionmaker(bind=engine)
+    credits_service = CreditsService(
+        session_factory,
+        enable_vip=True,
+        owner_ids=[],
+        now=lambda: datetime(2026, 11, 19, tzinfo=UTC),
+    )
+    client = _make_router(pipeline=pipeline, session_factory=session_factory, credits_service=credits_service)
     url_handler = _find_url_handler(client)
     ytq_handler = _find_ytq_handler(client)
 
@@ -424,13 +434,27 @@ async def test_quality_pick_playlist_regular_user_zero_credits_shows_error():
     assert url_event.buttons
     button_data = url_event.buttons[0][0].type.data
 
+    with session_factory() as session:
+        user = session.query(User).filter_by(user_id=1).one()
+        user.free = 0
+        user.bandwidth_used = 10 * 1024**3
+        user.config = {**(user.config or {}), "credits_week": "2026-11-15"}
+        session.commit()
+
     cb_event = _FakeCallbackEvent(button_data, sender_id=1)
     await ytq_handler(cb_event)
 
     pipeline.run.assert_not_called()
     assert len(cb_event.messages) == 1
-    # The owner's wording + contact button replaced the bare service message.
-    assert texts.CREDITS_EXHAUSTED in cb_event.messages[0].edits
+    message = cb_event.messages[0]
+    assert message.edits[-1] == (
+        "❌ נגמרו הקרדיטים שלך.\n"
+        "📊 ניצלת 10GB מתוך 10GB השבוע.\n"
+        "🔄 המכסה תתחדש ביום ראשון, 22.11.2026, בשעה 00:00.\n"
+        "➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
+    )
+    ((button,),) = message.edit_kwargs[-1]["buttons"]
+    assert (button.text, button.type.url) == ("💬 לרכישת קרדיטים", "https://t.me/YD_IL")
 
 
 async def test_url_handler_tiktok_link_runs_pipeline_with_tiktok_engine():

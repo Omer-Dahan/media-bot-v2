@@ -39,7 +39,7 @@ HOPELESS_TEXTS = (
     texts.INSTAGRAM_PRIVATE_OR_LOGIN,
     texts.INSTAGRAM_NOT_FOUND,
     texts.INSTAGRAM_UNSUPPORTED_MEDIA,
-    texts.CREDITS_EXHAUSTED,
+    texts.CREDITS_EXHAUSTED.splitlines()[0],
     texts.BANDWIDTH_EXHAUSTED,
     texts.REQUEST_CANCELLED,
     "המשתמש שלך נחסם",

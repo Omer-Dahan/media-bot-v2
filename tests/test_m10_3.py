@@ -1,8 +1,10 @@
 """Tests for M10.3: Progress message flood retry, fallback delivery, long wait explanation, and exposed sites."""
 
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telethon import Button
 from telethon.errors import FloodPremiumWaitError, FloodWaitError, MessageNotModifiedError, RPCError
 
 from media_bot_v2.bootstrap import start_client_with_flood_retry
@@ -90,22 +92,32 @@ async def test_quota_message_with_buttons_flood_wait_retries():
     async def fake_sleep(sec):
         sleeps.append(sec)
 
-    buttons = [["contact_btn"]]
+    buttons = [[Button.url("💬 לרכישת קרדיטים", "https://t.me/YD_IL")]]
+    weekly_exhausted = texts.format_credits_exhausted(
+        used_bytes=10 * 1024**3,
+        quota_bytes=10 * 1024**3,
+        next_reset_at=datetime(2026, 11, 22, tzinfo=UTC),
+    )
     message = MagicMock()
     message.edit = AsyncMock(side_effect=[FloodPremiumWaitError(None, capture=3), None])
 
     reporter = MessageProgressReporter(message, sleep_func=fake_sleep)
-    await reporter.update(texts.CREDITS_EXHAUSTED, buttons=buttons)
+    await reporter.update(weekly_exhausted, buttons=buttons)
 
     assert sleeps == [3]
     assert message.edit.call_count == 2
-    message.edit.assert_called_with(texts.CREDITS_EXHAUSTED, buttons=buttons)
-    assert reporter._last_text == texts.CREDITS_EXHAUSTED
+    message.edit.assert_called_with(weekly_exhausted, buttons=buttons)
+    assert reporter._last_text == weekly_exhausted
 
 
 async def test_quota_message_fallback_delivery_on_total_edit_failure():
     """If quota message edit fails, fallback delivers message with buttons and deletes stale."""
-    buttons = [["contact_btn"]]
+    buttons = [[Button.url("💬 לרכישת קרדיטים", "https://t.me/YD_IL")]]
+    weekly_exhausted = texts.format_credits_exhausted(
+        used_bytes=10 * 1024**3,
+        quota_bytes=10 * 1024**3,
+        next_reset_at=datetime(2026, 11, 22, tzinfo=UTC),
+    )
     message = MagicMock()
     message.edit = AsyncMock(side_effect=RPCError(None, message="MESSAGE_NOT_MODIFIED"))
     # Make MessageNotModifiedError not hit (use generic RPCError)
@@ -114,11 +126,11 @@ async def test_quota_message_fallback_delivery_on_total_edit_failure():
     message.delete = AsyncMock()
 
     reporter = MessageProgressReporter(message)
-    await reporter.update(texts.CREDITS_EXHAUSTED, buttons=buttons)
+    await reporter.update(weekly_exhausted, buttons=buttons)
 
-    message.respond.assert_called_once_with(texts.CREDITS_EXHAUSTED, buttons=buttons)
+    message.respond.assert_called_once_with(weekly_exhausted, buttons=buttons)
     message.delete.assert_called_once()
-    assert reporter._last_text == texts.CREDITS_EXHAUSTED
+    assert reporter._last_text == weekly_exhausted
 
 
 # -----------------------------------------------------------------------------

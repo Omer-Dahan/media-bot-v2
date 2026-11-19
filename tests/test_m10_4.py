@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 
 from telethon.errors import FloodWaitError, RPCError
@@ -103,7 +104,18 @@ def test_progress_text_classification_robust():
     assert _is_terminal_text(texts.DOWNLOAD_FAILED)
     assert _is_terminal_text(texts.FLOOD_WAIT_FAILED)
     assert _is_terminal_text(texts.REQUEST_TIMEOUT_EXCEEDED)
-    assert _is_terminal_text(texts.CREDITS_EXHAUSTED)
+    weekly_exhausted = texts.format_credits_exhausted(
+        used_bytes=10 * 1024**3,
+        quota_bytes=10 * 1024**3,
+        next_reset_at=datetime(2026, 11, 22, tzinfo=UTC),
+    )
+    assert weekly_exhausted == (
+        "❌ נגמרו הקרדיטים שלך.\n"
+        "📊 ניצלת 10GB מתוך 10GB השבוע.\n"
+        "🔄 המכסה תתחדש ביום ראשון, 22.11.2026, בשעה 00:00.\n"
+        "➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
+    )
+    assert _is_terminal_text(weekly_exhausted)
     assert _is_terminal_text(texts.BANDWIDTH_EXHAUSTED)
     assert _is_terminal_text(texts.UNSUPPORTED_URL)
     assert _is_terminal_text("❌ שגיאה כללית")

@@ -13,13 +13,15 @@ Production log excerpt that drove this round:
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
+from telethon import Button
 from telethon.errors import EntityBoundsInvalidError, ReplyMarkupInvalidError
 from telethon.extensions import markdown
-from telethon.tl.types import ReplyInlineMarkup
+from telethon.tl.types import KeyboardButtonRow, ReplyInlineMarkup
 
 from media_bot_v2.telegram import texts
 from media_bot_v2.telegram.progress import MessageProgressReporter
@@ -282,7 +284,13 @@ async def test_terminal_fallback_respond_still_forwards_real_buttons():
     """The fix must only strip the *empty* clear-buttons sentinel - real
     buttons (e.g. a "צור קשר" button on a credits-exhausted message) still
     need to reach the fallback new message."""
-    real_buttons = ReplyInlineMarkup([MagicMock()])
+    button = Button.url("💬 לרכישת קרדיטים", "https://t.me/YD_IL")
+    real_buttons = ReplyInlineMarkup([KeyboardButtonRow([button.type])])
+    weekly_exhausted = texts.format_credits_exhausted(
+        used_bytes=10 * 1024**3,
+        quota_bytes=10 * 1024**3,
+        next_reset_at=datetime(2026, 11, 22, tzinfo=UTC),
+    )
     message = MagicMock()
     message.edit = AsyncMock(side_effect=ReplyMarkupInvalidError(None))
     new_message = MagicMock()
@@ -291,6 +299,6 @@ async def test_terminal_fallback_respond_still_forwards_real_buttons():
 
     reporter = MessageProgressReporter(message)
 
-    await reporter.update(texts.CREDITS_EXHAUSTED, buttons=real_buttons)
+    await reporter.update(weekly_exhausted, buttons=real_buttons)
 
-    message.respond.assert_called_once_with(texts.CREDITS_EXHAUSTED, buttons=real_buttons)
+    message.respond.assert_called_once_with(weekly_exhausted, buttons=real_buttons)

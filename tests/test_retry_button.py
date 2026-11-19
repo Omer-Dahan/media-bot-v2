@@ -556,7 +556,14 @@ def test_is_hopeless_failure_comprehensive():
     assert is_hopeless_failure(exc=BandwidthExhaustedException("qux"))
     assert is_hopeless_failure(exc=UserBlockedException("blocked"))
     assert is_hopeless_failure(text=texts.UNSUPPORTED_URL)
-    assert is_hopeless_failure(text=texts.CREDITS_EXHAUSTED)
+    assert is_hopeless_failure(
+        text=(
+            "❌ נגמרו הקרדיטים שלך.\n"
+            "📊 ניצלת 10GB מתוך 10GB השבוע.\n"
+            "🔄 המכסה תתחדש ביום ראשון, 22.11.2026, בשעה 00:00.\n"
+            "➡️ אפשר לרכוש קרדיטים נוספים דרך הכפתור למטה 👇"
+        )
+    )
     assert is_hopeless_failure(text=texts.REQUEST_CANCELLED)
     assert is_hopeless_failure(text="❌ הקובץ גדול מדי (150MB).")
     assert is_hopeless_failure(text="❌ המשתמש שלך נחסם. פנה למנהל.")
